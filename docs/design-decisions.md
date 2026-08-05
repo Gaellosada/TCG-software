@@ -284,5 +284,26 @@ rather than silently patched over:
   reconciled for `normal` returns; a hold-mode option leg therefore requires
   `return_type='normal'`.
 
+**Side effect — survivor concentration.** Renormalizing a dead leg's weight onto
+the survivors **increases their effective exposure** beyond their nominal target:
+a 50/50 book becomes 100% in the survivor after one leg wipes; a 3-leg book
+concentrates into the remaining two. This is the capital-conserving consequence of
+having no cash sleeve, but it means a nominally "diversified" portfolio can silently
+concentrate (and re-leverage the survivors) after a wipe. The reallocation is
+charged as an ordinary rebalance trade (turnover summed over the alive legs at their
+renormalized targets), so slippage/fees on the survivor re-weight are captured; the
+wipe itself (expiry / ruin) is not a trade and is charged nothing.
+
+**Applies beyond options.** Any `w >= 0` leg whose synthetic hits an absorbing 0
+is covered — not just option legs. A `signal` leg wiped by the ruin clamp
+(`signal_exec._compound_clamped`) and a bankrupt long instrument (price 0) are
+treated identically. The marker is bit-exact `== 0.0` (the value the `hold_pnl` /
+`signal_exec` ruin clamps set); a leg that ruins *gradually* toward 0 without a
+single-bar full loss never equals 0.0 and is **not** classified dead (a rarer,
+usually single-leg regime — see the `_dead` scope note in the engine). `COMPUTE_VERSION`
+was bumped `0.1.14 → 0.1.15` so durable-cache entries computed under the old
+re-fund logic are invalidated rather than served stale.
+
 **Locations:** `tcg/engine/metrics.py::_compute_periodic_rebalance`,
-`tcg/core/api/portfolio.py` (rebalance guard).
+`tcg/core/api/portfolio.py` (rebalance guard, `COMPUTE_VERSION`),
+`tcg/engine/hold_pnl.py` / `tcg/engine/signal_exec.py` (the exact-0 ruin clamps).

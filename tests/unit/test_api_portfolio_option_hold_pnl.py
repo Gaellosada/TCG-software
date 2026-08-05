@@ -36,6 +36,7 @@ from tcg.core.api.portfolio import (
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.engine import compute_weighted_portfolio
 from tcg.types.errors import TCGError, ValidationError
+from tcg.types.market import PriceSeries
 
 from _hold_pnl_oracle import (
     DATES_INT as _DATES_INT,
@@ -1135,3 +1136,67 @@ async def test_e2e_total_wipe_response_is_null_clean(wclient):
     assert eq[-1] == pytest.approx(0.0, abs=1e-9)  # fully wiped
     assert all(v == pytest.approx(0.0, abs=1e-9) for v in eq[-4:])  # absorbing 0 tail
     assert _all_floats_finite(j)  # 0/0 return tail nulled, nothing non-finite leaked
+
+
+# ── Mixed leg-type portfolio under PERIODIC rebalance (the real user config) ──
+# An instrument (spot) leg + a hold-mode option leg under monthly rebalancing.
+# This is the production mixed-leg-type periodic path -- it need NOT wipe; the
+# point is that composing a value-tracked instrument leg with a hold-mode option
+# synthetic and running them through ``_compute_periodic_rebalance`` returns a
+# clean, fully finite / null-clean serialized response. The APR->MAY option
+# fixture spans 20240327..20240403, which crosses a month boundary (a monthly
+# rebalance actually fires at 20240401), so the periodic branch is exercised.
+
+
+async def test_e2e_mixed_instrument_and_hold_option_monthly_rebalance(monkeypatch):
+    """A spot instrument leg + a hold-mode option leg under monthly rebalancing
+    compute cleanly (HTTP 200) and the whole serialized response is finite/
+    null-clean -- the real mixed-leg-type periodic user configuration."""
+    monkeypatch.setattr(
+        "tcg.core.api.portfolio.make_signal_fetcher", _fake_make_signal_fetcher
+    )
+    # Instrument leg priced on the SAME grid as the option fixture (_DATES_INT),
+    # so the two legs' date grids overlap. Values are arbitrary/finite (no wipe).
+    n = len(_DATES_INT)
+    spot_close = np.array([100.0, 101.0, 99.0, 102.0, 103.0, 101.0], dtype=np.float64)
+    assert spot_close.shape[0] == n
+    spot_series = PriceSeries(
+        dates=_DATES_INT.astype(np.int64),
+        open=spot_close - 1.0,
+        high=spot_close + 1.0,
+        low=spot_close - 2.0,
+        close=spot_close,
+        volume=np.full(n, 1000.0, dtype=np.float64),
+    )
+    svc = MagicMock()
+    svc.get_aligned_prices = AsyncMock(
+        return_value=(_DATES_INT.astype(np.int64), {"SPX": spot_series})
+    )
+
+    application = FastAPI()
+    application.add_exception_handler(TCGError, tcg_error_handler)
+    application.include_router(portfolio_router)
+    application.state.market_data = svc
+    application.state.app_db_repo = object()
+    transport = ASGITransport(app=application)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        body = {
+            "legs": {
+                "SPX": {"type": "instrument", "collection": "INDEX", "symbol": "SP500"},
+                "P": _hold_put_leg(),
+            },
+            "weights": {"SPX": 60, "P": -40},
+            "rebalance": "monthly",
+            "return_type": "normal",
+            "start": "2024-03-01",
+            "end": "2024-04-30",
+        }
+        resp = await ac.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    j = resp.json()
+    eq = j["portfolio_equity"]
+    assert len(eq) == n
+    assert "SPX" in j["leg_equities"] and "P" in j["leg_equities"]
+    # The whole serialized response is finite / null-clean under the mixed periodic
+    # path -- no NaN/inf leaked past sanitization.
+    assert _all_floats_finite(j)

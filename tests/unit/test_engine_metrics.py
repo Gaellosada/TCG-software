@@ -1138,3 +1138,110 @@ class TestWipedLegNotRefunded:
         assert np.all(np.isfinite(res.portfolio_equity))
         for lbl in ("A", "B"):
             assert np.all(np.isfinite(res.per_leg_equities[lbl]))
+
+    def test_near_zero_leg_is_alive_and_refunded_not_frozen(self):
+        # COVERAGE (exact-0 contract): a ``w >= 0`` leg driven to a tiny but
+        # NON-zero value must be classified ALIVE and re-funded/renormalized at the
+        # boundary -- only the bit-exact absorbing-0 ruin marker is DEAD. A future
+        # refactor of ``_dead`` to a ``< eps`` threshold would FREEZE this leg at
+        # its tiny value and FAIL this test.  Frequency = weekly, whose boundary
+        # falls at bar 5 within this short window (a monthly/quarterly boundary
+        # would not fire in a single-month span, so the exact arithmetic below is
+        # pinned to the weekly boundary).
+        #
+        # Setup (weekly boundary at bar 5; A flat, B collapses to ~5e-14 at bar 1):
+        #   norm_weights = {A: 0.5, B: 0.5}  (abs_total = 1.0)
+        #   init: A = 0.5*100 = 50, B = 50
+        #   bar1: B price 100 -> 1e-13 => r = 1e-13/100 - 1; B *= (1+r) = 1e-13/100
+        #         => B = 50 * 1e-15 = 5e-14  (NON-zero; NOT the absorbing 0 marker)
+        #   bars 2..4: B flat (r=0) -> B stays 5e-14; A stays 50
+        #   bar5 boundary: total = 50 + 5e-14; B alive (5e-14 != 0.0),
+        #                  alive_w = |0.5| + |0.5| = 1.0
+        #                  B re-funded = (0.5/1.0)*total = 0.5*50.00000000000005
+        #                              = 25.0  (NOT frozen at ~5e-14)
+        n = 10
+        dates = _dates_business(n)
+        A = np.full(n, 100.0)
+        B = np.full(n, 1e-13)
+        B[0] = 100.0
+        res = compute_weighted_portfolio(
+            {"A": A, "B": B}, {"A": 0.5, "B": 0.5}, "weekly", "normal", dates
+        )
+        # Pre-boundary the leg really is near-zero (setup drove it there), so the
+        # jump to 25 at the boundary can only be re-funding, not drift.
+        assert 0.0 < res.per_leg_equities["B"][4] < 1e-10
+        # Post-boundary: re-funded to its 50% target share of the surviving book,
+        # NOT frozen at ~5e-14.
+        np.testing.assert_allclose(res.per_leg_equities["B"][5], 25.0, atol=1e-9)
+        assert res.per_leg_equities["B"][5] > 1.0  # unmistakably re-funded
+
+    def test_sole_wiping_leg_hits_all_dead_else_branch(self):
+        # COVERAGE (all-legs-dead else branch): every weighted leg wipes to exactly
+        # 0 (here a single leg). At the boundary total_value == 0 and alive_w == 0,
+        # so the ``total_value > 0 and alive_w > 0`` guard is SKIPPED (0s left in
+        # place) -- the guard is what keeps the ``|w|/alive_w`` division from
+        # dividing by zero. Must return without error, finite, and 0 on/after wipe.
+        # Frequency = weekly (boundary fires at bar 5 in this window, so the else
+        # branch is genuinely exercised; a monthly boundary would not fire here).
+        #
+        # Setup (single leg A, w=1.0; A wipes at bar 3):
+        #   init A = 100; bars 1..2 flat -> 100
+        #   bar3: A price 100 -> 0 => r = -1.0 exactly; A *= (1-1) = 0  (absorbing 0)
+        #   bar4: A price 0/0 -> NaN return -> held flat -> 0
+        #   bar5 boundary: total=0, alive_w=0 -> guard skipped, 0 left; r NaN -> 0
+        n = 10
+        dates = _dates_business(n)
+        A = np.full(n, 100.0)
+        A[3:] = 0.0
+        res = compute_weighted_portfolio(
+            {"A": A}, {"A": 1.0}, "weekly", "normal", dates
+        )
+        eq = res.portfolio_equity
+        assert np.all(np.isfinite(eq))  # no 0/0 inf/NaN leaked
+        np.testing.assert_allclose(eq[:3], 100.0, atol=1e-9)  # alive before wipe
+        np.testing.assert_allclose(eq[3:], 0.0, atol=1e-9)  # 0 on/after wipe
+
+    def test_short_survivor_renormalized_by_absolute_weight(self):
+        # COVERAGE (mixed-sign renormalization): a DEAD long + an alive long + an
+        # alive SHORT. After the wipe the survivors are renormalized using ABSOLUTE
+        # weights (alive_w = |w_long_alive| + |w_short|); the short is NEITHER
+        # frozen NOR dropped.  Frequency = weekly (boundaries at bars 5 and 10 in
+        # this window; a monthly boundary would not fire in a single-month span).
+        #
+        # Setup (weekly boundaries at bars 5 and 10):
+        #   weights {A:+0.5 (dead long), C:+0.3 (alive long), S:-0.2 (alive short)}
+        #   abs_total = 0.5+0.3+0.2 = 1.0 -> norm identical
+        #   init: A=50, C=30, S=20
+        #   bar1: C doubles (100->200) => C=30*2=60; A=50, S=20 (short, flat) ; tot=130
+        #   bar3: A wipes (100->0) => A=0; C=60, S=20 ; total=80
+        #   bar4: A held flat at 0 ; C=60, S=20 ; total=80
+        #   bar5 boundary: dead={A}; alive_w = |0.3| + |-0.2| = 0.5 ; total=80
+        #       C = (0.3/0.5)*80 = 48   (drifted 60 -> renormalized DOWN to 48)
+        #       S = (0.2/0.5)*80 = 32   (SHORT re-funded 20 -> UP to 32; not frozen)
+        #       A stays 0
+        #   flat thereafter -> final A=0, C=48, S=32, portfolio=80
+        #   (Pre-fix re-fund bug would give A=40, C=24, S=16 -- all excluded below.)
+        n = 15
+        dates = _dates_business(n)
+        A = np.full(n, 100.0)
+        A[3:] = 0.0
+        C = np.full(n, 200.0)
+        C[0] = 100.0
+        S = np.full(n, 100.0)
+        res = compute_weighted_portfolio(
+            {"A": A, "C": C, "S": S},
+            {"A": 0.5, "C": 0.3, "S": -0.2},
+            "weekly",
+            "normal",
+            dates,
+        )
+        # Pre-boundary drift state (documents the setup).
+        np.testing.assert_allclose(res.per_leg_equities["C"][4], 60.0, atol=1e-9)
+        np.testing.assert_allclose(res.per_leg_equities["S"][4], 20.0, atol=1e-9)
+        np.testing.assert_allclose(res.portfolio_equity[4], 80.0, atol=1e-9)
+        # Post-boundary renormalization (abs-weight; short un-frozen, not dropped).
+        for i in (5, -1):
+            np.testing.assert_allclose(res.per_leg_equities["A"][i], 0.0, atol=1e-9)
+            np.testing.assert_allclose(res.per_leg_equities["C"][i], 48.0, atol=1e-9)
+            np.testing.assert_allclose(res.per_leg_equities["S"][i], 32.0, atol=1e-9)
+            np.testing.assert_allclose(res.portfolio_equity[i], 80.0, atol=1e-9)
