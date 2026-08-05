@@ -227,6 +227,35 @@ describe('ObjectDetail filter state in the URL', () => {
     expect(screen.getByLabelText(/strike min/i).value).toBe('');
   });
 
+  it('drops an enum value the backend would reject, rather than passing it on', async () => {
+    /*
+     * The backend allowlists all three enums (``_SERIE_TYPE_VALUES`` &c. in
+     * ``tcg/core/api/data_v2.py``), so junk here comes back as a validation
+     * error banner instead of a page. Worse, the panel cannot show it: a
+     * <select> whose value is absent from its options falls back to the first
+     * option, so it would read "Any" while the request carried "<script>".
+     */
+    renderAt('/data-v2?serie_type=%3Cscript%3E&freq=nope&option_type=zzz&expiration=2026-03-13');
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    expect(lastSent()).toMatchObject({
+      expirationMin: '2026-03-13',   // the one usable dimension survives
+      serieType: 'any',
+      freq: 'any',
+      optionType: 'both',
+    });
+    // …and the panel agrees with the request, which is the whole point.
+    expect((await screen.findByLabelText(/series type/i)).value).toBe('any');
+    expect(screen.getByLabelText(/frequency/i).value).toBe('any');
+    expect(screen.getByLabelText(/option type/i).value).toBe('both');
+  });
+
+  it('does not fetch for a URL whose only filters are illegal enum values', async () => {
+    renderAt('/data-v2?serie_type=%3Cscript%3E&freq=nope&option_type=zzz');
+    expect(await screen.findByLabelText(/series type/i)).toBeTruthy();
+    expect(getObjectSeriesV2).not.toHaveBeenCalled();
+    expect(screen.getByText(/press Apply to list/i)).toBeTruthy();
+  });
+
   it('does not fetch for a URL whose only filter is unusable', async () => {
     renderAt('/data-v2?strike_min=abc');
     expect(await screen.findByLabelText(/series type/i)).toBeTruthy();
@@ -336,6 +365,81 @@ describe('ObjectDetail filter state in the URL', () => {
     // Reset look like a no-op, in a new disguise.
     await waitFor(() => expect(screen.getByLabelText(/series type/i).value).toBe('bbba'));
     await waitFor(() => expect(lastSent()).toMatchObject({ serieType: 'bbba' }));
+  });
+
+  it('spends ONE history entry on a typed strike bound, not one per keystroke', async () => {
+    /*
+     * Each keystroke in a number input is a filter change, so it writes the
+     * URL. Pushed, that costs one history entry per character: typing 6260
+     * needed four back presses to undo, and a user who wanted to leave
+     * /data-v2 entirely had to press back past every character they had typed.
+     * "The back button works" was true and still useless.
+     *
+     * So consecutive writes that differ only in the VALUE of a numeric bound
+     * replace the current entry instead of pushing a new one. The first one
+     * still pushes, so the state before the bound existed stays reachable.
+     */
+    renderAt('/data-v2');
+    fireEvent.change(await screen.findByLabelText(/series type/i), {
+      target: { value: 'bbba' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /apply/i }));
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba' }));
+
+    const strike = screen.getByLabelText(/strike min/i);
+    for (const value of ['6', '62', '626', '6260']) {
+      fireEvent.change(strike, { target: { value } });
+    }
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba', strike_min: '6260' }));
+
+    // ONE back press undoes the whole typing episode…
+    fireEvent.click(screen.getByRole('button', { name: /go back in history/i }));
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba' }));
+
+    // …and the next one leaves the filter behind entirely, rather than landing
+    // on a half-typed bound. Three entries total: empty, the type filter, the
+    // strike episode.
+    fireEvent.click(screen.getByRole('button', { name: /go back in history/i }));
+    await waitFor(() => expect(qs()).toEqual({}));
+  });
+
+  it('still pushes when a bound is added or cleared, so it can be undone', async () => {
+    renderAt('/data-v2?serie_type=bbba');
+    const strike = await screen.findByLabelText(/strike min/i);
+    fireEvent.change(strike, { target: { value: '6000' } });
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba', strike_min: '6000' }));
+    // Clearing the field is not "the same filter with another number", so it is
+    // its own entry — otherwise the bound could never be restored by going back.
+    fireEvent.change(strike, { target: { value: '' } });
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba' }));
+    fireEvent.click(screen.getByRole('button', { name: /go back in history/i }));
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba', strike_min: '6000' }));
+  });
+
+  it('never replaces a state the user navigated back to', async () => {
+    /*
+     * The replace rule compares against the last URL WE wrote. After a back
+     * press the current URL is not ours any more, and replacing it would
+     * overwrite the state the user just returned to — one back press would then
+     * skip two states. So an external change forces the next write to push.
+     */
+    renderAt('/data-v2?serie_type=bbba');
+    fireEvent.change(await screen.findByLabelText(/strike min/i), {
+      target: { value: '6000' },
+    });
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba', strike_min: '6000' }));
+
+    fireEvent.click(screen.getByRole('button', { name: /go back in history/i }));
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba' }));
+
+    // Same shape as the write before the back press — but a different history
+    // entry, which must survive.
+    fireEvent.change(await screen.findByLabelText(/strike min/i), {
+      target: { value: '7000' },
+    });
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba', strike_min: '7000' }));
+    fireEvent.click(screen.getByRole('button', { name: /go back in history/i }));
+    await waitFor(() => expect(qs()).toEqual({ serie_type: 'bbba' }));
   });
 
   it('does not remount the panel for its own writes', async () => {

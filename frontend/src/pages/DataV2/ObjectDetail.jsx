@@ -26,6 +26,49 @@ const PAGE_LIMIT = 50;
 const APPLIED_MARKER = 'applied';
 
 /**
+ * The values each enum dimension may take in the URL.
+ *
+ * Source of truth: ``_SERIE_TYPE_VALUES`` / ``_FREQ_VALUES`` /
+ * ``_OPTION_TYPE_VALUES`` in ``tcg/core/api/data_v2.py`` (the backend rejects
+ * anything else with a validation error), mirrored in ``getObjectSeriesV2``'s
+ * docstring.
+ *
+ * A URL is user-editable, so these arrive unvalidated exactly as strike bounds
+ * do. An unknown value must be dropped HERE, at the boundary, because the panel
+ * cannot display it: a ``<select>`` whose value is absent from its options gets
+ * the first option selected by HTML's own reset algorithm, so the panel would
+ * read "Any" while the request carried the junk — the panel lying about the
+ * applied filter, plus an error banner from the backend instead of a page.
+ */
+const URL_ENUMS = Object.freeze({
+  option_type: Object.freeze(['call', 'put', 'both']),
+  serie_type: Object.freeze(['bar', 'value', 'greeks', 'bbba', 'any']),
+  freq: Object.freeze(['1m', 'daily', 'any']),
+});
+
+/** One enum dimension from the URL, or '' when absent or not a legal value. */
+function urlEnum(params, key) {
+  const raw = params.get(key);
+  return raw && URL_ENUMS[key].includes(raw) ? raw : '';
+}
+
+/**
+ * The query string with the numeric bound VALUES blanked out.
+ *
+ * Two writes with the same shape differ only in a strike bound's digits, which
+ * is what a keystroke in a strike input produces — see ``writeParams``, which
+ * replaces the history entry in exactly that case. Adding or removing a bound
+ * changes the shape (the key appears or disappears), so it still pushes.
+ */
+function boundShape(params) {
+  const shape = new URLSearchParams(params);
+  for (const key of ['strike_min', 'strike_max']) {
+    if (shape.has(key)) shape.set(key, '*');
+  }
+  return shape.toString();
+}
+
+/**
  * Heading for the charted series, or ``null`` to mean "the object symbol alone
  * says it" (the caller renders `SYMBOL` rather than `SYMBOL · SYMBOL`).
  *
@@ -129,9 +172,10 @@ function ObjectDetail({ object }) {
     // silently matches nothing). A bad URL must degrade, not crash the tab.
     const strikeMin = parseStrikeBound(searchParams.get('strike_min'));
     const strikeMax = parseStrikeBound(searchParams.get('strike_max'));
-    const optionType = searchParams.get('option_type') || '';
-    const serieType = searchParams.get('serie_type') || '';
-    const freq = searchParams.get('freq') || '';
+    // Same treatment for the enums, and for the same reason — see ``urlEnum``.
+    const optionType = urlEnum(searchParams, 'option_type');
+    const serieType = urlEnum(searchParams, 'serie_type');
+    const freq = urlEnum(searchParams, 'freq');
 
     /*
      * Is a filter applied at all? Any *surviving* filter value says yes, and so
@@ -182,10 +226,18 @@ function ObjectDetail({ object }) {
    */
   const lastWritten = useRef(searchParams.toString());
   const [urlEpoch, setUrlEpoch] = useState(0);
+  /*
+   * Shape of the last query string THIS component wrote, with the numeric bound
+   * values blanked out — see ``writeParams``. ``null`` means "the URL is not
+   * ours any more" (an external change intervened), which forces the next write
+   * to push rather than replace the state the user just navigated to.
+   */
+  const lastWrittenShape = useRef(null);
   useEffect(() => {
     const current = searchParams.toString();
     if (current === lastWritten.current) return;
     lastWritten.current = current;
+    lastWrittenShape.current = null;
     setUrlEpoch((n) => n + 1);
   }, [searchParams]);
 
@@ -227,11 +279,33 @@ function ObjectDetail({ object }) {
       if ([...p.keys()].length === 0) p.set(APPLIED_MARKER, '1');
     }
     if (nextSkip) p.set('skip', String(nextSkip));
-    // Remember what we wrote, so the panel is not remounted by our own write.
+
+    /*
+     * Push or replace?
+     *
+     * A push, normally: each applied filter is a place the back button must be
+     * able to return to. But every keystroke in a strike input is a filter
+     * change, so typing "6260" pushed FOUR entries — four back presses to undo
+     * one bound, and no easy way to press back out of the page at all.
+     *
+     * So a write that differs from our own previous write only in the VALUE of
+     * a numeric bound replaces it: one typing episode costs one entry. Adding
+     * or clearing a bound changes the shape, so it still pushes and stays
+     * undoable, and so does every enum, expiration and page change.
+     * ``lastWrittenShape`` is null when the previous URL was not ours (a
+     * back/forward or an edited address bar), which forces a push so we never
+     * overwrite a state the user has just navigated to.
+     *
+     * (Debouncing the panel's number inputs would also collapse the entries and
+     * additionally save the fetch-per-keystroke, which predates this change.
+     * That belongs in the panel and is left as a follow-up; this keeps the URL
+     * honest without touching the panel's emit timing.)
+     */
+    const shape = boundShape(p);
+    const replace = lastWrittenShape.current === shape;
     lastWritten.current = p.toString();
-    // A push, not a replace: each applied filter is a place the back button
-    // must be able to return to.
-    setSearchParams(p);
+    lastWrittenShape.current = shape;
+    setSearchParams(p, replace ? { replace: true } : undefined);
   }
 
   // A new filter starts from the first page; changing pages must not reset it.

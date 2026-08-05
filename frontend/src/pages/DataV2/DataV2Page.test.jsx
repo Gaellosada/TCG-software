@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useSearchParams } from 'react-router-dom';
 import { renderWithClient } from '../../test/queryWrapper';
+
+/** Exposes the query string, which is where the applied filter lives. */
+function Spy() {
+  const [params] = useSearchParams();
+  return <div data-testid="qs">{params.toString()}</div>;
+}
 
 /**
  * The page needs a Router: ``ObjectDetail`` keeps the applied filter and the
@@ -13,12 +19,18 @@ import { renderWithClient } from '../../test/queryWrapper';
  * Each test gets its own fresh history entry list, so no filter written by one
  * test can leak into the next.
  */
-function renderPage() {
+function renderPage(entry = '/data-v2') {
   return renderWithClient(
-    <MemoryRouter initialEntries={['/data-v2']}>
+    <MemoryRouter initialEntries={[entry]}>
       <DataV2Page />
+      <Spy />
     </MemoryRouter>,
   );
+}
+
+/** The query string as a plain object, so it can be compared exhaustively. */
+function qs() {
+  return Object.fromEntries(new URLSearchParams(screen.getByTestId('qs').textContent));
 }
 
 afterEach(cleanup);
@@ -308,6 +320,63 @@ describe('DataV2Page', () => {
     // Reset re-arms rather than breaking: Apply works again.
     fireEvent.click(screen.getByRole('button', { name: /apply/i }));
     expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+  });
+
+  // ---------------------------------------------------------------------
+  // The filter is in the URL, and the URL outlives a component that is keyed
+  // on the object. These two tests pull in OPPOSITE directions and both are
+  // required: the filter must follow a shared link across the recipient's
+  // first object pick, and must NOT follow ordinary browsing.
+  // ---------------------------------------------------------------------
+
+  it('does not carry an applied filter over to another object', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
+    fireEvent.change(await screen.findByLabelText('Series type'), {
+      target: { value: 'bbba' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /apply/i }));
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    expect(qs()).toEqual({ serie_type: 'bbba' });
+    const callsBefore = vi.mocked(getObjectSeriesV2).mock.calls.length;
+
+    // Switch to a different object.
+    fireEvent.click(screen.getByText('FUT_SP_500'));
+
+    /*
+     * The panel is rebuilt from the NEW object's facets, so a filter left in
+     * the URL is one the panel cannot always display: a <select> whose value is
+     * not among its options falls back to the first one ("Any"), so the panel
+     * would report "no type filter" while ``serie_type=bbba`` was still being
+     * applied to the request. An empty list next to a panel claiming to filter
+     * nothing, with only the address bar telling the truth.
+     */
+    expect(await screen.findByText(/press Apply to list/i)).toBeTruthy();
+    expect(qs()).toEqual({});
+    // The panel is rebuilt from the new object's facets, which arrive after the
+    // prompt renders (the prompt does not wait on /facets).
+    expect((await screen.findByLabelText('Series type')).value).toBe('any');
+    // …and no request was issued for the new object — the gate applies to it
+    // exactly as it did to the first one.
+    const newCalls = vi.mocked(getObjectSeriesV2).mock.calls.slice(callsBefore);
+    expect(newCalls.map(([objectId]) => objectId)).toEqual([]);
+  });
+
+  it("keeps a shared link's filter across the recipient's first object pick", async () => {
+    // The object is deliberately NOT in the URL, so the recipient of a link
+    // has to pick it from the browser list. That pick must not be mistaken for
+    // "the user moved to another object" — it is the link being opened, and
+    // clearing there would make every shared link arrive empty.
+    renderPage('/data-v2?serie_type=bbba');
+    fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
+
+    // No Apply click.
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    expect(qs()).toEqual({ serie_type: 'bbba' });
+    expect(screen.getByLabelText('Series type').value).toBe('bbba');
+    const [objectId, args] = vi.mocked(getObjectSeriesV2).mock.calls[0];
+    expect(objectId).toBe(7);
+    expect(args.serieType).toBe('bbba');
   });
 
   it('shows the object total and the filtered total as different things', async () => {
