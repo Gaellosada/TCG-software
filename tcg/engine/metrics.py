@@ -469,6 +469,11 @@ def _compute_daily_rebalance(
     # frequency. (For both "normal" and "log" the portfolio return is the
     # weighted sum of per-leg returns — the standard approximation for the
     # log basis — so the two cases share one accumulation.)
+    # CAVEAT: this non-divergence guarantee covers NaN/gap hold-flat only. A
+    # leg wiped to an ABSORBING 0 (w>=0) DOES diverge by frequency by design:
+    # daily keeps its weight in a flat 0-return sleeve (below), while periodic
+    # reallocates it to the survivors (see ``_compute_periodic_rebalance``'s
+    # renormalize-to-survivors note). Only "a dead leg stays dead" is common.
     acc = np.zeros(n - 1, dtype=np.float64)
     for lbl in labels:
         w = norm_weights[lbl]
@@ -567,7 +572,10 @@ def _compute_buy_and_hold(
         # ``compute_equity_curve``, so leave it untouched; map every
         # non-finite return at index >= 1 to 0.0 (no return for that bar). This
         # mirrors the daily-rebalance path, which holds a NaN leg-bar flat, so
-        # the SAME inputs don't diverge by rebalance frequency. A zero-price
+        # the SAME inputs don't diverge by rebalance frequency. (This holds for
+        # NaN/gap flats; a leg wiped to an absorbing 0 does diverge — periodic
+        # renormalizes its weight onto survivors, buy-and-hold leaves survivors
+        # on their original capital. See ``_compute_periodic_rebalance``.) A zero-price
         # bar still books its -100% normal return into the prior bar, then the
         # curve holds flat (a position worth 0 stays 0 rather than springing
         # to inf).
@@ -652,7 +660,12 @@ def _compute_periodic_rebalance(
     """Periodic rebalancing: within each period, legs drift independently.
 
     At each rebalance boundary, total portfolio value is redistributed
-    according to target weights.
+    according to target weights. A leg that has hit an absorbing 0 (a wiped
+    ``w >= 0`` leg — a bankrupt long, or an option/signal synthetic clamped to
+    0) is treated as DEAD: it is never re-funded, stays 0, and its target weight
+    is renormalized over the surviving legs (capital-conserving; there is no cash
+    sleeve). This concentrates the survivors' effective exposure beyond their
+    nominal weights. A short leg (w < 0) touching 0 is transient and never dead.
     """
     boundaries = _detect_rebalance_boundaries(dates, rebalance_freq)
 
@@ -686,15 +699,56 @@ def _compute_periodic_rebalance(
         # At a rebalance boundary, redistribute according to target weights
         if boundaries[i]:
             total_value = sum(leg_values.values())
-            if total_value > 0.0:
-                # Turnover = Σ |target_weight − drifted_weight| across legs.
+            # A leg absorbed to exactly 0 is DEAD: its subsequent returns are NaN
+            # (``0/0``) and it can never recover, so re-funding it to ``|w|·total``
+            # here just parks live capital in a corpse (it then sits idle, held
+            # flat on the NaN tail), DRAINING the survivors. Drop dead legs from
+            # the rebalancing universe -- they stay 0, and the target weights are
+            # renormalized over the still-alive legs (capital-conserving; there is
+            # no cash sleeve, so the dead leg's share is reallocated to the
+            # survivors). This holds a wiped leg at 0 under EVERY rebalance
+            # frequency, matching buy-and-hold, rather than resurrecting it only
+            # under periodic rebalancing.
+            #
+            # 0 is absorbing ONLY for a ``w >= 0`` leg: a long instrument that
+            # went bankrupt to price 0, or an option-synthetic leg (fed as
+            # ``|weight|`` -> always w>=0) that decayed / blew up to its 0 floor.
+            # A SHORT leg (w < 0) uses a multiplicative ``*=(1-r)`` update where
+            # landing on 0 is a TRANSIENT artifact (a +100% up-bar); the boundary
+            # re-fund legitimately un-sticks it, exactly as buy-and-hold recovers
+            # it (affine ``2·init - long``), so a short leg is NEVER dead here.
+            # For ordinary healthy legs (none at 0) this whole branch is a no-op:
+            # ``alive_w`` normalizes to 1 and the redistribution reduces to the
+            # original ``|w|·total``, so a no-wipe portfolio is byte-identical.
+            #
+            # SCOPE: the marker is bit-exact ``== 0.0`` — the absorbing state set
+            # by the ruin clamps in ``hold_pnl``/``signal_exec``. A leg that
+            # ruins GRADUALLY toward 0 without a single-bar full loss (e.g. a
+            # long-premium option decaying geometrically to ~1e-174, never
+            # exactly 0) is NOT classified dead and is still re-funded. That is a
+            # rarer regime (usually a single-leg config where the re-fund is a
+            # no-op); unifying it would need a threshold, which we avoid — an
+            # epsilon would misclassify live near-zero legs. Tracked as a known
+            # boundary, not a silent gap.
+            def _dead(lbl: str) -> bool:
+                return norm_weights[lbl] >= 0.0 and leg_values[lbl] == 0.0
+
+            alive_w = sum(
+                abs(norm_weights[lbl]) for lbl in labels if not _dead(lbl)
+            )
+            if total_value > 0.0 and alive_w > 0.0:
+                # Turnover = Σ |target_weight − drifted_weight| across ALIVE legs
+                # (dead legs are not traded -- their target share is 0).
                 est_turn[i] = sum(
-                    abs(abs(norm_weights[lbl]) - leg_values[lbl] / total_value)
+                    abs(abs(norm_weights[lbl]) / alive_w - leg_values[lbl] / total_value)
                     for lbl in labels
+                    if not _dead(lbl)
                 )
-            for lbl in labels:
-                w = norm_weights[lbl]
-                leg_values[lbl] = abs(w) * total_value
+                for lbl in labels:
+                    if _dead(lbl):
+                        continue  # dead leg stays 0 -- never re-funded
+                    leg_values[lbl] = (abs(norm_weights[lbl]) / alive_w) * total_value
+            # else: all legs dead (total 0) -- nothing to redistribute, leave 0s.
 
         # Each leg grows by its own return for this day
         for lbl in labels:

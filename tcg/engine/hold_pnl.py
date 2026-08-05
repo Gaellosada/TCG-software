@@ -279,6 +279,12 @@ def _compound_with_hold(
         # contribs read via ratio[s+1].
         f = 1.0 + net
         if not np.isfinite(f) or f <= 0.0:
+            # Absorbing ruin: the equity_ratio latches to exactly 0.0 here (and
+            # stays 0.0 for all later steps via the ``wiped`` guard above).
+            # CONTRACT: this literal 0.0 is the DEAD-leg marker that
+            # ``metrics._compute_periodic_rebalance`` keys on (== 0.0) to stop
+            # re-funding a wiped leg. Keep it exactly 0.0 — a clamp to an
+            # epsilon would silently break that downstream detection.
             ratio[s + 1] = 0.0
             step_scale[s] = (-1.0 / net) if net != 0.0 else 0.0
             wiped = True

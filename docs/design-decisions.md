@@ -228,3 +228,82 @@ result with no Compute click and no risk of triggering a long compute.
 `frontend/src/pages/Portfolio/computeBodyBuilder.js`,
 `frontend/src/pages/Portfolio/resolvePortfolioRange.js` (`resolveChildRanges`),
 `frontend/src/pages/Portfolio/usePortfolio.js` (auto-display).
+
+## Rebalancing with a wiped leg: renormalize-to-survivors (2026-08)
+
+**The symptom.** A portfolio holding an option leg that decays to zero — a short
+option expiring worthless, or a held contract blown up to its max loss — would
+see that dead leg **come back to life** at the next rebalance boundary. Periodic
+rebalancing re-funds every leg back to its target weight regardless of current
+value, so a leg sitting at 0 got an injection of live capital pulled out of the
+surviving legs, at every subsequent rebalance date, for the rest of the backtest.
+
+**The bug this masked.** The re-fund is not a display glitch — it is a real
+transfer of capital into an instrument that, by construction, can never
+recover (a wiped option has no more premium or intrinsic value to regain). Each
+rebalance boundary siphoned equity out of the still-tradeable legs to top up a
+corpse, so the portfolio's realized drawdown was worse than the strategy the
+user actually specified, and the effect compounded with every rebalance.
+
+**The fix: renormalize to survivors.** A leg whose value hits **exactly 0** is
+now held at 0 for the remainder of the backtest — it is skipped when
+redistributing capital at a rebalance boundary. Its target weight is
+renormalized across the other, still-live legs rather than re-funded. This is
+the correct policy because **the platform models no cash sleeve** — every
+dollar of target weight must live in a tradeable asset, so once one asset is
+provably dead the only capital-conserving destination for its weight is the
+surviving assets. It also brings periodic rebalancing into line with
+buy-and-hold, which already holds a wiped leg at 0 forever (there is no
+rebalance event to re-fund it) — the two modes now agree on the one behaviour
+that is unambiguous: a dead leg stays dead.
+
+**Why `w >= 0`, not "any leg at zero."** Zero is treated as terminal — absorbing
+— only for **long-side legs**, i.e. weight `>= 0`. This includes option legs,
+which are sized on **absolute** weight (so a short option is still "long-side"
+in this test). A **short** leg (weight `< 0`) touching zero is a different
+situation: a short position's mark can transiently print zero intraday or
+between bars without the position being extinguished — it can and does recover.
+Treating that as absorbing would incorrectly freeze a live short at 0. So the
+guard only kills legs on the long/absolute side of the zero boundary, where
+hitting zero is unambiguous and final; it never kills a short.
+
+**Carve-outs.** Two configurations are deliberately excluded from this policy
+rather than silently patched over:
+- **Daily rebalancing with a hold-mode option leg is not supported.** The
+  hold-mode option leg's internal blended-return model uses a different
+  hold-as-cash policy that is not yet unified with the renormalize-to-survivors
+  guard at daily frequency. Rather than apply an inconsistent or unverified
+  policy, the API returns a clear error for this combination. Supported
+  rebalance frequencies with a hold-mode option leg are **weekly, monthly,
+  quarterly, annually, and none**. Unifying the daily path is a deliberate
+  follow-up, not an oversight.
+- `return_type='log'` portfolios are likewise excluded, but for a different
+  reason: under log returns a leg wiped to zero maps to `ln(0) = -inf`, so the
+  engine holds it **flat** (`metrics._compute_buy_and_hold`) instead of dropping
+  it to zero — which overstates equity. The absorbing-zero state is only
+  reconciled for `normal` returns; a hold-mode option leg therefore requires
+  `return_type='normal'`.
+
+**Side effect — survivor concentration.** Renormalizing a dead leg's weight onto
+the survivors **increases their effective exposure** beyond their nominal target:
+a 50/50 book becomes 100% in the survivor after one leg wipes; a 3-leg book
+concentrates into the remaining two. This is the capital-conserving consequence of
+having no cash sleeve, but it means a nominally "diversified" portfolio can silently
+concentrate (and re-leverage the survivors) after a wipe. The reallocation is
+charged as an ordinary rebalance trade (turnover summed over the alive legs at their
+renormalized targets), so slippage/fees on the survivor re-weight are captured; the
+wipe itself (expiry / ruin) is not a trade and is charged nothing.
+
+**Applies beyond options.** Any `w >= 0` leg whose synthetic hits an absorbing 0
+is covered — not just option legs. A `signal` leg wiped by the ruin clamp
+(`signal_exec._compound_clamped`) and a bankrupt long instrument (price 0) are
+treated identically. The marker is bit-exact `== 0.0` (the value the `hold_pnl` /
+`signal_exec` ruin clamps set); a leg that ruins *gradually* toward 0 without a
+single-bar full loss never equals 0.0 and is **not** classified dead (a rarer,
+usually single-leg regime — see the `_dead` scope note in the engine). `COMPUTE_VERSION`
+was bumped `0.1.14 → 0.1.15` so durable-cache entries computed under the old
+re-fund logic are invalidated rather than served stale.
+
+**Locations:** `tcg/engine/metrics.py::_compute_periodic_rebalance`,
+`tcg/core/api/portfolio.py` (rebalance guard, `COMPUTE_VERSION`),
+`tcg/engine/hold_pnl.py` / `tcg/engine/signal_exec.py` (the exact-0 ruin clamps).

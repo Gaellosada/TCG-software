@@ -1570,7 +1570,17 @@ def _get_result_cache() -> DiskResultCache:
 # now opens the segment on the first genuinely-quoted date and re-syncs to the real
 # marks. Any cached curve for a strategy that crossed such a gap is stale (frozen)
 # and MUST be invalidated; gap-free strategies recompute byte-identically.
-COMPUTE_VERSION = "0.1.14"
+#
+# 0.1.14 → 0.1.15: periodic-rebalance wiped-leg fix. ``_compute_periodic_rebalance``
+# no longer re-funds a leg that hit an absorbing 0 (a wiped option OR a wiped
+# ``signal`` leg — both w>=0 synthetics) back to its target weight each boundary;
+# the dead leg stays 0 and its weight renormalizes onto the survivors. This changes
+# the equity for any periodic-rebalanced portfolio containing a leg that wipes to
+# exactly 0. Such a portfolio (notably a wiping signal leg + another leg under
+# weekly/monthly/quarterly/annual rebalance) was UNguarded before and could be
+# cached under the old drain logic — bump invalidates those stale WRONG curves;
+# no-wipe portfolios recompute byte-identically (golden master).
+COMPUTE_VERSION = "0.1.15"
 
 
 def _strip_use_cache(obj: object) -> object:
@@ -1862,26 +1872,34 @@ async def _compute_portfolio_uncached(
         )
 
     # A hold-mode option PRICE leg's synthetic can hit an absorbing 0 (a wiped
-    # short) and then emit NaN returns.  Two SHARED, pre-existing engine behaviours
-    # silently corrupt such a leg, so reject the incompatible knobs at the boundary
-    # rather than emit a misleading curve:
-    #   * rebalance != 'none' re-funds a wiped (0-valued) leg back to its target
-    #     share at each boundary (``metrics._compute_periodic_rebalance``) →
-    #     idle capital drains the surviving legs;
+    # short) and then emit NaN returns.  Two SHARED engine paths used to corrupt
+    # such a leg; guard the ones still incompatible at the boundary rather than
+    # emit a misleading curve:
+    #   * 'daily' rebalance: the blended-return path keeps a wiped leg's target
+    #     weight allocated to a flat 0-return sleeve every bar instead of
+    #     reallocating it to the survivors — a different (hold-as-cash) policy
+    #     from the periodic path, so it is not yet supported here (unifying the
+    #     two is a pending semantic decision).  The PERIODIC paths
+    #     (weekly/monthly/quarterly/annually) are now sound: a wiped (w>=0) leg
+    #     stays 0 and its weight is renormalized onto the surviving legs
+    #     (capital-conserving — no cash sleeve, so the dead leg's share is
+    #     reallocated to the survivors; ``metrics._compute_periodic_rebalance``),
+    #     so they are allowed.
     #   * return_type='log' maps a finite→0 transition to ln(0) = -inf → the leg
     #     is held FLAT (``metrics._compute_buy_and_hold``) instead of going to 0,
     #     overstating equity.
-    # Both are correct for ordinary price legs; only a hold-mode option leg (meant
-    # to be held to expiry — its direction + nav_times live in the synthetic)
-    # breaks them.  Guard here (contained) rather than editing the shared engine.
+    # Both remaining rejections are correct for ordinary price legs too; only a
+    # hold-mode option leg (meant to be held to expiry — its direction + nav_times
+    # live in the synthetic) exercises them.
     has_hold_option_leg = any(
         _is_hold_mode_price_leg(leg) for leg in body.legs.values()
     )
-    if has_hold_option_leg and rebalance_freq != RebalanceFreq.NONE:
+    if has_hold_option_leg and rebalance_freq == RebalanceFreq.DAILY:
         raise ValidationError(
-            "hold-mode option price legs require rebalance='none'; a wiped leg "
-            "would be silently re-funded to its target weight at each rebalance "
-            "boundary, draining the surviving legs"
+            "hold-mode option price legs do not support rebalance='daily'; use a "
+            "periodic frequency (weekly/monthly/quarterly/annually) or 'none'. "
+            "Daily rebalancing would keep a wiped (expired) leg's weight in a flat "
+            "sleeve each bar instead of reallocating it to the surviving legs"
         )
     if has_hold_option_leg and body.return_type == "log":
         raise ValidationError(
