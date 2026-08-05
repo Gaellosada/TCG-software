@@ -115,14 +115,29 @@ function serieTitle(serie) {
  * component state, so the back button works, a filter state is shareable by
  * link, and a reload loses nothing. The SELECTED OBJECT is deliberately not in
  * the URL: it comes from the browser list, which the page loads wholesale in one
- * cheap call, and nothing in the spec asks for it. One consequence, accepted on
- * purpose: because the object is not in the URL, a shared link's filter has to
- * survive the recipient picking the object out of the list — so the filter is
- * NOT cleared when the object changes. Switching object therefore carries the
- * current filter over to the new object (the panel re-seeds from it), and a
- * dimension the new object does not have (a strike bound on an index) is still
- * applied while its control is hidden. Putting the object in the URL is the
- * clean fix if that ever bites.
+ * cheap call, and nothing in the spec asks for it.
+ *
+ * That absence is what makes switching objects subtle, and ``DataV2Page`` (see
+ * ``handleSelect``) is where it is resolved: the params are cleared on a GENUINE
+ * object switch — an object is already selected AND the picked id differs — and
+ * only then. So a link recipient's FIRST pick keeps the shared filter (there is
+ * no previous object, so nothing is being left behind, and clearing would make
+ * every shared link arrive empty), while every later pick clears it, because the
+ * panel is rebuilt from the new object's ``/facets`` and cannot display a
+ * dimension that object lacks: a ``<select>`` whose value is absent from its
+ * options falls back to "Any" by HTML's own reset algorithm, so the panel would
+ * report "no filter" while one was still being applied. BOTH directions are
+ * pinned, by two separate tests in ``DataV2Page.test.jsx`` — "does not carry an
+ * applied filter over to another object" and "keeps a shared link's filter
+ * across the recipient's first object pick". Neither is redundant with the
+ * other: dropping either one un-guards one half of the rule.
+ *
+ * One limitation does genuinely remain, and it is a known follow-up rather than
+ * intended behaviour: the clear is a history PUSH and the object is not in the
+ * URL, so a single back press restores the previous query string while
+ * ``selected`` stays on the NEW object — re-applying the old filter to it (and
+ * re-seeding the panel from it, ``urlEpoch`` having remounted the panel).
+ * Putting the object in the URL is the clean fix if that ever bites.
  */
 function ObjectDetail({ object }) {
   const [tab, setTab] = useState('series');

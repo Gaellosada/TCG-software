@@ -66,9 +66,9 @@ function DataV2Page() {
             <div className={styles.welcomeInner}>
               <h2>Select an object</h2>
               <p>
-                Pick an object from the list on the left to browse its
-                contracts and series, chart an individual series, or build a
-                continuous series (futures &amp; options).
+                Pick an object from the list on the left, apply a filter to list
+                its series, then chart one — or build a continuous series
+                (futures &amp; options).
               </p>
             </div>
           </div>

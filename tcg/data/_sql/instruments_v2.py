@@ -95,8 +95,14 @@ def _bounds(start: date | None, end: date | None) -> tuple[date, date]:
     """Return an inclusive [lower, upper_exclusive) pair of date bounds.
 
     ``upper`` is the day AFTER *end* so the SQL uses ``ts < upper`` and captures
-    an inclusive end date regardless of intraday ts (all v2 ts are 00:00Z today,
-    but this stays correct if intraday facts are ever loaded).
+    an inclusive end date regardless of intraday ts. That is load-bearing, not
+    defensive: v2 DOES hold intraday facts. Only ``daily`` facts are stored at
+    00:00Z; ``1m`` facts carry a real time-of-day, verified live against the
+    warehouse — a FUT_SP_500 minute-bar contract's busiest UTC date holds ~1 400
+    rows with as many distinct times-of-day, and an OPT_SP_500_EW2 ``bbba`` serie
+    71 of 71. See ``test_intraday_facts_carry_a_real_time_of_day_live`` in
+    ``tests/integration/data/test_instruments_v2_integration.py``. Were ``upper``
+    *end* itself, ``ts < end`` would drop every intraday row ON the end date.
     """
     lower = start if start is not None else _MIN_DATE
     end_incl = end if end is not None else _MAX_DATE
