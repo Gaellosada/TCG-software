@@ -426,7 +426,11 @@ def test_shortput_hvolout_builds_runs_and_reproduces(hvolout_run):
 
     cmp = compare(dates, eq, target, section="ShortPutHVOLout [persisted signal]",
                   given_ann_ret_pct=given_ann, given_maxdd_pct=given_maxdd, checksums=checks)
-    verdict = check_band(cmp, DEFAULT_BAND)
+    # SOUND maxDD basis (review nit 1): §5.2's target is a MONTHLY grid only, so
+    # the gated verdict uses the MONTH-END-vs-MONTH-END maxDD ratio (~0.914, in
+    # band), NOT the apples-to-oranges daily-repro-vs-monthly-target ratio (~2.70)
+    # which the default "daily" basis would print as a false FAIL.
+    verdict = check_band(cmp, DEFAULT_BAND, maxdd_basis="monthly")
 
     print("\n" + format_side_by_side(cmp.repro_grid, target,
                                      title="ShortPutHVOLout persisted-signal vs target"))
@@ -438,8 +442,12 @@ def test_shortput_hvolout_builds_runs_and_reproduces(hvolout_run):
           f"equity_log_corr={cmp.equity_log_corr:.4f}")
     print(f"[HVOLout] repro ann_ret={cmp.repro_ann_ret_pct:.3f}% "
           f"(target-derived {given_ann:.3f}%, |Δ|={cmp.ann_ret_abs_diff_pp:.3f}pp)")
-    print(f"[HVOLout] repro maxDD={cmp.repro_maxdd_pct:.3f}% "
-          f"(target-derived {given_maxdd:.3f}% [monthly-granularity], ratio={cmp.maxdd_ratio:.3f})")
+    print(f"[HVOLout] repro maxDD daily={cmp.repro_maxdd_pct:.3f}% "
+          f"(vs monthly-target {given_maxdd:.3f}%, daily-basis ratio={cmp.maxdd_ratio:.3f} "
+          f"[apples-to-oranges])")
+    print(f"[HVOLout] repro maxDD MONTHLY={cmp.repro_maxdd_monthly_pct:.3f}% "
+          f"target MONTHLY={cmp.target_maxdd_monthly_pct:.3f}% "
+          f"monthly-vs-monthly ratio={cmp.maxdd_ratio_monthly:.3f} [SOUND, gated]")
     print(f"[HVOLout] min_equity={cmp.repro_min_equity:.3f} ruin_ok={cmp.ruin_ok}")
     print("[HVOLout] CONFIRMED-BAND verdict (post D-1 lag: monthly_corr ~0.85 "
           "CLEARS the 0.80 bar, equity_corr ~0.9995, ann_ret |Δ| ~0.34pp, "
@@ -457,6 +465,19 @@ def test_shortput_hvolout_builds_runs_and_reproduces(hvolout_run):
     # ``signal_lag_days`` legacy-timing lag 0.709 → ~0.853 — which CLEARS the
     # confirmed 0.80 band. The floor locks in the full gain (margin below 0.853).
     assert cmp.monthly_corr >= 0.82, cmp.monthly_corr
+    # SOUND monthly-vs-monthly maxDD ratio (review nit 1): ~0.914, IN the
+    # [0.70, 1.40] band. This is the 4th band metric — with it §5.2 now gates ALL
+    # FOUR (monthly_corr, equity_corr, ann_ret, maxDD-monthly) + ruin, and the
+    # printed verdict (maxdd_basis="monthly") is a full, honest band PASS.
+    assert cmp.maxdd_ratio_monthly is not None, "monthly maxDD ratio not computed"
+    assert (
+        DEFAULT_BAND.maxdd_ratio_lo
+        <= cmp.maxdd_ratio_monthly
+        <= DEFAULT_BAND.maxdd_ratio_hi
+    ), f"monthly-vs-monthly maxDD ratio {cmp.maxdd_ratio_monthly:.3f} out of band"
+    # Regression lock near the review's offline 0.914 (loose to absorb data drift).
+    assert 0.85 <= cmp.maxdd_ratio_monthly <= 0.98, cmp.maxdd_ratio_monthly
+    assert verdict.passed, verdict.reasons  # full monthly-basis band PASS
 
 
 # --------------------------------------------------------------------------- #
