@@ -294,6 +294,13 @@ class _BlockIn(BaseModel):
     # envelope rather than a Pydantic 422. Absent ⇒ ``"sustained"`` (so stored
     # signals lacking the field hydrate to the byte-identical default).
     fire_mode: Any = None
+    # LEGACY §4.2 "since last ACTUAL exit" reset semantics for a THEN-chain
+    # entry targeted by an exit (entries only; rejected on resets). Absent /
+    # ``False`` ⇒ the historical raw-exit-condition abort (byte-identical);
+    # ``True`` ⇒ the in-flight arm is aborted ONLY when an exit actually closes
+    # an OPEN position of this entry. Typed ``Any`` so a non-bool routes through
+    # ``_parse_blocks``'s guard to the uniform HTTP-400 envelope.
+    reset_on_actual_exit: Any = None
 
 
 class _SignalRulesIn(BaseModel):
@@ -821,6 +828,10 @@ def _parse_blocks(
         rrc = blk.requires_reset_count
         raw_links = blk.links or None
         raw_fire_mode = blk.fire_mode
+        raw_reset_on_actual_exit = blk.reset_on_actual_exit
+        # Validated below (entries/exits only; resets reject). Default False =
+        # historical raw-exit-condition abort.
+        parsed_reset_on_actual_exit: bool = False
         # Validated temporal chain (entries/exits only). Stays None for
         # placeholders and resets (resets reject non-empty links above).
         parsed_links: dict[int, int] | None = None
@@ -887,6 +898,13 @@ def _parse_blocks(
                 if raw_fire_mode is not None:
                     raise SignalValidationError(
                         f"{path}: reset blocks must not set fire_mode"
+                    )
+                # ``reset_on_actual_exit`` selects an ENTRY's exit-driven abort
+                # semantics; it is meaningless on a signal-global reset block.
+                # Reject any explicit value (mirror the fire_mode rejection).
+                if raw_reset_on_actual_exit is not None:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set reset_on_actual_exit"
                     )
             elif is_entry:
                 if has_target:
@@ -1018,6 +1036,19 @@ def _parse_blocks(
                     )
                 parsed_fire_mode = raw_fire_mode
 
+            # ``reset_on_actual_exit`` (entries/exits only — resets reject
+            # above). Absent ⇒ False (byte-identical historical abort). Must be
+            # a genuine bool; any other value is a malformed payload → uniform
+            # HTTP-400 envelope (routed here rather than a Pydantic 422 because
+            # the wire field is typed ``Any``).
+            if raw_reset_on_actual_exit is not None:
+                if not isinstance(raw_reset_on_actual_exit, bool):
+                    raise SignalValidationError(
+                        f"{path}: reset_on_actual_exit must be a boolean "
+                        f"(got {raw_reset_on_actual_exit!r})"
+                    )
+                parsed_reset_on_actual_exit = raw_reset_on_actual_exit
+
         out.append(
             Block(
                 id=bid,
@@ -1032,6 +1063,7 @@ def _parse_blocks(
                 requires_reset_count=int(rrc),
                 links=parsed_links,
                 fire_mode=parsed_fire_mode,  # type: ignore[arg-type]
+                reset_on_actual_exit=parsed_reset_on_actual_exit,
             )
         )
     return tuple(out)

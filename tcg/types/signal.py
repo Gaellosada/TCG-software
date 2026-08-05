@@ -567,6 +567,23 @@ class Block:
     #     silently drop a real fire). "Pulse by default for NEW blocks" is a
     #     FRONTEND UX default; the backend never defaults to pulse.
     fire_mode: Literal["pulse", "sustained"] = "sustained"
+    # Exit-driven reset semantics for a TEMPORAL (THEN-chain) entry that is
+    # TARGETED by an exit (entries only; inert on exits/resets and on non-chain
+    # blocks).
+    #   * ``False`` (default) — HISTORICAL semantics: the exit's ``chain_reset``
+    #     is the RAW OR of the exit condition's firing bars, and it aborts any
+    #     in-flight temporal candidate on EVERY bar the exit CONDITION is true
+    #     (even while the entry holds no open position). Byte-identical to the
+    #     pre-flag engine; stored signals lacking the field hydrate to ``False``.
+    #   * ``True`` — LEGACY §4.2 "since last ACTUAL exit" semantics: the abort
+    #     of the in-flight arm fires ONLY on a bar an exit ACTUALLY closes an
+    #     OPEN position of THIS entry (position-state gated), NOT on every bar
+    #     the exit condition merely evaluates true. This keeps an armed-but-
+    #     unfired candidate alive across a window where the exit condition holds
+    #     while the entry is flat (the HVOL OFF_READY case, SPEC §5.2/§4.2).
+    #     Only meaningful on a THEN-chain entry (``links`` set) with a targeting
+    #     exit; a no-op otherwise.
+    reset_on_actual_exit: bool = False
 
 
 @dataclass(frozen=True)

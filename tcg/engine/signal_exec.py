@@ -1236,6 +1236,67 @@ def _eval_block_activity(
     return active, any_nan
 
 
+def _block_chain_stages(
+    block: Block,
+    indicators: dict[str, IndicatorSpecInput],
+    inputs: dict[str, Input],
+    values_by_key: dict[tuple, npt.NDArray[np.float64]],
+    T: int,
+    cond_reset: npt.NDArray[np.bool_] | None = None,
+) -> (
+    tuple[
+        list[npt.NDArray[np.bool_]],
+        list[npt.NDArray[np.bool_]],
+        list[int],
+        npt.NDArray[np.bool_],
+    ]
+    | None
+):
+    """Build the per-GROUP (stage) ``(stage_truth, stage_nan, windows, any_nan)``
+    for a THEN-chain block WITHOUT running the single-candidate automaton, or
+    return ``None`` for a non-chain (zero-link / single-group) block.
+
+    This is EXACTLY the stage-preparation half of :func:`_eval_block_activity`'s
+    temporal branch, factored out so the automaton can be driven INSIDE the
+    sequential latch loop for a ``Block.reset_on_actual_exit`` entry — where the
+    ``chain_reset`` abort must be gated by live position (latch) state rather
+    than the raw exit-condition array. The non-``reset_on_actual_exit`` path
+    still calls :func:`_eval_block_activity` and is byte-identical.
+
+    ``cond_reset`` is threaded to each condition's :func:`_eval_condition` and is
+    consumed ONLY by a ``since_reset`` cross counter. It is the block's OWN bound
+    reset firing (``_reset_fire_for``) — deliberately NOT OR-ed with the exit
+    ``chain_reset`` (that raw-exit contamination is the very thing the flag
+    removes), so a ``reset_on_actual_exit`` block's counters are unaffected by
+    the exit condition.
+    """
+    groups_windows = _link_groups(block)
+    if groups_windows is None:
+        return None
+    groups, windows = groups_windows
+    cond_truth: list[npt.NDArray[np.bool_]] = []
+    cond_nan: list[npt.NDArray[np.bool_]] = []
+    any_nan = np.zeros(T, dtype=np.bool_)
+    for cond in block.conditions:
+        c_truth, c_nan = _eval_condition(
+            cond, indicators, inputs, values_by_key, T, cond_reset
+        )
+        cond_truth.append(c_truth)
+        cond_nan.append(c_nan)
+        any_nan |= c_nan
+    stage_truth: list[npt.NDArray[np.bool_]] = []
+    stage_nan: list[npt.NDArray[np.bool_]] = []
+    for grp in groups:
+        gt = np.ones(T, dtype=np.bool_)
+        gn = np.zeros(T, dtype=np.bool_)
+        for i in grp:
+            gt = gt & cond_truth[i]
+            gn = gn | cond_nan[i]
+        stage_truth.append(gt)
+        stage_nan.append(gn)
+    return stage_truth, stage_nan, windows, any_nan
+
+
 def _compound_clamped(
     net_step: npt.NDArray[np.float64],
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
@@ -1726,9 +1787,43 @@ async def evaluate_signal(
                     acc = fire if acc is None else (acc | fire)
         entry_chain_reset[entry.id] = acc
 
+    # Entries opting into legacy §4.2 "since last ACTUAL exit" reset semantics
+    # (``Block.reset_on_actual_exit``): a THEN-chain entry that IS targeted by an
+    # exit runs its temporal automaton INSIDE the sequential latch loop, so the
+    # ``chain_reset`` abort can be gated by live position (latch) state instead
+    # of the raw exit-condition array. Such blocks are EXCLUDED from the
+    # vectorised ``entry_truth`` precompute here (their fire is computed per-bar
+    # in step (b.5) below). ``_block_chain_stages`` returns None for a non-chain
+    # block, so ``reset_on_actual_exit`` on a plain CNF entry is a no-op (it
+    # falls through to the historical path). ``entry_chain_reset[id] is not
+    # None`` == "at least one exit targets this entry".
+    seq_gated_stages: dict[
+        str,
+        tuple[
+            list[npt.NDArray[np.bool_]],
+            list[npt.NDArray[np.bool_]],
+            list[int],
+            npt.NDArray[np.bool_],
+        ],
+    ] = {}
+    for blk in entry_blocks:
+        if blk.reset_on_actual_exit and entry_chain_reset[blk.id] is not None:
+            stages = _block_chain_stages(
+                blk, indicators, inputs, values_by_key, T, _reset_fire_for(blk)
+            )
+            if stages is not None:
+                seq_gated_stages[blk.id] = stages
+
     entry_truth: dict[str, npt.NDArray[np.bool_]] = {}
     entry_nan: dict[str, npt.NDArray[np.bool_]] = {}
     for blk in entry_blocks:
+        if blk.id in seq_gated_stages:
+            # In-loop automaton is authoritative for the fire; the precomputed
+            # ``entry_truth`` is never read for this block (steps (a)/(c) guard
+            # on membership). Still expose its NaN mask for ``nan_poison``.
+            entry_truth[blk.id] = np.zeros(T, dtype=np.bool_)
+            entry_nan[blk.id] = seq_gated_stages[blk.id][3]
+            continue
         active, blk_nan = _eval_block_activity(
             blk,
             indicators,
@@ -1829,9 +1924,20 @@ async def evaluate_signal(
     trade_opens: dict[str, list[int]] = {b.id: [] for b in entry_blocks}
     trade_closes: dict[str, list[tuple[int, str]]] = {b.id: [] for b in entry_blocks}
 
+    # In-loop single-candidate automaton state for ``reset_on_actual_exit``
+    # THEN-chain entries: ``(stage, tau)`` per block, identical semantics to
+    # :func:`_sequence_active` but the abort (step 2b) is driven by the ACTUAL
+    # position-close set (``closed_this_bar``), not the raw exit condition.
+    seq_stage: dict[str, int] = {bid: -1 for bid in seq_gated_stages}
+    seq_tau: dict[str, int] = {bid: -1 for bid in seq_gated_stages}
+
     for t in range(T):
         # --- (a) record fired-indices ---
         for b in entry_blocks:
+            # ``reset_on_actual_exit`` entries fire from the in-loop automaton
+            # (step (b.5)); their ``entry_fired`` is recorded there.
+            if b.id in seq_gated_stages:
+                continue
             if bool(entry_truth[b.id][t]):
                 entry_fired[b.id].append(t)
         for b in exit_blocks:
@@ -1844,6 +1950,10 @@ async def evaluate_signal(
                 reset_fired[b.id].append(t)
 
         # --- (b) clear pass: exits clear every targeted entry latch ---
+        # ``closed_this_bar`` collects every entry whose OPEN position was
+        # actually closed by an exit at this bar — the real "since last exit"
+        # event that gates a ``reset_on_actual_exit`` entry's arm abort (b.5).
+        closed_this_bar: set[str] = set()
         for b in exit_blocks:
             if not bool(exit_truth[b.id][t]):
                 continue
@@ -1866,6 +1976,7 @@ async def evaluate_signal(
                 if target_entry and latched.get(target_entry.id, False):
                     latched[target_entry.id] = False
                     trade_closes[target_entry.id].append((t, b.id))
+                    closed_this_bar.add(target_entry.id)
                     cleared_any = True
             if cleared_any:
                 # Effective exit at t (cleared ≥1 latch). Record once.
@@ -1880,11 +1991,57 @@ async def evaluate_signal(
                     block_arm[b.id] = False
                     arm_countdown[b.id] = bound_count[b.id]
 
+        # --- (b.5) in-loop automaton for ``reset_on_actual_exit`` THEN-chain
+        # entries. Runs AFTER the clear pass (so the abort sees this bar's
+        # ACTUAL closes) and BEFORE the entry pass (so the fire it produces
+        # drives the latch). Per-bar order mirrors :func:`_sequence_active`
+        # EXACTLY (expire → NaN-abort → abort → advance/fire → arm); the only
+        # difference is that step 2b's abort is the real position-close
+        # (``closed_this_bar``), not the raw exit condition.
+        seq_fire_now: dict[str, bool] = {}
+        for bid, (stg_truth, stg_nan, stg_win, _stg_nanmask) in seq_gated_stages.items():
+            m = len(stg_truth)
+            st = seq_stage[bid]
+            ta = seq_tau[bid]
+            fired = False
+            # 1. expire: window to the next stage elapsed.
+            if 0 <= st < m - 1 and (t - ta) > stg_win[st]:
+                st, ta = -1, -1
+            # 2. NaN-abort: NaN on the awaited next stage's operands.
+            if 0 <= st < m - 1 and bool(stg_nan[st + 1][t]):
+                st, ta = -1, -1
+            # 2b. actual-exit abort: ONLY when an exit actually closed this
+            # entry's OPEN position at t (legacy "since last exit"), NOT on
+            # every bar the exit condition merely holds.
+            if bid in closed_this_bar:
+                st, ta = -1, -1
+            # 3. advance against the PRE-ARM tau (strictly-after >= 1 bar).
+            if 0 <= st < m - 1:
+                nxt = st + 1
+                if bool(stg_truth[nxt][t]) and 1 <= (t - ta) <= stg_win[st]:
+                    st, ta = nxt, t
+                    if st == m - 1:
+                        fired = True
+                        st, ta = -1, -1  # impulse: consume, ready to re-detect.
+            # 4. arm head (latest-start) — AFTER advance.
+            if bool(stg_truth[0][t]):
+                st, ta = 0, t
+            seq_stage[bid] = st
+            seq_tau[bid] = ta
+            seq_fire_now[bid] = fired
+            if fired:
+                entry_fired[bid].append(t)
+
         # --- (c) entry pass: declaration order; leverage allowed ---
         # Bound entries gated by their own per-block arm. Unbound entries
         # short-circuit via membership (unconditional firing, no gate).
         for b in entry_blocks:
-            if not bool(entry_truth[b.id][t]):
+            # ``reset_on_actual_exit`` entries take their fire from the in-loop
+            # automaton (b.5); all others read the precomputed ``entry_truth``.
+            if b.id in seq_gated_stages:
+                if not seq_fire_now[b.id]:
+                    continue
+            elif not bool(entry_truth[b.id][t]):
                 continue
             if b.id in block_arm and not block_arm[b.id]:
                 continue
