@@ -174,6 +174,11 @@ class _InputIn(BaseModel):
     # ``_parse_input``'s validator and yields the uniform HTTP-400 envelope
     # instead of a Pydantic 422. ``None``/absent ⇒ no clamp (byte-identical).
     position_cap: Any = None
+    # Optional per-input SIGNAL LAG in trading bars (legacy real-time D-1
+    # timing). Typed ``Any`` (not ``int``) so a malformed value reaches
+    # ``_parse_input``'s validator → uniform HTTP-400 (not a Pydantic 422).
+    # ``None``/absent/``0`` ⇒ no lag (byte-identical same-bar behaviour).
+    signal_lag_days: Any = None
 
 
 class _OperandIn(BaseModel):
@@ -388,6 +393,9 @@ class _ResolvedBasketInput:
     # Feature 1 per-input net-position clamp, carried through basket resolution
     # (raw wire value; validated in ``_parse_input`` like the non-basket path).
     position_cap: Any = None
+    # Per-input signal lag, carried through basket resolution (raw wire value;
+    # validated in ``_parse_input`` like the non-basket path).
+    signal_lag_days: Any = None
 
 
 async def _resolve_basket_inputs(
@@ -448,6 +456,7 @@ async def _resolve_basket_inputs(
                     basket_id=basket_id,
                     legs=typed_legs,
                     position_cap=inp.position_cap,
+                    signal_lag_days=inp.signal_lag_days,
                 )
             )
         elif isinstance(inp.instrument, BasketRefInline):
@@ -467,6 +476,7 @@ async def _resolve_basket_inputs(
                     legs=typed_legs,
                     asset_class=inline.asset_class,
                     position_cap=inp.position_cap,
+                    signal_lag_days=inp.signal_lag_days,
                 )
             )
         else:
@@ -509,11 +519,35 @@ def _parse_position_cap(raw: Any, *, iid: str) -> tuple[float, float] | None:
     return (lo_cap, hi_cap)
 
 
+def _parse_signal_lag_days(raw: Any, *, iid: str) -> int:
+    """Validate a wire ``signal_lag_days`` → a non-negative int (bars) or 0.
+
+    Accepts ``None``/absent (⇒ 0 = no lag). Otherwise requires a non-negative
+    integer. ``bool`` is rejected (it subclasses ``int`` — ``True`` is almost
+    certainly a client bug). Floats are rejected even when integral (a lag is a
+    whole number of trading bars). All failures raise
+    :class:`SignalValidationError` (uniform HTTP-400 envelope).
+    """
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise SignalValidationError(
+            f"input {iid!r}: signal_lag_days must be a non-negative integer "
+            f"(got {raw!r})"
+        )
+    if raw < 0:
+        raise SignalValidationError(
+            f"input {iid!r}: signal_lag_days must be >= 0 (got {raw!r})"
+        )
+    return raw
+
+
 def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
     iid = inp_in.id
     if not iid:
         raise SignalValidationError("input id must be non-empty")
     cap = _parse_position_cap(inp_in.position_cap, iid=iid)
+    lag = _parse_signal_lag_days(inp_in.signal_lag_days, iid=iid)
     # Pre-resolved basket — typed legs already materialised by
     # ``_resolve_basket_inputs``.  No I/O performed here.
     if isinstance(inp_in, _ResolvedBasketInput):
@@ -522,7 +556,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             basket_id=inp_in.basket_id,
             asset_class=inp_in.asset_class,
         )
-        return Input(id=iid, instrument=instrument, position_cap=cap)
+        return Input(id=iid, instrument=instrument, position_cap=cap, signal_lag_days=lag)
     inst_in = inp_in.instrument
     if isinstance(inst_in, SpotInstrumentRef):
         if not inst_in.collection or not inst_in.instrument_id:
@@ -566,7 +600,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             roll_offset=int(inst_in.rollOffset),
             strategy=inst_in.strategy,
         )
-    return Input(id=iid, instrument=instrument, position_cap=cap)
+    return Input(id=iid, instrument=instrument, position_cap=cap, signal_lag_days=lag)
 
 
 def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:

@@ -2146,6 +2146,21 @@ async def evaluate_signal(
         if cap is not None:
             lo_cap, hi_cap = float(cap[0]), float(cap[1])
             pos = np.clip(pos, lo_cap, hi_cap)
+        # Feature — OPTIONAL per-input SIGNAL LAG (legacy real-time D-1 timing,
+        # ``minusBusinessDays(1)``). Shift the RESOLVED net position (post-cap)
+        # FORWARD by ``signal_lag_days`` bars so the exposure HELD on bar t is
+        # the regime/signal state resolved from bar ``t - lag`` ("act on
+        # yesterday's signal"). The leading ``lag`` bars have no prior state →
+        # FLAT (0.0); ``lag >= T`` yields an all-flat leg (no out-of-range
+        # index). Applied BEFORE the no-quote NaN mask so a gap bar still zeroes
+        # its OWN bar. ``signal_lag_days == 0`` (the default) skips the shift
+        # entirely → BYTE-IDENTICAL to the historical same-bar path.
+        lag = int(getattr(inp, "signal_lag_days", 0) or 0)
+        if lag > 0:
+            shifted = np.zeros_like(pos)
+            if lag < pos.shape[0]:
+                shifted[lag:] = pos[:-lag]
+            pos = shifted
         pos = np.where(nan_poison[ref_id], 0.0, pos)
 
         price_label: str | None = None

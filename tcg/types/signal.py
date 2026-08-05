@@ -288,11 +288,25 @@ class Input:
     BYTE-IDENTICAL to before. ``low`` may be negative (short-or-flat, e.g.
     ``(-1.0, 0.0)``) and the range is inclusive; ``low <= high`` is required
     (validated at the API layer, HTTP 400).
+
+    ``signal_lag_days`` OPTIONALLY shifts this input's RESOLVED NET position
+    series FORWARD by that many bars, so the position HELD on day D is the
+    signal/regime state RESOLVED from bar ``D - signal_lag_days`` ("act on
+    yesterday's signal" — the legacy real-time D-1 timing;
+    ``HistoricalVolService`` / ``PutArbitrageService`` ``minusBusinessDays(1)``).
+    The leading ``signal_lag_days`` bars have no prior state → FLAT (0.0). The
+    shift is applied to the net latched position AFTER ``position_cap`` and
+    BEFORE the no-quote NaN mask, so ``contrib_step`` / ``realized_pnl`` / the
+    equity curve all see the LAGGED exposure. ``0`` (the default) applies NO
+    shift — the historical same-bar behaviour, BYTE-IDENTICAL to before. Must
+    be a non-negative integer number of trading bars (validated at the API
+    layer, HTTP 400); a value ``>=`` the series length yields an all-flat leg.
     """
 
     id: str
     instrument: InputInstrument
     position_cap: tuple[float, float] | None = None
+    signal_lag_days: int = 0
 
 
 # ---------------------------------------------------------------------------
