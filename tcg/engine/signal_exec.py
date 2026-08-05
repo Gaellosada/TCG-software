@@ -1177,6 +1177,10 @@ def _compound_clamped(
             # account loses exactly its remaining equity (factor → 0). When
             # ``net_step[s] == 0`` the factor can only be ``<= 0`` via a
             # non-finite value; treat that as a full wipe (scale 0).
+            # CONTRACT: this literal 0.0 is the absorbing DEAD-leg marker that
+            # ``metrics._compute_periodic_rebalance`` keys on (== 0.0) so a wiped
+            # signal leg is not re-funded at a rebalance boundary. Keep it
+            # exactly 0.0 — clamping to an epsilon would silently break that.
             ratio[s + 1] = 0.0
             step_scale[s] = (-1.0 / net_step[s]) if net_step[s] != 0.0 else 0.0
             wiped = True

@@ -1570,7 +1570,17 @@ def _get_result_cache() -> DiskResultCache:
 # now opens the segment on the first genuinely-quoted date and re-syncs to the real
 # marks. Any cached curve for a strategy that crossed such a gap is stale (frozen)
 # and MUST be invalidated; gap-free strategies recompute byte-identically.
-COMPUTE_VERSION = "0.1.14"
+#
+# 0.1.14 → 0.1.15: periodic-rebalance wiped-leg fix. ``_compute_periodic_rebalance``
+# no longer re-funds a leg that hit an absorbing 0 (a wiped option OR a wiped
+# ``signal`` leg — both w>=0 synthetics) back to its target weight each boundary;
+# the dead leg stays 0 and its weight renormalizes onto the survivors. This changes
+# the equity for any periodic-rebalanced portfolio containing a leg that wipes to
+# exactly 0. Such a portfolio (notably a wiping signal leg + another leg under
+# weekly/monthly/quarterly/annual rebalance) was UNguarded before and could be
+# cached under the old drain logic — bump invalidates those stale WRONG curves;
+# no-wipe portfolios recompute byte-identically (golden master).
+COMPUTE_VERSION = "0.1.15"
 
 
 def _strip_use_cache(obj: object) -> object:

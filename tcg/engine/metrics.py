@@ -469,6 +469,11 @@ def _compute_daily_rebalance(
     # frequency. (For both "normal" and "log" the portfolio return is the
     # weighted sum of per-leg returns — the standard approximation for the
     # log basis — so the two cases share one accumulation.)
+    # CAVEAT: this non-divergence guarantee covers NaN/gap hold-flat only. A
+    # leg wiped to an ABSORBING 0 (w>=0) DOES diverge by frequency by design:
+    # daily keeps its weight in a flat 0-return sleeve (below), while periodic
+    # reallocates it to the survivors (see ``_compute_periodic_rebalance``'s
+    # renormalize-to-survivors note). Only "a dead leg stays dead" is common.
     acc = np.zeros(n - 1, dtype=np.float64)
     for lbl in labels:
         w = norm_weights[lbl]
@@ -567,7 +572,10 @@ def _compute_buy_and_hold(
         # ``compute_equity_curve``, so leave it untouched; map every
         # non-finite return at index >= 1 to 0.0 (no return for that bar). This
         # mirrors the daily-rebalance path, which holds a NaN leg-bar flat, so
-        # the SAME inputs don't diverge by rebalance frequency. A zero-price
+        # the SAME inputs don't diverge by rebalance frequency. (This holds for
+        # NaN/gap flats; a leg wiped to an absorbing 0 does diverge — periodic
+        # renormalizes its weight onto survivors, buy-and-hold leaves survivors
+        # on their original capital. See ``_compute_periodic_rebalance``.) A zero-price
         # bar still books its -100% normal return into the prior bar, then the
         # curve holds flat (a position worth 0 stays 0 rather than springing
         # to inf).
@@ -652,7 +660,12 @@ def _compute_periodic_rebalance(
     """Periodic rebalancing: within each period, legs drift independently.
 
     At each rebalance boundary, total portfolio value is redistributed
-    according to target weights.
+    according to target weights. A leg that has hit an absorbing 0 (a wiped
+    ``w >= 0`` leg — a bankrupt long, or an option/signal synthetic clamped to
+    0) is treated as DEAD: it is never re-funded, stays 0, and its target weight
+    is renormalized over the surviving legs (capital-conserving; there is no cash
+    sleeve). This concentrates the survivors' effective exposure beyond their
+    nominal weights. A short leg (w < 0) touching 0 is transient and never dead.
     """
     boundaries = _detect_rebalance_boundaries(dates, rebalance_freq)
 
@@ -707,6 +720,16 @@ def _compute_periodic_rebalance(
             # For ordinary healthy legs (none at 0) this whole branch is a no-op:
             # ``alive_w`` normalizes to 1 and the redistribution reduces to the
             # original ``|w|·total``, so a no-wipe portfolio is byte-identical.
+            #
+            # SCOPE: the marker is bit-exact ``== 0.0`` — the absorbing state set
+            # by the ruin clamps in ``hold_pnl``/``signal_exec``. A leg that
+            # ruins GRADUALLY toward 0 without a single-bar full loss (e.g. a
+            # long-premium option decaying geometrically to ~1e-174, never
+            # exactly 0) is NOT classified dead and is still re-funded. That is a
+            # rarer regime (usually a single-leg config where the re-fund is a
+            # no-op); unifying it would need a threshold, which we avoid — an
+            # epsilon would misclassify live near-zero legs. Tracked as a known
+            # boundary, not a silent gap.
             def _dead(lbl: str) -> bool:
                 return norm_weights[lbl] >= 0.0 and leg_values[lbl] == 0.0
 
