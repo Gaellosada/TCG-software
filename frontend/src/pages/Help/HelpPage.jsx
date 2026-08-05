@@ -354,6 +354,16 @@ function HelpPage() {
           infrequent enough to limit transaction costs. Rebalance dates appear as dashed
           purple lines on the chart.
         </p>
+        <p className={styles.conceptText}>
+          If an option leg in a rebalanced portfolio <strong>expires worthless</strong>,
+          it is held at zero for the rest of the backtest instead of being topped back
+          up to its target weight &mdash; there is no idle-cash sleeve to fund it from,
+          so its weight is spread across the surviving holdings instead. This matches
+          what happens when there is no rebalancing at all, so a dead option never
+          silently drains the rest of the portfolio. Note: <strong>daily rebalancing is
+          not available</strong> for a portfolio holding a hold-mode option leg &mdash;
+          use weekly, monthly, quarterly, annually, or none.
+        </p>
 
         <h3 className={styles.conceptTitle}>Transaction costs (slippage &amp; fees)</h3>
         <p className={styles.conceptText}>

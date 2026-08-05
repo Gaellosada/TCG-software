@@ -799,7 +799,7 @@ function PortfolioPage({ mode = 'pure' }) {
             <fieldset
               className={`${styles.configItem} ${styles.editorFieldset}`}
               disabled={portfolio.persistedLocked}
-              title="Periodically reset allocations to target weights. Without rebalancing, positions drift as prices move."
+              title="Periodically reset allocations to target weights. Without rebalancing, positions drift as prices move. If an option leg expires worthless it is held at zero and its weight is spread across the surviving holdings. Daily rebalancing is not supported when a hold-mode option leg is present."
             >
               <label className={styles.configLabel} htmlFor="rebalance-select">
                 Rebalance
