@@ -686,15 +686,46 @@ def _compute_periodic_rebalance(
         # At a rebalance boundary, redistribute according to target weights
         if boundaries[i]:
             total_value = sum(leg_values.values())
-            if total_value > 0.0:
-                # Turnover = Σ |target_weight − drifted_weight| across legs.
+            # A leg absorbed to exactly 0 is DEAD: its subsequent returns are NaN
+            # (``0/0``) and it can never recover, so re-funding it to ``|w|·total``
+            # here just parks live capital in a corpse (it then sits idle, held
+            # flat on the NaN tail), DRAINING the survivors. Drop dead legs from
+            # the rebalancing universe -- they stay 0, and the target weights are
+            # renormalized over the still-alive legs (capital-conserving; there is
+            # no cash sleeve, so the dead leg's share is reallocated to the
+            # survivors). This holds a wiped leg at 0 under EVERY rebalance
+            # frequency, matching buy-and-hold, rather than resurrecting it only
+            # under periodic rebalancing.
+            #
+            # 0 is absorbing ONLY for a ``w >= 0`` leg: a long instrument that
+            # went bankrupt to price 0, or an option-synthetic leg (fed as
+            # ``|weight|`` -> always w>=0) that decayed / blew up to its 0 floor.
+            # A SHORT leg (w < 0) uses a multiplicative ``*=(1-r)`` update where
+            # landing on 0 is a TRANSIENT artifact (a +100% up-bar); the boundary
+            # re-fund legitimately un-sticks it, exactly as buy-and-hold recovers
+            # it (affine ``2·init - long``), so a short leg is NEVER dead here.
+            # For ordinary healthy legs (none at 0) this whole branch is a no-op:
+            # ``alive_w`` normalizes to 1 and the redistribution reduces to the
+            # original ``|w|·total``, so a no-wipe portfolio is byte-identical.
+            def _dead(lbl: str) -> bool:
+                return norm_weights[lbl] >= 0.0 and leg_values[lbl] == 0.0
+
+            alive_w = sum(
+                abs(norm_weights[lbl]) for lbl in labels if not _dead(lbl)
+            )
+            if total_value > 0.0 and alive_w > 0.0:
+                # Turnover = Σ |target_weight − drifted_weight| across ALIVE legs
+                # (dead legs are not traded -- their target share is 0).
                 est_turn[i] = sum(
-                    abs(abs(norm_weights[lbl]) - leg_values[lbl] / total_value)
+                    abs(abs(norm_weights[lbl]) / alive_w - leg_values[lbl] / total_value)
                     for lbl in labels
+                    if not _dead(lbl)
                 )
-            for lbl in labels:
-                w = norm_weights[lbl]
-                leg_values[lbl] = abs(w) * total_value
+                for lbl in labels:
+                    if _dead(lbl):
+                        continue  # dead leg stays 0 -- never re-funded
+                    leg_values[lbl] = (abs(norm_weights[lbl]) / alive_w) * total_value
+            # else: all legs dead (total 0) -- nothing to redistribute, leave 0s.
 
         # Each leg grows by its own return for this day
         for lbl in labels:

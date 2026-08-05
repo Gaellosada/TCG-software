@@ -911,13 +911,32 @@ async def test_all_nan_premium_weekly_union_is_not_flagged_as_missing_cycle(
 # ── Findings 8 & 9: incompatible knobs rejected for a hold-mode price leg ────
 
 
-@pytest.mark.parametrize(
-    "rebalance", ["daily", "weekly", "monthly", "quarterly", "annually"]
-)
-async def test_hold_leg_rejects_rebalance_not_none(client, rebalance):
-    """A hold-mode option price leg forbids rebalance != 'none': a wiped leg would
-    be silently re-funded to its target weight at each boundary, draining the
-    survivors (``metrics._compute_periodic_rebalance`` re-funds a 0-valued leg)."""
+async def test_hold_leg_rejects_daily_rebalance(client):
+    """A hold-mode option price leg forbids rebalance='daily': the blended-return
+    daily path keeps a wiped leg's weight in a flat sleeve each bar instead of
+    reallocating it to the survivors (a pending semantic decision — see the
+    periodic-path fix in ``metrics._compute_periodic_rebalance``)."""
+    body = {
+        "legs": {"P": _hold_put_leg()},
+        "weights": {"P": -100},
+        "rebalance": "daily",
+        "return_type": "normal",
+        "start": "2024-03-01",
+        "end": "2024-04-30",
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    j = resp.json()
+    assert j["error_type"] == "validation_error"
+    assert "daily" in j["message"]
+
+
+@pytest.mark.parametrize("rebalance", ["weekly", "monthly", "quarterly", "annually"])
+async def test_hold_leg_allows_periodic_rebalance(client, rebalance):
+    """A hold-mode option price leg now COMPUTES under periodic rebalancing: the
+    engine holds a wiped leg at 0 and renormalizes its weight onto the survivors
+    (``metrics._compute_periodic_rebalance``), so the re-fund drain the old guard
+    blocked can no longer occur. Result must be a finite equity curve (200)."""
     body = {
         "legs": {"P": _hold_put_leg()},
         "weights": {"P": -100},
@@ -927,10 +946,11 @@ async def test_hold_leg_rejects_rebalance_not_none(client, rebalance):
         "end": "2024-04-30",
     }
     resp = await client.post("/api/portfolio/compute", json=body)
-    assert resp.status_code == 400, resp.text
-    j = resp.json()
-    assert j["error_type"] == "validation_error"
-    assert "rebalance='none'" in j["message"]
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    eq = data["portfolio_equity"]
+    assert len(eq) == len(_DATES_INT)
+    assert all(v == v and abs(v) != float("inf") for v in eq)  # all finite
 
 
 async def test_hold_leg_rejects_log_return_type(client):
@@ -957,3 +977,161 @@ async def test_hold_leg_allows_rebalance_none_and_normal(client):
     incompatible knobs, not the hold leg itself."""
     data = await _compute(client, -100)
     assert len(data["portfolio_equity"]) == len(_DATES_INT)
+
+
+# ── END-TO-END wiping regression: an option synthetic that actually reaches 0 ──
+# The fixtures above never wipe (min equity = 100), so the DEAD-leg branch in
+# ``metrics._compute_periodic_rebalance`` is not exercised through the HTTP path.
+# These drive a SHORT put whose held premium explodes (a blown-up short), so its
+# fixed-contract synthetic hits the absorbing-0 ruin clamp under a PERIODIC
+# rebalance -- proving the leg stays 0 (never re-funded), the survivor owns the
+# remaining book, and the serialized response is finite / null-clean.
+
+import datetime as _dt
+
+from tcg.types.signal import InstrumentOptionStream as _InstrumentOptionStream
+from tcg.types.signal import InstrumentSpot as _InstrumentSpot
+
+
+def _wipe_dates(n: int) -> np.ndarray:
+    out: list[int] = []
+    day = _dt.date(2024, 1, 1)
+    while len(out) < n:
+        if day.weekday() < 5:
+            out.append(int(day.strftime("%Y%m%d")))
+        day += _dt.timedelta(days=1)
+    return np.array(out, dtype=np.int64)
+
+
+_WIPE_N = 15
+_WIPE_DATES = _wipe_dates(_WIPE_N)  # 3 weeks (Mon Jan 1 .. Fri Jan 19), boundaries @5,@10
+# SHORT-put held premium: flat 10 then jumps to 30 at bar 7 -> a short put loses
+# ~2x its NAV on the jump -> the fixed-contract synthetic wipes (absorbing 0).
+_WIPE_PUT_PREM = np.array([10.0] * 7 + [30.0] * (_WIPE_N - 7))
+_WIPE_CALL_PREM = np.full(_WIPE_N, 5.0)  # flat -> survivor stays alive
+_WIPE_IS_ROLL = np.array([1.0] + [0.0] * (_WIPE_N - 1))  # single segment
+_WIPE_PUT_RP = np.array([10.0] + [np.nan] * (_WIPE_N - 1))
+_WIPE_CALL_RP = np.array([5.0] + [np.nan] * (_WIPE_N - 1))
+
+
+def _make_wipe_fetcher(_svc, _start, _end):
+    """Two-contract synthetic fetcher: a wiping short put (option_type 'P') and a
+    flat surviving call (option_type 'C'), keyed on ``option_type``."""
+
+    async def fetch(instrument, field):
+        if isinstance(instrument, _InstrumentOptionStream):
+            prem = _WIPE_PUT_PREM if instrument.option_type == "P" else _WIPE_CALL_PREM
+            return _WIPE_DATES, prem.astype(np.float64).copy()
+        if isinstance(instrument, _InstrumentSpot):
+            return _WIPE_DATES, np.full(_WIPE_N, 100.0)
+        raise KeyError(instrument)
+
+    async def fetch_hold_roll_info(instrument):
+        rp = _WIPE_PUT_RP if instrument.option_type == "P" else _WIPE_CALL_RP
+        return (
+            _WIPE_DATES,
+            _WIPE_IS_ROLL.astype(np.float64).copy(),
+            rp.astype(np.float64).copy(),
+        )
+
+    fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
+    return fetch
+
+
+@pytest.fixture
+def wipe_client(monkeypatch):
+    monkeypatch.setattr(
+        "tcg.core.api.portfolio.make_signal_fetcher", _make_wipe_fetcher
+    )
+    application = FastAPI()
+    application.add_exception_handler(TCGError, tcg_error_handler)
+    application.include_router(portfolio_router)
+    application.state.market_data = MagicMock()
+    application.state.app_db_repo = object()
+    return application
+
+
+@pytest.fixture
+async def wclient(wipe_client):
+    transport = ASGITransport(app=wipe_client)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+def _wipe_leg(opt: str, delta: float) -> dict:
+    return {
+        "type": "option_stream",
+        "collection": "OPT_SP_500",
+        "option_type": opt,
+        "cycle": None,
+        "maturity": {"kind": "end_of_month", "offset_months": 0},
+        "selection": {"kind": "by_delta", "target": delta, "tolerance": 0.20},
+        "stream": "bs_mid",
+        "hold_between_rolls": True,
+        "nav_times": 1.0,
+    }
+
+
+def _all_floats_finite(obj) -> bool:
+    import math
+
+    if isinstance(obj, float):
+        return not (math.isnan(obj) or math.isinf(obj))
+    if isinstance(obj, dict):
+        return all(_all_floats_finite(v) for v in obj.values())
+    if isinstance(obj, list):
+        return all(_all_floats_finite(v) for v in obj)
+    return True
+
+
+@pytest.mark.parametrize("rebalance", ["weekly", "monthly"])
+async def test_e2e_wiped_option_leg_survivor_owns_book(wclient, rebalance):
+    """A SHORT put that wipes mid-series under PERIODIC rebalance: the dead leg
+    stays 0 (never re-funded), the surviving call owns the whole remaining book,
+    and every float in the serialized response is finite/null-clean."""
+    body = {
+        "legs": {"P": _wipe_leg("P", -0.10), "C": _wipe_leg("C", 0.10)},
+        "weights": {"P": -50, "C": 50},
+        "rebalance": rebalance,
+        "return_type": "normal",
+        "start": "2024-01-01",
+        "end": "2024-01-19",
+    }
+    resp = await wclient.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    j = resp.json()
+
+    eq = j["portfolio_equity"]
+    put = j["leg_equities"]["P"]
+    call = j["leg_equities"]["C"]
+
+    # The put actually wiped (proves the DEAD branch is exercised e2e).
+    assert min(put) == pytest.approx(0.0, abs=1e-9)
+    # ...and stays 0 to the end -- never re-funded at a rebalance boundary.
+    assert put[-1] == pytest.approx(0.0, abs=1e-9)
+    # Survivor owns the whole remaining book: call == portfolio at the end.
+    assert call[-1] == pytest.approx(eq[-1], abs=1e-9)
+    assert eq[-1] > 0.0  # not dragged to 0 by the dead put
+    # Whole response is finite / null-clean (no NaN/inf leaked past sanitization).
+    assert _all_floats_finite(j)
+
+
+async def test_e2e_total_wipe_response_is_null_clean(wclient):
+    """A single short put that wipes the WHOLE portfolio to 0 under periodic
+    rebalance: derived returns go 0/0 (NaN) on the post-wipe tail but must be
+    nulled by ``sanitize_json_floats`` -- the response carries no NaN/inf."""
+    body = {
+        "legs": {"P": _wipe_leg("P", -0.10)},
+        "weights": {"P": -100},
+        "rebalance": "weekly",
+        "return_type": "normal",
+        "start": "2024-01-01",
+        "end": "2024-01-19",
+    }
+    resp = await wclient.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    j = resp.json()
+    eq = j["portfolio_equity"]
+    assert eq[-1] == pytest.approx(0.0, abs=1e-9)  # fully wiped
+    assert all(v == pytest.approx(0.0, abs=1e-9) for v in eq[-4:])  # absorbing 0 tail
+    assert _all_floats_finite(j)  # 0/0 return tail nulled, nothing non-finite leaked

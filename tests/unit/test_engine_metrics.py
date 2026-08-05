@@ -1019,3 +1019,122 @@ class TestEngineExports:
         assert callable(compute_weighted_portfolio)
         assert callable(compute_metrics)
         assert callable(aggregate_returns)
+
+
+# ── Absorbing-0 (wiped/expired) leg: must NOT be re-funded at rebalance ──────
+# Regression for the option+rebalance drain: a leg whose value hits an absorbing
+# 0 (a fully-decayed / blown-up short option, or a bankrupt/zero-price equity) is
+# DEAD. The periodic-rebalance path used to re-fund it to its target weight at
+# each boundary, parking live capital in a corpse and draining the survivors.
+# A wiped leg must stay 0 and be removed from the rebalancing universe (its weight
+# renormalized across the survivors), so the SAME inputs don't diverge by
+# rebalance frequency (buy-and-hold and daily already hold a wiped leg at 0).
+
+
+def _dates_business(n: int) -> np.ndarray:
+    import datetime as dt
+
+    out: list[int] = []
+    day = dt.date(2024, 1, 1)
+    while len(out) < n:
+        if day.weekday() < 5:
+            out.append(int(day.strftime("%Y%m%d")))
+        day += dt.timedelta(days=1)
+    return np.array(out, dtype=np.int64)
+
+
+class TestWipedLegNotRefunded:
+    """A leg absorbed to 0 is never re-funded at a PERIODIC rebalance boundary.
+
+    Scope: the fix lives in the value-tracking periodic path
+    (``_compute_periodic_rebalance``). The daily path is a blended-return model
+    (``portfolio_return = Σ w·r``) whose per-leg equities are a cosmetic split of
+    the portfolio; its wiped-leg accounting is a separate, pre-existing artifact
+    shared with bankrupt-equity daily rebalance and is out of scope here (it is
+    only required to stay finite, asserted separately).
+    """
+
+    @pytest.mark.parametrize("freq", ["weekly", "monthly", "quarterly"])
+    def test_flat_survivor_keeps_capital_when_coleg_wipes(self, freq):
+        # A: perfectly flat (0% return) -> its allocation MUST stay put.
+        # B: wipes to absorbing 0 at bar 20 (and NaN thereafter).
+        n = 90
+        dates = _dates_business(n)
+        A = np.full(n, 100.0)
+        B = np.full(n, 100.0)
+        B[20:] = 0.0
+        res = compute_weighted_portfolio(
+            {"A": A, "B": B}, {"A": 0.5, "B": 0.5}, freq, "normal", dates
+        )
+        # Portfolio: A holds 50 (flat), B dies to 0 -> total 50.
+        np.testing.assert_allclose(res.portfolio_equity[-1], 50.0, atol=1e-9)
+        # The survivor A must retain its full 50 units -- NOT be drained into
+        # the dead B leg (the re-fund bug parked 25 in B, leaving A at 25).
+        np.testing.assert_allclose(res.per_leg_equities["A"][-1], 50.0, atol=1e-9)
+        np.testing.assert_allclose(res.per_leg_equities["B"][-1], 0.0, atol=1e-9)
+
+    @pytest.mark.parametrize("freq", ["weekly", "monthly", "quarterly"])
+    def test_dead_leg_stays_zero_and_survivor_owns_the_book(self, freq):
+        # A: steady uptrend; B: wipes at bar 20. After the wipe the dead B leg must
+        # stay 0 (never re-funded) and, at the next boundary, the whole book is
+        # rebalanced into the surviving A. So at the end B == 0 and A carries 100%
+        # of the portfolio -- the re-fund bug instead parked ~half the book in the
+        # dead B leg where it sat idle.
+        n = 90
+        dates = _dates_business(n)
+        A = 100.0 * np.cumprod(1.0 + np.full(n, 0.002))
+        B = np.full(n, 100.0)
+        B[20:] = 0.0
+        res = compute_weighted_portfolio(
+            {"A": A, "B": B}, {"A": 0.5, "B": 0.5}, freq, "normal", dates
+        )
+        eq = res.portfolio_equity
+        assert np.all(np.isfinite(eq))
+        # Dead B never re-funded, for every bar from the wipe onward.
+        np.testing.assert_allclose(res.per_leg_equities["B"][20:], 0.0, atol=1e-9)
+        # After the wipe, A is the only survivor -> it owns the entire book.
+        np.testing.assert_allclose(res.per_leg_equities["A"][-1], eq[-1], atol=1e-9)
+
+    def test_short_leg_at_zero_recovers_not_frozen(self):
+        # A SHORT leg (w<0) that momentarily hits exactly 0 (underlying +100% on a
+        # single bar makes the ``*=(1-r)`` update land on 0) is a TRANSIENT
+        # multiplicative artifact, NOT an absorbing wipe. The boundary re-fund
+        # legitimately un-sticks it -- buy-and-hold recovers it too (affine
+        # ``2·init - long``). So the DEAD classification must be gated on w>=0:
+        # a short leg is never frozen at 0.
+        n = 40
+        dates = _dates_business(n)
+        A = np.full(n, 100.0)  # long flat co-leg
+        B = np.full(n, 100.0)
+        B[3] = 200.0  # short underlying +100% at bar 3 -> short value hits 0, then reverts
+        res = compute_weighted_portfolio(
+            {"A": A, "B": B}, {"A": 0.5, "B": -0.5}, "weekly", "normal", dates
+        )
+        assert np.all(np.isfinite(res.portfolio_equity))
+        # The short leg recovers (nonzero) once the underlying reverts and a
+        # boundary passes -- it is NOT permanently frozen at 0 (the pre-gate bug).
+        assert res.per_leg_equities["B"][-1] > 0.0
+        # Buy-and-hold recovers it too -- proves recovery is the correct behavior.
+        bh = compute_weighted_portfolio(
+            {"A": A, "B": B}, {"A": 0.5, "B": -0.5}, "none", "normal", dates
+        )
+        assert bh.per_leg_equities["B"][-1] > 0.0
+
+    @pytest.mark.parametrize(
+        "freq", ["none", "daily", "weekly", "monthly", "quarterly", "annually"]
+    )
+    def test_all_freqs_stay_finite_with_wiped_leg(self, freq):
+        # Every rebalance frequency must compute a fully finite curve when a leg
+        # wipes -- the strict-finite-JSON response invariant. Daily is included
+        # here (finite-only) even though its per-leg drag is out of scope.
+        n = 90
+        dates = _dates_business(n)
+        A = 100.0 * np.cumprod(1.0 + np.full(n, 0.001))
+        B = np.full(n, 100.0)
+        B[20:] = 0.0
+        res = compute_weighted_portfolio(
+            {"A": A, "B": B}, {"A": 0.5, "B": 0.5}, freq, "normal", dates
+        )
+        assert np.all(np.isfinite(res.portfolio_equity))
+        for lbl in ("A", "B"):
+            assert np.all(np.isfinite(res.per_leg_equities[lbl]))
