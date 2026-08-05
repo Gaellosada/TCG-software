@@ -54,15 +54,31 @@ THE FIX (was ``test_..._gfc_flat_KNOWN_ENGINE_GAP``, xfail(strict)):
   OFF_READY arm survives the exit-cond window and fires on Sep-12 → the regime
   goes ON (flat).  The GFC-crash-window drawdown drops from ~-13.6 % to ~-2.8 %.
 
-Post-fix band (printed each run; the honest verdict):
-  * equity_log_corr ≈ 0.998 — PASS;  ann_ret |Δ| ≈ 0.02 pp — PASS;  ruin — PASS.
-  * maxDD ratio: the WHOLE-HISTORY repro DAILY maxDD (~-5.4 %, at an unrelated
-    Dec-2018 intra-month move) ÷ the target's MONTHLY-granularity maxDD
-    (~-2.32 %) ≈ 2.32 — an apples-to-oranges artifact (daily vs monthly).  The
-    monthly-vs-monthly ratio is ~0.70 (in band), and the GFC crash WINDOW is
-    protected (~-2.8 %).
-  * monthly_corr ≈ 0.71 — improved from 0.489 but still the SOLE residual miss
-    vs the 0.80 bar.  Not lowered/hacked; reported to Gael.
+SECOND FIX — LEGACY D-1 TIMING (PR #92 ``signal_lag_days=1`` on the leg):
+  Legacy's real-time signal path (``HistoricalVolService`` /
+  ``PutArbitrageService``, ``minusBusinessDays(1)``) trades day D on the regime
+  RESOLVED from D-1 ("act on yesterday's signal"); our engine had applied it
+  same-bar.  Enabling the opt-in ``signal_lag_days=1`` (shift the resolved net
+  position forward one trading bar) is empirically DECISIVE — head-to-head on the
+  full window (same-bar vs D-1):
+    monthly_corr      0.709  → 0.853   (CLEARS the 0.80 band; == the diag §5.2
+                                        CF-A "perfect regime" ceiling 0.851)
+    equity_log_corr   0.998  → 0.9995
+    maxDD monthly rat 0.696  → 0.914   (moves INTO the [0.70, 1.40] band)
+    ann_ret |Δ|       0.016  → 0.344 pp (the ONLY metric that slips; still << 2.0)
+    ruin              none   → none
+  The +0.144 monthly_corr jump landing exactly on the diag's CF-A prediction
+  shows most of what that report classed as "irreducible vendor-close knife-edge"
+  (B1) was in fact a TIMING artifact — the legacy BACKTEST used D-1, not same-bar.
+  Nothing tuned: a single principled 1-bar lag.
+
+Post-both-fixes band (printed each run; now a FULL band PASS):
+  * monthly_corr ≈ 0.853 — PASS (≥ 0.80);  equity_log_corr ≈ 0.9995 — PASS;
+    ann_ret |Δ| ≈ 0.34 pp — PASS (≤ 2.0);  ruin — PASS.
+  * maxDD monthly-vs-monthly ratio ≈ 0.91 — PASS (in [0.70, 1.40]).  (The
+    whole-history repro DAILY maxDD vs the target's MONTHLY maxDD stays an
+    apples-to-oranges artifact and is read qualitatively.)  The GFC crash WINDOW
+    is protected (~-2.8 %).
   * A 2014-02 +3.17 % overshoot is INHERITED from the §5.1 always-on 10Δ base
     (an option-series artifact), NOT from the gate.
 
@@ -149,6 +165,18 @@ def _signal_inputs() -> list[dict]:
                 "sizing_mode": "futures_notional",
             },
             "position_cap": [-1.0, 0.0],
+            # LEGACY D-1 TIMING (PR #92 ``signal_lag_days``): the regime resolved
+            # from close[D] is the position HELD on day D+1 ("act on yesterday's
+            # signal" — legacy ``HistoricalVolService`` / ``PutArbitrageService``
+            # ``minusBusinessDays(1)``).  Empirically decisive vs same-bar:
+            # monthly_corr 0.709 -> 0.853 (CLEARS the 0.80 band; == the diag §5.2
+            # CF-A "perfect regime" ceiling 0.851), equity_corr 0.998 -> 0.9995,
+            # monthly-vs-monthly maxDD ratio 0.696 -> 0.914 (INTO the [0.70,1.40]
+            # band).  Only ann_ret |Δ| slips 0.016 -> 0.344 pp (still << 2.0 pp).
+            # This shows the legacy BACKTEST used D-1, not same-bar; most of the
+            # residual the diag attributed to vendor-close knife-edge (B1) was in
+            # fact a TIMING artifact.  NOT tuned — a single principled 1-bar lag.
+            "signal_lag_days": 1,
         },
         {
             "id": "spx",
@@ -413,9 +441,9 @@ def test_shortput_hvolout_builds_runs_and_reproduces(hvolout_run):
     print(f"[HVOLout] repro maxDD={cmp.repro_maxdd_pct:.3f}% "
           f"(target-derived {given_maxdd:.3f}% [monthly-granularity], ratio={cmp.maxdd_ratio:.3f})")
     print(f"[HVOLout] min_equity={cmp.repro_min_equity:.3f} ruin_ok={cmp.ruin_ok}")
-    print("[HVOLout] CONFIRMED-BAND verdict (post-fix: equity_corr + ann_ret + "
-          "ruin PASS; monthly-vs-monthly maxDD ratio ~0.70 in band; monthly_corr "
-          "0.71 is the sole residual miss vs the 0.80 bar — see report):")
+    print("[HVOLout] CONFIRMED-BAND verdict (post D-1 lag: monthly_corr ~0.85 "
+          "CLEARS the 0.80 bar, equity_corr ~0.9995, ann_ret |Δ| ~0.34pp, "
+          "monthly-vs-monthly maxDD ratio ~0.91 in band, no ruin — full band pass):")
     for line in verdict.reasons:
         print(f"  band: {line}")
 
@@ -424,11 +452,11 @@ def test_shortput_hvolout_builds_runs_and_reproduces(hvolout_run):
     assert cmp.equity_log_corr >= DEFAULT_BAND.equity_corr_min, cmp.equity_log_corr  # PRIMARY shape
     assert cmp.ann_ret_abs_diff_pp <= DEFAULT_BAND.ann_ret_abs_pp_max, cmp.ann_ret_abs_diff_pp
     assert cmp.ruin_ok, cmp.repro_min_equity
-    # Regression FLOOR on monthly_corr. The latched-state exit-reset fix (PR #92,
-    # ``reset_on_actual_exit``) lifted this from 0.489 → ~0.709; the floor locks
-    # in that gain. It is still BELOW the confirmed 0.80 band (the sole residual
-    # miss — the honest verdict is printed above and reported to Gael).
-    assert cmp.monthly_corr >= 0.65, cmp.monthly_corr
+    # Regression FLOOR on monthly_corr. Two stacked PR #92 fixes lifted it:
+    # ``reset_on_actual_exit`` 0.489 → 0.709 (GFC arm), then the D-1
+    # ``signal_lag_days`` legacy-timing lag 0.709 → ~0.853 — which CLEARS the
+    # confirmed 0.80 band. The floor locks in the full gain (margin below 0.853).
+    assert cmp.monthly_corr >= 0.82, cmp.monthly_corr
 
 
 # --------------------------------------------------------------------------- #
@@ -468,7 +496,7 @@ def test_shortput_hvolout_gfc_flat(hvolout_run):
     # That ratio (~2.32) is dominated by a LATER, unrelated Dec-2018 intra-month
     # vol move (the global daily trough is 2018-12-24, NOT 2008) and by the
     # daily-vs-monthly granularity mismatch the module docstring already flags as
-    # "not a gate".  The monthly-vs-monthly maxDD ratio is ~0.70 (in band).  So
+    # "not a gate".  The monthly-vs-monthly maxDD ratio is ~0.91 (in band).  So
     # the GFC claim is verified via the crash-WINDOW drawdown, which is exactly
     # what this test is about.
     assert flat_2008q4, "GFC flat missed (engine chain_reset gap)"
