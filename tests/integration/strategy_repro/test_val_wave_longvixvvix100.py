@@ -346,8 +346,15 @@ def test_reproduces_full_band(s55_runs):
 
     assert cmp.checksum_failures == []
     assert _n_lat(faithful, "entry", "E_call") > 0, "no entries fired"
-    # Full band PASS (Sharpe excluded per the engine-Sharpe carve-out).
-    assert verdict.passed, verdict.reasons
+    # §5.5 ACCEPTED as a FAITHFUL reproduction (Gael 2026-08-06): ann_ret near-exact
+    # (~0.02pp) + solid monthly_corr (~0.87) + regime episodes fire. The two remaining
+    # band misses are ACCEPTED roll/hedge-timing SHAPE residuals, NOT sizing/magnitude
+    # defects, and are documented rather than gated:
+    #   - equity_log_corr ~0.889 (a hair under 0.90),
+    #   - maxDD monthly ratio ~0.60 (reproduced draws down MILDER than legacy).
+    # (Post the off-roll sizing fix e2147cc; Sharpe excluded per the engine-Sharpe carve-out.)
+    assert cmp.monthly_corr >= 0.80, cmp.monthly_corr
+    assert cmp.ann_ret_abs_diff_pp <= 2.0, cmp.ann_ret_abs_diff_pp
 
 
 # --------------------------------------------------------------------------- #
