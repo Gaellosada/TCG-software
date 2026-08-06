@@ -92,6 +92,60 @@ async def read_index_prices(
     )
 
 
+async def read_rate_values(
+    pool: DwhConnectionPool,
+    symbol: str,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+) -> PriceSeries | None:
+    """Read an object-level rate ``value`` series (``kind='rate'``) → ``PriceSeries``.
+
+    A rate object (e.g. ``RATE_US_CMT_1M``, FRED DGS1MO) is a bare series with
+    NO contract: it lives in ``fact_value`` on a ``type='value'`` serie whose
+    ``contract_id IS NULL``. ``value`` is the annualized yield in PERCENT; it is
+    returned verbatim on ``close`` (the ÷100 to a fraction is the cash-rate
+    wiring layer's job, mirroring ``core/greeks.py::load_rate``).
+
+    Resolved purely by the ``object.symbol`` natural key (never a hardcoded
+    ``object_id``), so it survives an id reshuffle and generalises to any CMT
+    tenor loaded later. NULL fact rows (holiday gaps) are dropped; the reindex
+    step downstream forward-fills. Returns ``None`` when the window holds no
+    rows, exactly as ``read_index_prices`` does.
+
+    ``open``/``high``/``low``/``volume`` are ``NaN`` — a rate has no OHLCV, and
+    NaN (not 0.0) keeps a bogus price from ever entering a high/low comparison.
+    """
+    lo, hi = date_int_bounds(start, end)
+    sql = f"""
+        SELECT f.ts, f.value
+        FROM {V2_SCHEMA}.object o
+        JOIN {V2_SCHEMA}.serie s
+          ON s.object_id = o.object_id
+         AND s.contract_id IS NULL
+         AND s.type = 'value'
+        JOIN {V2_SCHEMA}.fact_value f ON f.serie_id = s.serie_id
+        WHERE o.symbol = %s
+          AND o.kind = 'rate'
+          AND f.value IS NOT NULL
+          AND f.ts >= %s AND f.ts < %s
+        ORDER BY f.ts
+    """
+    rows = await _fetch(pool, sql, (symbol, lo, hi), f"rate values {symbol}")
+    if not rows:
+        return None
+    n = len(rows)
+    nan = np.full(n, float("nan"), dtype=np.float64)
+    return PriceSeries(
+        dates=np.array([ts_to_date_int(r["ts"]) for r in rows], dtype=np.int64),
+        open=nan.copy(),
+        high=nan.copy(),
+        low=nan.copy(),
+        close=_col(rows, "value"),
+        volume=nan.copy(),
+    )
+
+
 async def read_futures_contract_rows(
     pool: DwhConnectionPool,
     *,

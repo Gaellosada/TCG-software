@@ -39,6 +39,8 @@ from tcg.data._v2_compat._mapping import (
     V2_INDEX_COLLECTION,
     V2_INDEX_SYMBOL,
     V2_OPTIONS_COLLECTION,
+    V2_RATE_COLLECTION,
+    V2_RATE_SYMBOLS,
     expiration_int_from_futures_symbol,
     futures_symbol_from_expiration,
     v2_supports_collection,
@@ -68,7 +70,15 @@ from tcg.types.options import (
 )
 
 # The non-option collections v2 serves, in the order list_collections returns.
-_V2_PRICE_COLLECTIONS: tuple[str, ...] = (V2_INDEX_COLLECTION, V2_FUTURES_COLLECTION)
+# ``RATE`` is the object-level rate-series collection (US CMT yields); it carries
+# no ``AssetClass`` (``asset_class_for`` returns ``None``), so it is only ever
+# reached by an explicit ``collection="RATE"`` fetch — never a class-filtered
+# discovery — exactly like a cash-rate leg needs.
+_V2_PRICE_COLLECTIONS: tuple[str, ...] = (
+    V2_INDEX_COLLECTION,
+    V2_FUTURES_COLLECTION,
+    V2_RATE_COLLECTION,
+)
 
 
 class V2MarketDataAdapter:
@@ -149,6 +159,20 @@ class V2MarketDataAdapter:
                 )
                 for e in expirations
             ]
+        elif collection == V2_RATE_COLLECTION:
+            # Rate series carry no dedicated AssetClass (no enum churn — spec
+            # §1.5). They are tagged INDEX as the closest v1-shaped analogue (a
+            # single non-tradeable level series); the RATE collection name is the
+            # real discriminator the picker filters on. No dwh round-trip — the
+            # loaded rate symbols are a small static set.
+            items = [
+                InstrumentId(
+                    symbol=sym,
+                    asset_class=AssetClass.INDEX,
+                    collection=V2_RATE_COLLECTION,
+                )
+                for sym in V2_RATE_SYMBOLS
+            ]
         else:
             # OPT_SP_500 is discovered through the options reader, not here —
             # mirroring v1, whose list_collections also excludes OPT_*.
@@ -197,6 +221,15 @@ class V2MarketDataAdapter:
             if instrument_id != V2_INDEX_SYMBOL:
                 raise V2InstrumentUnavailable(instrument_id, collection)
             result = await _sql_v2.read_index_prices(self._pool, start=start, end=end)
+        elif collection == V2_RATE_COLLECTION:
+            # Rate objects are surfaced by their ``object.symbol`` natural key.
+            # An unknown symbol is an identity mismatch (loud), NOT missing data:
+            # answering ``None`` there would let a typo look like an empty window.
+            if instrument_id not in V2_RATE_SYMBOLS:
+                raise V2InstrumentUnavailable(instrument_id, collection)
+            result = await _sql_v2.read_rate_values(
+                self._pool, instrument_id, start=start, end=end
+            )
         else:
             expiration_int = expiration_int_from_futures_symbol(instrument_id)
             result = await _sql_v2.read_futures_prices(
