@@ -753,16 +753,22 @@ class LegSpec(_PerInstrumentSourceMixin):
         fail the fetch. (The frontend always sends both explicitly; this is the
         safety net.)
         """
-        if self.type == "cash_rate" and self.cash_rate is None:
-            object.__setattr__(
-                self,
-                "cash_rate",
-                CashRateSpec(
-                    collection=V2_RATE_COLLECTION,
-                    symbol=V2_RATE_1M_SYMBOL,
-                ),
-            )
-            if self.data_source not in ("v2",):
+        if self.type == "cash_rate":
+            if self.cash_rate is None:
+                object.__setattr__(
+                    self,
+                    "cash_rate",
+                    CashRateSpec(
+                        collection=V2_RATE_COLLECTION,
+                        symbol=V2_RATE_1M_SYMBOL,
+                    ),
+                )
+            # Rates are a v2-only object, so EVERY cash_rate leg resolves against
+            # v2 — regardless of whether the spec was defaulted or supplied
+            # explicitly. Without this, a hand-built payload with an explicit
+            # ``cash_rate`` but no ``data_source`` would default to v1 and fail
+            # the fetch. (The frontend always sends both; this is the safety net.)
+            if self.data_source != "v2":
                 object.__setattr__(self, "data_source", "v2")
         return self
 

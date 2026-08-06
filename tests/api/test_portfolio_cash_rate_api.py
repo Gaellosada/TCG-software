@@ -242,3 +242,39 @@ async def test_series_cash_leg_requires_ref() -> None:
     resp = await _post(app, body)
     assert resp.status_code in (400, 422), resp.text
     assert "collection" in resp.text and "symbol" in resp.text
+
+
+# ── 6. data_source normalisation: a cash_rate leg is ALWAYS v2 ──────────────
+# Rates are a v2-only object. The frontend always stamps ``data_source: 'v2'``,
+# but a hand-built / API payload with an explicit ``cash_rate`` spec and no
+# ``data_source`` must not silently default to v1 (which cannot serve rates).
+
+
+def test_explicit_spec_without_data_source_normalises_to_v2() -> None:
+    from tcg.core.api.portfolio import CashRateSpec, LegSpec
+
+    leg = LegSpec(
+        type="cash_rate",
+        cash_rate=CashRateSpec(collection="RATE", symbol="RATE_US_CMT_1M"),
+    )
+    assert leg.data_source == "v2"
+
+
+def test_explicit_v1_on_cash_rate_leg_is_forced_to_v2() -> None:
+    from tcg.core.api.portfolio import CashRateSpec, LegSpec
+
+    leg = LegSpec(
+        type="cash_rate",
+        data_source="v1",  # rates cannot come from v1 -> normalised
+        cash_rate=CashRateSpec(collection="RATE", symbol="RATE_US_CMT_1M"),
+    )
+    assert leg.data_source == "v2"
+
+
+def test_specless_cash_rate_leg_still_defaults_to_v2() -> None:
+    from tcg.core.api.portfolio import LegSpec
+
+    leg = LegSpec(type="cash_rate")
+    assert leg.data_source == "v2"
+    assert leg.cash_rate is not None
+    assert leg.cash_rate.symbol == "RATE_US_CMT_1M"
