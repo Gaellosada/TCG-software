@@ -24,7 +24,9 @@ crossing an import-linter boundary.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -38,7 +40,7 @@ class RootMultipliers:
 
 # Keyed by ROOT (the collection with its ``OPT_`` / ``FUT_`` prefix stripped —
 # both share the same root, e.g. ``OPT_SP_500`` and ``FUT_SP_500`` → ``SP_500``).
-FUTURES_NOTIONAL_MULTIPLIERS: dict[str, RootMultipliers] = {
+FUTURES_NOTIONAL_MULTIPLIERS: Mapping[str, RootMultipliers] = MappingProxyType({
     "SP_500": RootMultipliers(m_fut=50.0, m_opt=50.0, verified=True),
     "NASDAQ_100": RootMultipliers(m_fut=20.0, m_opt=20.0, verified=True),
     "GOLD": RootMultipliers(m_fut=100.0, m_opt=100.0, verified=True),
@@ -55,7 +57,7 @@ FUTURES_NOTIONAL_MULTIPLIERS: dict[str, RootMultipliers] = {
     "JPYUSD": RootMultipliers(m_fut=12_500_000.0, m_opt=12_500_000.0, verified=False),
     "T_NOTE_10_Y": RootMultipliers(m_fut=1000.0, m_opt=1000.0, verified=True),
     "T_BOND": RootMultipliers(m_fut=1000.0, m_opt=1000.0, verified=True),
-}
+})
 
 
 def collapse_index_point(

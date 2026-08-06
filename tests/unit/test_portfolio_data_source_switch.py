@@ -1181,3 +1181,24 @@ async def test_multi_source_zero_overlap_is_a_clean_400_not_a_crash(client, serv
     # merge, not a dropped leg.
     assert services["v1"].get_aligned_prices.await_count == 1
     assert services["v2"].get_aligned_prices.await_count == 1
+
+
+def test_specless_cash_rate_leg_defaults_v2_and_dumps_spec() -> None:
+    """A5(2) pin: a specless ``cash_rate`` leg is coerced to the canonical v2 US
+    1M-CMT source in an after-validator. The coercion must (a) stamp
+    ``data_source="v2"`` (rates are v2-only) and (b) populate ``cash_rate`` so the
+    result-cache-key dump carries the source verbatim. Locks the model_dump shape
+    after switching the validator off ``object.__setattr__`` to plain assignment.
+    """
+    leg = portfolio.LegSpec(type="cash_rate")
+    assert leg.data_source == "v2"
+    assert leg.cash_rate is not None
+    dumped = leg.model_dump(mode="json")
+    assert dumped["data_source"] == "v2"
+    assert dumped["cash_rate"]["symbol"] == leg.cash_rate.symbol
+    # An explicit cash_rate spec with no data_source is still forced to v2.
+    leg2 = portfolio.LegSpec(
+        type="cash_rate",
+        cash_rate=portfolio.CashRateSpec(collection="RATE", symbol="RATE_US_CMT_1M"),
+    )
+    assert leg2.data_source == "v2"
