@@ -36,19 +36,16 @@ from tcg.core.api._models import (
 from tcg.data.protocols import MarketDataService
 from tcg.engine.signal_exec import SignalDataError, SignalValidationError
 from tcg.types.errors import DataNotFoundError, ValidationError
-from tcg.types.market import (
-    AdjustmentMethod,
-    ContinuousRollConfig,
-    RollStrategy,
-)
 from tcg.types.options import expand_cycle
 from tcg.types.signal import (
     DeltaHedgeSpec,
+    HedgeSpec,
     InputInstrument,
     InstrumentBasket,
     InstrumentContinuous,
     InstrumentOptionStream,
     InstrumentSpot,
+    delta_hedge_to_hedge_spec,
 )
 
 logger = logging.getLogger(__name__)
@@ -447,6 +444,116 @@ def _pick_field(series, field: str) -> npt.NDArray[np.float64]:
     )
 
 
+async def resolve_hedge_raw(
+    *,
+    label: str,
+    hedge: HedgeSpec,
+    instrument: InstrumentOptionStream,
+    fetch_fn: Any,
+    svc: MarketDataService,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]] | None,
+]:
+    """Fetch the RAW (unaligned) delta / hedge-price / gate series a hedge needs.
+
+    The UNIFIED data path for the modular hedge overlay — shared by BOTH
+    hedge-attach sites (``portfolio._build_delta_hedge_arrays`` and the signal-leg
+    ``fetch_delta_hedge_series``) so the fetch is defined once.  Each caller then
+    re-indexes the ``(dates, values)`` pairs onto ITS OWN date axis and computes
+    the gate + roll mask — the only per-site difference.
+
+    * DELTA — the HELD option contract's per-day delta.  Sourced by resolving the
+      SAME option instrument a SECOND time with ``stream="delta"`` (hold ON,
+      ``delta_hedge`` cleared so the resolve never recurses).
+    * HEDGE-PRICE — the hedge instrument's price series, dispatched on
+      ``hedge.hedge_instrument``: an :class:`InstrumentContinuous` resolves via
+      ``get_continuous`` (honouring its adjustment / cycle / roll-offset / strategy
+      — the VX1 default is front-month DIFFERENCE, byte-identical to the legacy
+      hard-wire); an :class:`InstrumentSpot` resolves via ``get_prices``.  The
+      hedge's per-unit delta is ``1`` (spot/future) so the engine's
+      ``hedge_unit_delta`` stays all-ones — resolved by the caller, not returned.
+    * GATE — the raw activation series LEVEL (SPEC: VVIX via ``INDEX``/``IND_VVIX``);
+      the caller applies ``gate_op``/``gate_threshold``.  ``None`` when
+      ``hedge.gate_collection is None`` (always-on activation) — the caller then
+      treats the gate as all-True.
+
+    Returns ``((d_dates, d_vals), (hp_dates, hp_close), gate_pair_or_None)``.
+    Raises :class:`ValidationError` on a resolve error / empty series; the signal
+    side-channel converts it to ``SignalDataError`` for uniform handling.
+    """
+    # ── DELTA: second hold resolve of the same contract, stream="delta" ──
+    delta_instrument = replace(instrument, stream="delta", delta_hedge=None)
+    try:
+        d_dates, d_vals = await fetch_fn(delta_instrument, "delta")
+    except (SignalDataError, SignalValidationError) as exc:
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge could not resolve the option delta "
+            f"series: {exc}"
+        ) from exc
+
+    # ── HEDGE-PRICE: dispatch on the hedge instrument type (spot/future, δ≡1) ──
+    hi = hedge.hedge_instrument
+    if isinstance(hi, InstrumentContinuous):
+        try:
+            roll_cfg = build_roll_config(
+                hi.adjustment, hi.cycle, hi.roll_offset, strategy=hi.strategy
+            )
+        except ValueError as exc:
+            raise ValidationError(
+                f"Leg '{label}': delta-hedge future roll config invalid: {exc}"
+            ) from exc
+        h_series = await svc.get_continuous(
+            hi.collection, roll_cfg, start=start_date, end=end_date
+        )
+        if h_series is None or len(h_series.prices) == 0:
+            raise ValidationError(
+                f"Leg '{label}': delta-hedge could not load the hedge future "
+                f"'{hi.collection}' (continuous is empty)"
+            )
+        hp_pair = (h_series.prices.dates, h_series.prices.close)
+    elif isinstance(hi, InstrumentSpot):
+        p_series = await svc.get_prices(
+            hi.collection, hi.instrument_id, start=start_date, end=end_date
+        )
+        if p_series is None or len(p_series) == 0:
+            raise ValidationError(
+                f"Leg '{label}': delta-hedge could not load the hedge spot "
+                f"'{hi.collection}/{hi.instrument_id}'"
+            )
+        hp_pair = (p_series.dates, p_series.close)
+    else:  # pragma: no cover - the union is closed to spot/future
+        raise ValidationError(
+            f"Leg '{label}': unsupported hedge instrument "
+            f"{type(hi).__name__!r} (only spot / continuous future)"
+        )
+
+    # ── GATE: raw activation series LEVEL (op/threshold applied by the caller) ──
+    gate_pair: tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]] | None = None
+    if hedge.gate_collection is not None and hedge.gate_symbol is not None:
+        gate_series = await svc.get_prices(
+            hedge.gate_collection, hedge.gate_symbol, start=start_date, end=end_date
+        )
+        if gate_series is None or len(gate_series) == 0:
+            raise ValidationError(
+                f"Leg '{label}': delta-hedge could not load the gate series "
+                f"'{hedge.gate_collection}/{hedge.gate_symbol}'"
+            )
+        gate_pair = (gate_series.dates, gate_series.close)
+
+    return (
+        (
+            np.asarray(d_dates, dtype=np.int64),
+            np.asarray(d_vals, dtype=np.float64),
+        ),
+        hp_pair,
+        gate_pair,
+    )
+
+
 async def resolve_delta_hedge_raw(
     *,
     label: str,
@@ -461,73 +568,26 @@ async def resolve_delta_hedge_raw(
     tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
     tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
 ]:
-    """Fetch the RAW (unaligned) delta / VX1 / gate series a delta-hedge needs (F2).
+    """Back-compat shim: migrate a legacy :class:`DeltaHedgeSpec` and delegate to
+    :func:`resolve_hedge_raw`.
 
-    Shared by BOTH hedge-attach sites so the DATA FETCH is defined once (the
-    reviewer's ``do-not-duplicate`` for P-F2-1): the portfolio-leg path
-    (``portfolio._build_delta_hedge_arrays``) and the signal-leg side-channel
-    (``fetch_delta_hedge_series`` below).  Each caller then re-indexes the three
-    ``(dates, values)`` pairs onto ITS OWN date axis (the leg axis / the signal
-    union axis) and computes the gate + roll mask — the only per-site difference.
-
-    * DELTA — the HELD option contract's per-day delta.  Sourced by resolving the
-      SAME option instrument a SECOND time with ``stream="delta"`` (hold ON,
-      ``delta_hedge`` cleared so the resolve never recurses), so the held-contract
-      SELECTION is identical and the delta lands on the same trade-date axis.
-    * VX1 — the hedge future's front-month continuous, DIFFERENCE-adjusted so daily
-      diffs are the true front-future daily P&L (roll gaps removed).
-    * GATE — the raw gate index LEVEL (SPEC: VVIX via ``INDEX``/``IND_VVIX``);
-      the caller applies ``gate_op``/``gate_threshold`` after aligning.
-
-    Returns ``((d_dates, d_vals), (vx_dates, vx_close), (gate_dates, gate_close))``.
-    Raises :class:`ValidationError` (the portfolio convention) on a resolve error /
-    empty series; the signal side-channel converts it to ``SignalDataError`` so the
-    engine's error handling stays uniform.
+    The legacy VX1 spec migrates to a front-month, difference-adjusted
+    :class:`InstrumentContinuous` (:func:`delta_hedge_to_hedge_spec`), so the
+    ``get_continuous`` call and the gate fetch are byte-identical to the prior
+    hard-wired path.  ``gate_collection`` is always set on a legacy spec ⇒ the gate
+    pair is never ``None`` here (the 3-pair legacy return shape is preserved).
     """
-    # ── DELTA: second hold resolve of the same contract, stream="delta" ──
-    delta_instrument = replace(instrument, stream="delta", delta_hedge=None)
-    try:
-        d_dates, d_vals = await fetch_fn(delta_instrument, "delta")
-    except (SignalDataError, SignalValidationError) as exc:
-        raise ValidationError(
-            f"Leg '{label}': delta-hedge could not resolve the option delta "
-            f"series: {exc}"
-        ) from exc
-
-    # ── VX1: front-month continuous (difference-adjusted) ──
-    vx_series = await svc.get_continuous(
-        hedge.hedge_collection,
-        ContinuousRollConfig(
-            strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.DIFFERENCE,
-        ),
-        start=start_date,
-        end=end_date,
+    d_pair, hp_pair, gate_pair = await resolve_hedge_raw(
+        label=label,
+        hedge=delta_hedge_to_hedge_spec(hedge),
+        instrument=instrument,
+        fetch_fn=fetch_fn,
+        svc=svc,
+        start_date=start_date,
+        end_date=end_date,
     )
-    if vx_series is None or len(vx_series.prices) == 0:
-        raise ValidationError(
-            f"Leg '{label}': delta-hedge could not load the hedge future "
-            f"'{hedge.hedge_collection}' (VX1 continuous is empty)"
-        )
-
-    # ── GATE: raw index LEVEL (op/threshold applied by the caller) ──
-    gate_series = await svc.get_prices(
-        hedge.gate_collection, hedge.gate_symbol, start=start_date, end=end_date
-    )
-    if gate_series is None or len(gate_series) == 0:
-        raise ValidationError(
-            f"Leg '{label}': delta-hedge could not load the gate series "
-            f"'{hedge.gate_collection}/{hedge.gate_symbol}'"
-        )
-
-    return (
-        (
-            np.asarray(d_dates, dtype=np.int64),
-            np.asarray(d_vals, dtype=np.float64),
-        ),
-        (vx_series.prices.dates, vx_series.prices.close),
-        (gate_series.dates, gate_series.close),
-    )
+    assert gate_pair is not None  # legacy spec always carries a gate
+    return d_pair, hp_pair, gate_pair
 
 
 def make_signal_fetcher(

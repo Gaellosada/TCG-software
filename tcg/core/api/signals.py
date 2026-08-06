@@ -111,6 +111,7 @@ from tcg.core.api._series_fetch import (
     basket_leg_date_intersection,
     make_signal_fetcher,
     resolve_delta_hedge_raw,
+    resolve_hedge_raw,
 )
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api._v2_preconditions import (
@@ -1588,5 +1589,6 @@ __all__ = [
     "parse_signal",
     "make_signal_fetcher",
     "resolve_delta_hedge_raw",
+    "resolve_hedge_raw",
     "compute_input_overlap",
 ]

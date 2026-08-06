@@ -226,6 +226,71 @@ class DeltaHedgeSpec:
     gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
 
 
+@dataclass(frozen=True)
+class HedgeSpec:
+    """Modular delta-hedge OVERLAY — the UNIFIED successor to :class:`DeltaHedgeSpec`.
+
+    Any option leg can carry this overlay to hedge ``factor`` of its net delta with
+    a **spot or continuous-future** instrument (per-unit delta ``δ≈1``).  It
+    generalises the VX1-shaped :class:`DeltaHedgeSpec` along three axes Gael asked
+    for:
+
+    * ``hedge_instrument`` — the hedge is now a first-class instrument reference
+      (:class:`InstrumentSpot` or :class:`InstrumentContinuous`) rather than a
+      ``FUT_VIX``/``front_month`` string pair, so a VIX call can be hedged with any
+      future or a spot.  (Option-as-hedge is explicitly OUT of scope — δ stays 1.)
+    * ``rebalance_interval_days`` — freeze the hedge quantity between rebalance bars;
+      re-size off today's delta only on rebalance bars.  ``N = 1`` (default) is the
+      current daily-rebalance behaviour EXACTLY.
+    * ``pause_on_roll`` — when ``True`` (default) the hedge books 0 on the hedged
+      option's roll bar (``hedge_active = activation ∧ in_position ∧ ~is_roll`` — the
+      VX1 default, byte-identical); ``False`` hedges through the roll.
+
+    Activation is a degenerate signals-layer Condition (``series <op> threshold``):
+    ``gate_collection``/``gate_symbol`` name the series, ``gate_op``/``gate_threshold``
+    the comparison (SPEC: ``VVIX > 150``).  ``gate_collection is None`` ⇒ always-on
+    activation (still ANDed with in-position and the roll-pause flag).
+
+    Frozen + primitive/types-only (``hedge_instrument`` is a ``tcg.types`` ref), so it
+    lives in ``tcg.types`` with no new cross-layer dependency.  :class:`DeltaHedgeSpec`
+    is kept as a back-compat loader; :func:`delta_hedge_to_hedge_spec` migrates it.
+    """
+
+    hedge_instrument: "InstrumentSpot | InstrumentContinuous"
+    factor: float = 1.0 / 3.0
+    rebalance_interval_days: int = 1
+    qty_cap_mult: float = 10.0
+    pause_on_roll: bool = True
+    gate_collection: str | None = "INDEX"
+    gate_symbol: str | None = "IND_VVIX"
+    gate_threshold: float = 150.0
+    gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
+
+
+def delta_hedge_to_hedge_spec(dh: DeltaHedgeSpec) -> HedgeSpec:
+    """Migrate a legacy :class:`DeltaHedgeSpec` to the unified :class:`HedgeSpec`.
+
+    The VX1 hedge future (``hedge_collection`` / ``hedge_roll_strategy``) becomes an
+    :class:`InstrumentContinuous` with ``adjustment='difference'`` — the SAME
+    front-month, difference-adjusted continuous the legacy resolver hard-wired, so
+    the resulting fetch (and hence legs 11/12) is byte-identical.  The gate fields
+    and factor carry across unchanged; the new knobs take their byte-identical
+    defaults (``rebalance_interval_days=1``, ``qty_cap_mult=10``, ``pause_on_roll=True``).
+    """
+    return HedgeSpec(
+        hedge_instrument=InstrumentContinuous(
+            collection=dh.hedge_collection,
+            adjustment="difference",
+            strategy=dh.hedge_roll_strategy,  # type: ignore[arg-type]
+        ),
+        factor=dh.factor,
+        gate_collection=dh.gate_collection,
+        gate_symbol=dh.gate_symbol,
+        gate_threshold=dh.gate_threshold,
+        gate_op=dh.gate_op,
+    )
+
+
 # A single leg of an :class:`InstrumentBasket`.  Each leg pairs one of
 # the three concrete leaf instrument types (``InstrumentSpot`` /
 # ``InstrumentContinuous`` / ``InstrumentOptionStream``) with a signed
