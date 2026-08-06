@@ -40,19 +40,78 @@ def _daily_fref_at(spec: "_HoldPnLSpec", idx: int) -> float:
     return float(arr[idx])
 
 
-def delta_hedge_qty(factor: float, option_qty: float, option_delta: float) -> float:
-    """Delta-hedge futures quantity for a single option position (F2 core mechanic).
+def delta_hedge_qty(
+    factor: float,
+    option_qty: float,
+    option_delta: float,
+    hedge_unit_delta: float = 1.0,
+    cap_mult: float = 10.0,
+) -> float:
+    """Delta-hedge instrument quantity for a single option position (F2 core mechanic).
 
-    ``qty_hedge = -factor · (option_qty · option_delta)`` — a future's per-unit
-    delta is ``1``, so the hedge that neutralises ``factor`` of the option's net
-    delta is simply ``-factor`` times the option's signed delta exposure.  For a
-    LONG call (``option_qty·option_delta > 0``) this is NEGATIVE ⇒ SHORT the
-    future, the sign the spec requires.  Pure scalar; used both by
-    :func:`_compound_with_hold` (per-step, aggregated over the leg's single held
-    contract) and directly by the unit oracle so the sizing law is verified in
+    ``qty_hedge = -factor · (option_qty · option_delta) / hedge_unit_delta`` — the
+    hedge instrument's OWN per-unit delta divides, so ``factor`` of the option's
+    net delta is neutralised by that many delta-equivalents of the hedge
+    instrument.  A future/spot has ``hedge_unit_delta = 1`` (the DEFAULT), which
+    reduces to the pre-modularization ``-factor·option_qty·option_delta`` exactly
+    (``x / 1.0 == x`` in IEEE754).  For a LONG call (``option_qty·option_delta >
+    0``, ``hedge_unit_delta > 0``) the result is NEGATIVE ⇒ SHORT the hedge, the
+    sign the spec requires.
+
+    Two guards make the divide safe for a general (option-)hedge whose per-unit
+    delta drifts and can approach 0:
+
+    * **Degenerate delta** — ``|hedge_unit_delta| < 1e-6`` (or non-finite) ⇒ return
+      ``0.0`` (book NO hedge this step; never a silent inf/NaN fill).
+    * **Quantity cap** — ``|qty_hedge| ≤ cap_mult · |option_qty|`` (symmetric clip,
+      default ``cap_mult = 10.0``), applied in QUANTITY units (option-qty scale)
+      before the caller multiplies by ``ΔP_hedge``.  For the VX1/future path
+      (``|δ_opt| ≤ 1``, ``factor = 1/3``, ``hedge_unit_delta = 1``) ``|qty| ≤
+      0.33·|option_qty|`` never binds ⇒ byte-identical.
+
+    Pure scalar; used both by :func:`hedge_step_contrib` / :func:`_compound_with_hold`
+    (per-step) and directly by the unit oracle so the sizing law is verified in
     isolation.
     """
-    return -factor * option_qty * option_delta
+    if not np.isfinite(hedge_unit_delta) or abs(hedge_unit_delta) < 1e-6:
+        return 0.0
+    q = -factor * option_qty * option_delta / hedge_unit_delta
+    bound = cap_mult * abs(option_qty)
+    return float(np.clip(q, -bound, bound))
+
+
+def hedge_step_contrib(
+    *,
+    factor: float,
+    option_qty_cur: float,
+    delta_opt_s: float,
+    hedge_unit_delta_s: float,
+    d_hedge_price: float,
+    cap_mult: float = 10.0,
+) -> float:
+    """One step's hedge $-P&L contribution, sized off the option's own quantity.
+
+    The SINGLE accrual primitive shared by BOTH notional bases of
+    :func:`_compound_with_hold` (previously two duplicated inline blocks): given
+    the option's roll-frozen ``option_qty_cur`` (the coefficient of ``dprem`` in
+    the option's own contrib), today's option delta ``delta_opt_s``, the hedge
+    instrument's per-unit delta ``hedge_unit_delta_s`` (``1.0`` for a spot/future),
+    and the hedge price move ``d_hedge_price = P_hedge[s+1] − P_hedge[s]``:
+
+        qty_hedge  = delta_hedge_qty(factor, option_qty_cur, delta_opt_s,
+                                     hedge_unit_delta_s, cap_mult)     (guarded/capped)
+        contrib_$  = qty_hedge · d_hedge_price
+
+    A non-finite ``delta_opt_s`` or ``d_hedge_price`` books ``0.0`` that step
+    (never a silent fill) — mirroring the pre-modularization guard exactly, so the
+    spot/future path stays byte-identical.
+    """
+    if not (np.isfinite(delta_opt_s) and np.isfinite(d_hedge_price)):
+        return 0.0
+    qty_hedge = delta_hedge_qty(
+        factor, option_qty_cur, delta_opt_s, hedge_unit_delta_s, cap_mult
+    )
+    return qty_hedge * d_hedge_price
 
 
 def _futures_denom_ok(spec: "_HoldPnLSpec", fref: float) -> bool:
@@ -160,6 +219,14 @@ class _HoldPnLSpec:
     hedge_delta: "npt.NDArray[np.float64] | None" = None
     hedge_price: "npt.NDArray[np.float64] | None" = None
     hedge_active: "npt.NDArray[np.bool_] | None" = None
+    # ``hedge_unit_delta`` — the HEDGE instrument's OWN per-unit delta (length
+    #   ``T``).  The hedge quantity DIVIDES by it: ``qty_hedge =
+    #   -factor·option_qty·δ_opt / δ_hedge``.  For a spot/future (the only hedge
+    #   instruments in scope) ``δ_hedge ≡ 1`` — passed as an all-ones array, or left
+    #   ``None`` which the accrual treats as ``1.0`` per step (both byte-identical to
+    #   the pre-modularization ``·1`` behaviour).  A near-zero / non-finite entry
+    #   books 0 that step (guarded in :func:`delta_hedge_qty`).
+    hedge_unit_delta: "npt.NDArray[np.float64] | None" = None
 
 
 def _compound_with_hold(
@@ -366,23 +433,23 @@ def _compound_with_hold(
                 ):
                     hd = spec.hedge_delta
                     hp = spec.hedge_price
-                    if spec.sizing_mode == "futures_notional":
-                        # Futures-notional: the option qty is sized off the frozen
-                        # future notional (seg_fref·mult_fut); its dollar-delta
-                        # exposure carries mult_opt — so the hedge coefficient is the
-                        # option contrib's coefficient of dprem.
-                        seg_f_h = seg_fref[rid]
-                        if (
-                            hd is not None
-                            and hp is not None
-                            and np.isfinite(seg_f_h)
-                            and seg_f_h != 0.0
-                            and np.isfinite(spec.mult_fut)
-                            and spec.mult_fut != 0.0
-                        ):
-                            delta_s = float(hd[s])
-                            d_hedge = float(hp[s + 1]) - float(hp[s])
-                            if np.isfinite(delta_s) and np.isfinite(d_hedge):
+                    hud = spec.hedge_unit_delta
+                    if hd is not None and hp is not None:
+                        # Mode-specific: the option's OWN roll-frozen quantity — the
+                        # SAME coefficient of ``dprem`` in the option contrib above,
+                        # in EITHER notional basis (GAP B).  ``None`` ⇒ this step's
+                        # seg-denominator is unusable ⇒ no hedge (as before).
+                        option_qty_cur: "float | None" = None
+                        if spec.sizing_mode == "futures_notional":
+                            # Sized off the frozen future notional (seg_fref·mult_fut),
+                            # dollar-delta exposure carries mult_opt.
+                            seg_f_h = seg_fref[rid]
+                            if (
+                                np.isfinite(seg_f_h)
+                                and seg_f_h != 0.0
+                                and np.isfinite(spec.mult_fut)
+                                and spec.mult_fut != 0.0
+                            ):
                                 option_qty_cur = (
                                     spec.sign
                                     * spec.nav_times
@@ -390,31 +457,29 @@ def _compound_with_hold(
                                     * spec.mult_opt
                                     / (seg_f_h * spec.mult_fut)
                                 )
-                                contrib += (
-                                    delta_hedge_qty(
-                                        spec.hedge_factor, option_qty_cur, delta_s
-                                    )
-                                    * d_hedge
-                                )
-                    else:
-                        seg_p_h = seg_premium[rid]
-                        if hd is not None and hp is not None and np.isfinite(seg_p_h) and seg_p_h != 0.0:
-                            delta_s = float(hd[s])
-                            d_hedge = float(hp[s + 1]) - float(hp[s])
-                            if np.isfinite(delta_s) and np.isfinite(d_hedge):
+                        else:
+                            seg_p_h = seg_premium[rid]
+                            if np.isfinite(seg_p_h) and seg_p_h != 0.0:
                                 option_qty_cur = (
                                     spec.sign
                                     * spec.nav_times
                                     * (seg_er[rid] / ratio[s])
                                     / seg_p_h
                                 )
-                                hedge_contrib = (
-                                    delta_hedge_qty(
-                                        spec.hedge_factor, option_qty_cur, delta_s
-                                    )
-                                    * d_hedge
+                        if option_qty_cur is not None:
+                            delta_s = float(hd[s])
+                            d_hedge = float(hp[s + 1]) - float(hp[s])
+                            if np.isfinite(delta_s) and np.isfinite(d_hedge):
+                                # ``δ_hedge = 1`` for a spot/future (all-ones array
+                                # or ``None``) — divide is exact ⇒ byte-identical.
+                                hud_s = float(hud[s]) if hud is not None else 1.0
+                                contrib += hedge_step_contrib(
+                                    factor=spec.hedge_factor,
+                                    option_qty_cur=option_qty_cur,
+                                    delta_opt_s=delta_s,
+                                    hedge_unit_delta_s=hud_s,
+                                    d_hedge_price=d_hedge,
                                 )
-                                contrib += hedge_contrib
             hold_contrib[rid][s] = contrib
             net += contrib
 
