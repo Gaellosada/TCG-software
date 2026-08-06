@@ -120,6 +120,77 @@ def test_hysteresis_two_full_episodes_two_pulses():
     assert _hyst(arr, 95.0, 75.0, "up") == [0, 0, 1, 0, 0, 0, 1]
 
 
+# --------------------------------------------------------------------------- #
+# D1 — exact-threshold boundaries (impl uses STRICT >/< at signal_exec.py:836-846)
+# --------------------------------------------------------------------------- #
+
+
+def test_hysteresis_up_exact_enter_does_not_arm():
+    # x == enter is NOT > enter, so the bar must NOT arm; a subsequent dip below
+    # exit therefore cannot fire (never armed). Contrast the > case below.
+    assert _hyst([95.0, 74.0], 95.0, 75.0, "up") == [0, 0]
+    # a hair above enter DOES arm → the same dip fires (proves strict-> boundary).
+    assert _hyst([95.0001, 74.0], 95.0, 75.0, "up") == [0, 1]
+
+
+def test_hysteresis_up_exact_exit_does_not_fire():
+    # Armed at t0 (96 > 95). t1 == exit is NOT < exit → hold (no fire); t2 < exit
+    # → fire. Pins the strict-< exit boundary.
+    assert _hyst([96.0, 75.0, 74.0], 95.0, 75.0, "up") == [0, 0, 1]
+
+
+def test_hysteresis_down_exact_enter_does_not_arm():
+    # down arms on x < enter; x == enter is not < → no arm → no fire on the rise.
+    assert _hyst([10.0, 22.0], 10.0, 20.0, "down") == [0, 0]
+    assert _hyst([9.9999, 22.0], 10.0, 20.0, "down") == [0, 1]
+
+
+def test_hysteresis_down_exact_exit_does_not_fire():
+    # down fires on x > exit; x == exit is not > → hold; the next strictly-greater
+    # bar fires.
+    assert _hyst([8.0, 20.0, 22.0], 10.0, 20.0, "down") == [0, 0, 1]
+
+
+# --------------------------------------------------------------------------- #
+# D2 — NaN THRESHOLD holds the arm state (enter/exit can be NaN in warm-up)
+# --------------------------------------------------------------------------- #
+
+
+def _hyst_arr(operand, enter, exit_, direction):
+    return _hysteresis_episode(
+        np.asarray(operand, dtype=np.float64),
+        np.asarray(enter, dtype=np.float64),
+        np.asarray(exit_, dtype=np.float64),
+        direction,
+    ).astype(int).tolist()
+
+
+def test_hysteresis_nan_exit_threshold_holds_arm_no_fire():
+    # enter/exit are themselves indicator series that emit NaN during warm-up.
+    # Armed at t0 (96 > 95). At t1 EXIT is NaN → bar skipped: arm held, NO fire
+    # even though operand 50 is well below the real exit. At t2 exit is finite
+    # again → fire. Pins the "NaN on a threshold holds arm state" branch.
+    out = _hyst_arr(
+        [96.0, 50.0, 74.0],
+        [95.0, 95.0, 95.0],
+        [75.0, np.nan, 75.0],
+        "up",
+    )
+    assert out == [0, 0, 1]
+
+
+def test_hysteresis_nan_enter_threshold_prevents_arm():
+    # ENTER is NaN on the only bar that would arm → the bar is skipped, never
+    # arms, so the later dip below exit cannot fire.
+    out = _hyst_arr(
+        [96.0, 74.0],
+        [np.nan, 95.0],
+        [75.0, 75.0],
+        "up",
+    )
+    assert out == [0, 0]
+
+
 # =========================================================================== #
 # Primitive B — _consecutive_true (unit oracle)
 # =========================================================================== #
