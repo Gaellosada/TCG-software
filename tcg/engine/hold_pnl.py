@@ -546,6 +546,17 @@ def _compound_with_hold(
                 continue
             is_open_point = bool(spec.is_roll[s + 1]) or not holding[rid]
             if is_open_point:
+                # The delta-hedge rebalance-freeze (seg_premium's sibling) is a
+                # PER-SEGMENT capture: clear it at every segment open (a roll, or an
+                # off-roll re-latch) so the first active bar of the NEW segment
+                # recaptures off the NEW contract's delta instead of reusing the
+                # PRIOR contract's frozen value under ``rebalance_interval_days > 1``.
+                # NaN forces the next active bar's ``not np.isfinite(...)`` recapture.
+                # At ``N <= 1`` the next bar recaptures every bar regardless ⇒ this is
+                # byte-identical (incl. the VX1/VVIX default path, where N == 1).
+                if spec.hedge_factor is not None:
+                    hedge_frozen_delta[rid] = np.nan
+                    hedge_frozen_hud[rid] = np.nan
                 open_prem = (
                     spec.roll_premium[s + 1]
                     if bool(spec.is_roll[s + 1])

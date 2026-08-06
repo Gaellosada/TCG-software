@@ -239,6 +239,64 @@ def test_rebalance_no_effect_when_delta_constant() -> None:
     np.testing.assert_array_equal(r1, r3)
 
 
+def test_rebalance_freeze_resets_on_option_roll() -> None:
+    # N1: the rebalance-freeze grid (``s % N == 0``) must be RESET when the hedged
+    # option ROLLS, else the first post-roll bar(s) size the hedge off the PRIOR
+    # contract's frozen delta.  Two-segment fixture (roll at bar 3), N=2, with the
+    # roll deliberately NOT on the freeze grid (3 % 2 != 0) so the bug is visible.
+    #
+    #   * seg-1 (bars 0-2) delta 0.2, seg-2 (bars 3-5) delta 0.9 at the roll bar;
+    #   * the hedge price is FLAT through the roll (steps 0,1,2 book zero) so the
+    #     equity ratio is exactly 1.0 entering the roll — the first post-roll step's
+    #     contrib is then an EXACT closed form of ``hedge_step_contrib``.
+    T = 6
+    premium = np.full(T, 10.0, dtype=np.float64)  # constant ⇒ option contrib 0
+    is_roll = np.array([True, False, False, True, False, False])
+    roll_premium = np.array([10.0, np.nan, np.nan, 10.0, np.nan, np.nan])
+    # Flat until index 3, then it moves ⇒ steps 0,1,2 have d_hedge_price == 0.
+    hedge_price = np.array([20.0, 20.0, 20.0, 20.0, 22.0, 25.0])
+    delta = np.array([0.2, 0.2, 0.2, 0.9, 0.5, 0.5])  # seg-1 0.2 → seg-2 0.9 at roll
+    spec = _HoldPnLSpec(
+        ref_id="_leg",
+        sign=1.0,
+        nav_times=1.0,
+        premium=premium,
+        is_roll=is_roll,
+        roll_premium=roll_premium,
+        pos_active=np.ones(T, dtype=np.bool_),
+        hedge_factor=1.0 / 3.0,
+        hedge_delta=delta,
+        hedge_price=hedge_price,
+        hedge_active=np.ones(T, dtype=np.bool_),
+        rebalance_interval_days=2,
+        qty_cap_mult=10.0,
+    )
+    _, _, c = _compound_with_hold(np.zeros(T - 1), [spec])
+
+    # ratio == 1.0 through the roll ⇒ option_qty at bar 3 = nav_times/seg_premium =
+    # 1/10 = 0.1; d_hedge_price at bar 3 = hp[4]-hp[3] = 2.0.
+    expected_new = hedge_step_contrib(
+        factor=1.0 / 3.0,
+        option_qty_cur=0.1,
+        delta_opt_s=0.9,  # NEW contract's delta at the roll bar
+        hedge_unit_delta_s=1.0,
+        d_hedge_price=2.0,
+        cap_mult=10.0,
+    )
+    expected_stale = hedge_step_contrib(
+        factor=1.0 / 3.0,
+        option_qty_cur=0.1,
+        delta_opt_s=0.2,  # PRIOR contract's frozen delta (the bug)
+        hedge_unit_delta_s=1.0,
+        d_hedge_price=2.0,
+        cap_mult=10.0,
+    )
+    # The two deltas give genuinely different contribs ⇒ the assertion discriminates.
+    assert expected_new != expected_stale
+    # Post-roll bar 3 must size off the NEW contract's delta (0.9), not the stale 0.2.
+    np.testing.assert_allclose(c["_leg"][3], expected_new)
+
+
 # ── P2a: qty_cap_mult through the engine spec ────────────────────────────────
 def test_qty_cap_binds_through_engine_spec() -> None:
     # A LARGE delta drives |qty| far past a tight cap ⇒ a tight cap clips and the
