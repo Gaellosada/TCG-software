@@ -58,6 +58,7 @@ from tcg.core.api._options_wiring import (
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import (
     DataSource,
+    effective_data_source,
     error_response,
     get_market_data,
     get_market_data_for,
@@ -1156,7 +1157,6 @@ async def materialise_streams(
     body: OptionStreamRequest,
     background_tasks: BackgroundTasks,
     request: Request,
-    svc: MarketDataService = Depends(get_market_data),
 ) -> dict | JSONResponse:
     """Materialise one or more option stream refs over a date range.
 
@@ -1182,6 +1182,38 @@ async def materialise_streams(
         start_date, end_date = parse_iso_range(body.start, body.end)
     except ValueError as exc:
         return error_response("validation", str(exc))
+
+    # Per-instrument warehouse selection. Each ``OptionStreamRef`` carries its own
+    # ``data_source`` (default v1). ``materialise_option_streams`` runs EVERY
+    # stream through ONE service, so a single request must be uniform in source —
+    # a mix would force one warehouse to answer for the other (the exact
+    # silent-wrong-warehouse failure the v2 boundary exists to prevent). The
+    # ``request``-bound ``get_market_data_for`` is the same mechanism the sibling
+    # read endpoints use; an all-v1 request resolves to the same service the
+    # ``Depends`` default gave, so v1 behaviour is byte-identical.
+    sources = {
+        effective_data_source(entry.ref.data_source, "v1") for entry in body.streams
+    }
+    if len(sources) > 1:
+        return error_response(
+            "validation",
+            "an option-stream request cannot mix v1 and v2 data sources; "
+            "materialise each warehouse in its own request",
+        )
+    source = next(iter(sources))
+    if source == "v2":
+        # Reject a collection/cycle/stream v2 cannot serve HERE, with an
+        # actionable message, rather than let the engine degrade to all-NaN.
+        # Runs before the service is resolved so a bad request never depends on
+        # the v2 warehouse being reachable.
+        from tcg.core.api._v2_preconditions import check_v2_preconditions
+        from tcg.types.errors import ValidationError as _ValidationError
+
+        try:
+            check_v2_preconditions(body.model_dump(mode="json"), data_source=source)
+        except _ValidationError as exc:
+            return error_response("validation", str(exc))
+    svc = get_market_data_for(request, source)
 
     # Pre-flight: tautology + greeks-gated checks
     cached_root_metadata: dict[str, object] | None = None
