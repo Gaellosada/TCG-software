@@ -4,6 +4,11 @@ Drives ``_compute_portfolio_uncached`` (§4.7 fetch, §5.5 accrual, §7 combine,
 §8 metrics) with only the market-data FETCH mocked — no DB, no live warehouse.
 The cash-leg accrual, calendar adoption, combine and metrics are all REAL.
 
+The cash-rate leg is now a SERIES source only (the flat constant was removed).
+A rate leg reads its annualized-percent series through the v2 path
+(``data_source='v2'``), so the mock is bound on ``app.state.market_data_v2_compat``.
+A cash-ONLY portfolio is now VALID: the rate series supplies its own calendar.
+
 Not marked ``integration`` (that marker means "requires live app-data
 PostgreSQL", which this does not): mocking the fetch keeps it in the DB-free
 suite while exercising the true compute path, so real output can be pasted.
@@ -69,6 +74,9 @@ def _make_app(
     app.add_exception_handler(TCGError, tcg_error_handler)
     app.include_router(portfolio_router)
     app.state.market_data = svc
+    # Rate legs resolve through the v2 service; bind the same mock so the fetch
+    # (get_prices) is served regardless of which source a leg selects.
+    app.state.market_data_v2_compat = svc
     app.state.app_db_repo = object()
     return app
 
@@ -90,18 +98,27 @@ def _daily_vol(equity: np.ndarray) -> float:
     return float(np.std(r))
 
 
-# ── 1. Flat cash leg accrues through the real path ──────────────────────────
+def _rate_leg(collection="RATE", symbol="RATE_US_CMT_1M", **extra):
+    return {
+        "type": "cash_rate",
+        "data_source": "v2",
+        "cash_rate": {"collection": collection, "symbol": symbol, **extra},
+    }
+
+
+# ── 1. Series cash leg accrues through the real path (constant 5% series) ────
 
 
 @pytest.mark.asyncio
-async def test_flat_cash_leg_accrues_through_real_compute() -> None:
+async def test_series_cash_leg_accrues_through_real_compute() -> None:
     dates = _busday_ints("2020-01-02", 252)
     flat = np.full(len(dates), 100.0)  # 0-return anchor leg supplies the calendar
-    app = _make_app(dates, {"anchor": flat})
+    rate = _price_series(dates, np.full(len(dates), 5.0))  # 5 %/yr, percent
+    app = _make_app(dates, {"anchor": flat}, series_by_symbol={"RATE_US_CMT_1M": rate})
     body = {
         "legs": {
             "anchor": {"type": "instrument", "collection": "INDEX", "symbol": "anchor"},
-            "cash": {"type": "cash_rate", "cash_rate": {"kind": "flat", "rate_pct": 5.0}},
+            "cash": _rate_leg(),
         },
         "weights": {"anchor": 0.0001, "cash": 100.0},
         "rebalance": "none",
@@ -119,53 +136,46 @@ async def test_flat_cash_leg_accrues_through_real_compute() -> None:
     # are what matter here — the exact base-100 accrual is proven by the DB-free
     # unit oracle (tests/engine/test_cash_rate.py).
     assert cash_eq[0] > 0.0
-    # Monotonically non-decreasing (all-positive drift) and near-zero vol.
-    assert np.all(np.diff(cash_eq) >= -1e-12)
-    assert _daily_vol(cash_eq) < 1e-9
-    # ~1 trading-year of a 5 %/yr compound accrual -> ann_ret ~= 5 %.
-    assert _ann_ret(cash_eq) == pytest.approx(0.05, rel=1e-6)
+    assert np.all(np.diff(cash_eq) >= -1e-12)   # all-positive drift
+    assert _daily_vol(cash_eq) < 1e-9           # near-zero vol
+    assert _ann_ret(cash_eq) == pytest.approx(0.05, rel=1e-6)  # ~5 %/yr
 
 
-# ── 2. Validation smoke vs §5.7 profile (2006–2026, flat leg) ───────────────
+# ── 2. Cash-ONLY portfolio is now VALID (rate series supplies the calendar) ──
 
 
 @pytest.mark.asyncio
-async def test_flat_cash_leg_20yr_profile_all_positive_near_zero_vol() -> None:
-    """SPEC §5.7 QUALITATIVE profile: over ~2006–2026 the flat leg is
-    all-positive, near-zero vol, sane ann_ret. The exact monthly PnL table is
-    PENDING from Gael (do NOT fabricate) — only the shape is asserted.
+async def test_cash_only_portfolio_accepted_series_supplies_calendar() -> None:
+    """A rate-only portfolio (no companion instrument) computes: the fetched
+    rate series' own dates ARE the trading calendar. This was REJECTED under the
+    old flat leg; it must now succeed.
     """
     dates = _busday_ints("2006-08-01", 5040)  # ~20 trading years
-    flat = np.full(len(dates), 100.0)
-    app = _make_app(dates, {"anchor": flat})
+    rate = _price_series(dates, np.full(len(dates), 1.0))  # 1 %/yr, percent
+    app = _make_app(dates, {}, series_by_symbol={"RATE_US_CMT_1M": rate})
     body = {
-        "legs": {
-            "anchor": {"type": "instrument", "collection": "INDEX", "symbol": "anchor"},
-            "cash": {"type": "cash_rate", "cash_rate": {"kind": "flat", "rate_pct": 1.0}},
-        },
-        "weights": {"anchor": 0.0001, "cash": 100.0},
+        "legs": {"cash": _rate_leg()},
+        "weights": {"cash": 100.0},
         "rebalance": "none",
-        "start": "2006-01-01",
-        "end": "2026-12-31",
         "use_cache": False,
     }
     resp = await _post(app, body)
     assert resp.status_code == 200, resp.text
     cash_eq = np.array(resp.json()["raw_leg_equities"]["cash"])
-    assert cash_eq[-1] > cash_eq[0]  # all-positive drift over the whole span
-    assert np.all(np.diff(cash_eq) >= -1e-12)  # never falls
-    assert _daily_vol(cash_eq) < 1e-9  # near-zero vol
+    assert cash_eq[-1] > cash_eq[0]             # all-positive drift over the span
+    assert np.all(np.diff(cash_eq) >= -1e-12)   # never falls
+    assert _daily_vol(cash_eq) < 1e-9           # near-zero vol
     assert _ann_ret(cash_eq) == pytest.approx(0.01, rel=1e-6)  # ~1 %/yr
 
 
-# ── 3. Series-source cash leg reindexes a real (fake-fetched) rate series ────
+# ── 3. Series cash leg reindexes a real (fake-fetched) stepped rate series ───
 
 
 @pytest.mark.asyncio
-async def test_series_cash_leg_uses_rate_series() -> None:
+async def test_series_cash_leg_tracks_rate_path() -> None:
     """A SERIES source reads (collection, symbol), holds the rate piecewise, and
     accrues faster where the rate is higher. Bars before the series' first date
-    fall back to the flat ``rate_pct``.
+    accrue at 0 (the default fallback).
     """
     dates = _busday_ints("2007-01-02", 600)
     flat = np.full(len(dates), 100.0)
@@ -174,21 +184,12 @@ async def test_series_cash_leg_uses_rate_series() -> None:
     rate_dates = dates[[50, 300]]
     rate_series = _price_series(rate_dates, np.array([5.0, 1.0]))  # percent
     app = _make_app(
-        dates, {"anchor": flat}, series_by_symbol={"RATE_USD": rate_series}
+        dates, {"anchor": flat}, series_by_symbol={"RATE_US_CMT_1M": rate_series}
     )
     body = {
         "legs": {
             "anchor": {"type": "instrument", "collection": "INDEX", "symbol": "anchor"},
-            "cash": {
-                "type": "cash_rate",
-                "cash_rate": {
-                    "kind": "series",
-                    "collection": "FUT_RATE",
-                    "symbol": "RATE_USD",
-                    "unit": "percent",
-                    "rate_pct": 2.0,  # fallback before the series starts
-                },
-            },
+            "cash": _rate_leg(unit="percent"),
         },
         "weights": {"anchor": 0.0001, "cash": 100.0},
         "rebalance": "none",
@@ -198,28 +199,46 @@ async def test_series_cash_leg_uses_rate_series() -> None:
     assert resp.status_code == 200, resp.text
     cash_eq = np.array(resp.json()["raw_leg_equities"]["cash"])
     assert np.all(np.diff(cash_eq) >= -1e-12)
-    # Per-bar growth factor: fallback 2% before bar 50, 5% on [50,300), 1% after.
+    # Per-bar growth factor: fallback 0% before bar 50, 5% on [50,300), 1% after.
     factors = cash_eq[1:] / cash_eq[:-1]
-    f_fallback = float(np.mean(factors[1:49]))   # bars 2..49 -> 2 %/yr
+    f_fallback = float(np.mean(factors[1:49]))   # bars 2..49 -> 0 %/yr (factor 1.0)
     f_high = float(np.mean(factors[60:290]))     # bars in the 5 %/yr window
     f_low = float(np.mean(factors[350:590]))     # bars in the 1 %/yr window
-    assert f_high > f_fallback > f_low > 1.0
+    assert f_high > f_low > f_fallback
     assert f_high == pytest.approx((1.05) ** (1 / 252), rel=1e-9)
     assert f_low == pytest.approx((1.01) ** (1 / 252), rel=1e-9)
-    assert f_fallback == pytest.approx((1.02) ** (1 / 252), rel=1e-9)
+    assert f_fallback == pytest.approx(1.0, rel=1e-12)  # pre-series bars: no accrual
 
 
-# ── 4. A flat-only cash portfolio has no calendar -> clear rejection ─────────
+# ── 4. A rate series that returns no data -> clear rejection ────────────────
 
 
 @pytest.mark.asyncio
-async def test_flat_only_cash_portfolio_rejected() -> None:
-    app = _make_app(np.array([20200101], dtype=np.int64), {})
+async def test_series_cash_leg_no_data_rejected() -> None:
+    app = _make_app(
+        np.array([20200101], dtype=np.int64), {}, series_by_symbol={}
+    )
     body = {
-        "legs": {"cash": {"type": "cash_rate", "cash_rate": {"kind": "flat"}}},
+        "legs": {"cash": _rate_leg()},
         "weights": {"cash": 100.0},
         "use_cache": False,
     }
     resp = await _post(app, body)
     assert resp.status_code == 400, resp.text
-    assert "no calendar of its own" in resp.text
+    assert "returned no data" in resp.text
+
+
+# ── 5. Missing collection/symbol on the spec -> validation error ────────────
+
+
+@pytest.mark.asyncio
+async def test_series_cash_leg_requires_ref() -> None:
+    app = _make_app(np.array([20200101], dtype=np.int64), {})
+    body = {
+        "legs": {"cash": {"type": "cash_rate", "cash_rate": {"unit": "percent"}}},
+        "weights": {"cash": 100.0},
+        "use_cache": False,
+    }
+    resp = await _post(app, body)
+    assert resp.status_code in (400, 422), resp.text
+    assert "collection" in resp.text and "symbol" in resp.text

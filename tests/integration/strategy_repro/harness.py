@@ -699,6 +699,11 @@ def saved_legs_to_compute_body(
                 spec["roll_offset"] = leg["roll_offset"]
         elif typ == "cash_rate":
             spec = {"type": "cash_rate", "cash_rate": leg.get("cash_rate")}
+            # A cash_rate leg reads a v2-only rate series, so its data_source
+            # ("v2") MUST survive into the compute body — otherwise the fetch
+            # routes to v1, which has no rate warehouse.
+            if leg.get("data_source"):
+                spec["data_source"] = leg["data_source"]
         elif typ == "continuous":
             spec = {
                 "type": "continuous",

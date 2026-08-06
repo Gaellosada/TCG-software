@@ -64,34 +64,48 @@ def _finite(seq) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
-# USD_1M_rate(P) — §5.7 F4 cash leg (flat 1 %/yr)
+# USD_1M_rate(P) — §5.7 F4 cash leg (REAL US 1M CMT rate series, CASH-ONLY)
 # --------------------------------------------------------------------------- #
-async def test_usd_1m_rate_persisted_entity(client):
-    """Persist a flat-1% cash_rate leg (+ a dated companion so the F4 cash-only
-    guard is satisfied), run it, and validate the cash leg's OWN equity against
-    the USD_1M_rate(P) target.
+def _seg_avg_daily_factor(dates, equity, lo_iso: str, hi_iso: str) -> float:
+    """Mean per-bar growth factor of ``equity`` over the [lo, hi) date window.
 
-    Flat-1% cannot track the real short-rate path (higher 2006-08 & 2023-25, ~0
-    in ZIRP years), so this validates the harness + the cash-carry MECHANIC, not
-    a shape fit — the divergence is expected and reported honestly.
+    ``dates`` are ISO strings; ``equity`` the aligned per-bar curve. Returns the
+    average of ``eq[i]/eq[i-1]`` for bars whose date falls in the window — a
+    proxy for the accrual RATE active in that period.
+    """
+    lo = int(lo_iso.replace("-", ""))
+    hi = int(hi_iso.replace("-", ""))
+    di = np.array([int(d.replace("-", "")) for d in dates], dtype=np.int64)
+    fac = equity[1:] / equity[:-1]
+    mask = (di[1:] >= lo) & (di[1:] < hi)
+    return float(np.mean(fac[mask])) if mask.any() else float("nan")
+
+
+async def test_usd_1m_rate_persisted_entity(client):
+    """Persist a CASH-ONLY cash_rate leg reading the REAL US 1M CMT rate series
+    (RATE/RATE_US_CMT_1M, data_source='v2') and validate that it ACCRUES with the
+    right shape: rises fast in the high-rate regimes (pre-2008, 2023-24), ~flat in
+    the ZIRP years, monotone-up, never below funding.
+
+    This is the F4 series repoint: the flat-1% source and the FUT_VIX companion
+    are GONE. A rate-only portfolio is now valid — the rate series supplies its
+    own trading calendar. Because the source is now the real path, the reproduced
+    curve TRACKS the USD_1M_rate(P) golden (materially better than the old flat).
     """
     target, checks = parse_target_section("USD_1M_rate(P)")
     saved_legs = [
         {
             "label": "cash", "type": "cash_rate", "weight": 100.0,
-            "cash_rate": {"kind": "flat", "rate_pct": 1.0, "compound": True},
-        },
-        # Companion supplies the trading-day calendar (cash-only is rejected).
-        {
-            "label": "vix3m", "type": "continuous", "collection": "FUT_VIX",
-            "strategy": "nth_nearest", "rank": 3, "rollOffset": 2,
-            "adjustment": "difference", "weight": 100.0,
+            "data_source": "v2",
+            "cash_rate": {
+                "collection": "RATE", "symbol": "RATE_US_CMT_1M",
+                "unit": "percent", "compound": True,
+            },
         },
     ]
     # DURABLE, UI-visible entity `Reproduction_USD_1M_rate` (idempotent upsert,
-    # RESEARCH category, NOT soft-deleted) — a non-dev opens + runs it from the
-    # Portfolio page.  The stored 2-leg doc (cash + dated FUT_VIX companion for
-    # the F4 cash-only guard) is what the UI shows.
+    # RESEARCH category, NOT soft-deleted). The stored doc is now a SINGLE cash
+    # leg (no companion) — a non-dev opens + runs it from the Portfolio page.
     doc, result = await durable_persist_and_run_portfolio(
         client, saved_legs,
         portfolio_id=REPRO_ENTITY_USD_1M_RATE,
@@ -100,9 +114,7 @@ async def test_usd_1m_rate_persisted_entity(client):
         start="2006-01-03", end="2026-06-11",
     )
     assert doc["category"] == REPRO_VISIBLE_CATEGORY and doc["category"] != "DELETED"
-    # The cash leg's OWN accrual curve (weights/companion excluded).  The per-leg
-    # curve is seeded at |norm_weight|*100 (2 equal legs -> base 50), so rebase to
-    # 100 to recover the standalone base-100 curve for the ruin tripwire.
+    # Cash-only accepted: the single leg's own base-100 accrual curve.
     dates = result["dates"]
     cash_eq = _finite(result["leg_equities"]["cash"])
     ok = np.isfinite(cash_eq)
@@ -111,23 +123,32 @@ async def test_usd_1m_rate_persisted_entity(client):
 
     cmp = compare(
         dates, cash_eq, target,
-        section="USD_1M_rate(P) flat-1% [persisted]",
-        given_ann_ret_pct=1.8, given_maxdd_pct=None,
+        section="USD_1M_rate(P) series [persisted]",
+        given_ann_ret_pct=None, given_maxdd_pct=None,
         checksums=checks, ruin_floor=99.0,
     )
     print("\n" + format_side_by_side(cmp.repro_grid, target,
-                                     title="USD_1M_rate(P) persisted: flat-1% vs target"))
+                                     title="USD_1M_rate(P) persisted: real series vs target"))
     print(f"\n[USD persisted] bars={cash_eq.shape[0]} overlap_months={cmp.n_overlap_months} "
           f"monthly_corr={cmp.monthly_corr:.4f} equity_log_corr={cmp.equity_log_corr:.4f}")
     print(f"[USD persisted] repro ann_ret={cmp.repro_ann_ret_pct:.3f}% "
           f"min_equity={cmp.repro_min_equity:.4f} ruin_ok={cmp.ruin_ok}")
 
-    # Mechanic: monotone-up, never below funding, ~1 %/yr drift.
+    # Shape: monotone-up (rate >= 0 over the window), never below funding.
     assert np.all(np.diff(cash_eq) >= -1e-9), "cash equity went down"
     assert cmp.repro_min_equity >= 100.0 - 1e-6
-    assert cmp.repro_ann_ret_pct == pytest.approx(1.0, abs=0.10)
-    # Divergence: flat-1% does not track the rate-path SHAPE (near-zero corr).
-    assert abs(cmp.monthly_corr) < 0.30
+    # Regime shape: the high-rate windows accrue FASTER than the ZIRP trough.
+    f_pre08 = _seg_avg_daily_factor(dates, cash_eq, "2006-08-01", "2007-12-31")
+    f_zirp = _seg_avg_daily_factor(dates, cash_eq, "2011-01-01", "2015-01-01")
+    f_2324 = _seg_avg_daily_factor(dates, cash_eq, "2023-06-01", "2024-12-31")
+    print(f"[USD persisted] daily factors pre08={f_pre08:.8f} "
+          f"zirp={f_zirp:.8f} 2023-24={f_2324:.8f}")
+    assert f_pre08 > f_zirp, "pre-2008 (~5%) did not out-accrue ZIRP"
+    assert f_2324 > f_zirp, "2023-24 (~5%) did not out-accrue ZIRP"
+    assert f_zirp == pytest.approx(1.0, abs=5e-6), "ZIRP window should be ~flat"
+    # Tracks the real rate-path SHAPE — materially better than the old flat leg
+    # (whose monthly_corr was < 0.30 by construction).
+    assert cmp.monthly_corr > 0.30
 
 
 # --------------------------------------------------------------------------- #

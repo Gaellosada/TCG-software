@@ -107,13 +107,14 @@ async def test_short_vix_fut_3m_composes(client):
 # Leg 13 — USD_1M_rate(P) (§5.7): cash_rate flat leg (feature F4).
 # ---------------------------------------------------------------------------
 async def test_cash_rate_leg_composes(client):
-    # A cash-rate leg has no calendar of its own (F4 guard rejects a cash-ONLY
-    # portfolio) — pair it with a dated companion leg (short VIX future) to
-    # supply the date axis, then assert on the CASH leg's OWN per-leg equity so
-    # this stays a pure-cash-accrual check (the companion's vol is excluded).
+    # A cash-rate leg reads the real US 1M CMT rate series (RATE, v2). It can now
+    # stand alone, but we still pair it with a dated companion (short VIX future)
+    # to prove MIXED-portfolio composition, then assert on the CASH leg's OWN
+    # per-leg equity so this stays a pure-cash-accrual check (companion excluded).
     legs = {
-        "cash": {"type": "cash_rate", "cash_rate": {"kind": "flat",
-                                                    "rate_pct": 1.8, "compound": True}},
+        "cash": {"type": "cash_rate", "data_source": "v2",
+                 "cash_rate": {"collection": "RATE", "symbol": "RATE_US_CMT_1M",
+                               "unit": "percent", "compound": True}},
         "vix3m": {"type": "continuous", "collection": _FUT_VIX, "strategy": "nth_nearest",
                   "rank": 3, "roll_offset": 2, "adjustment": "difference"},
     }
@@ -140,7 +141,7 @@ async def test_cash_rate_leg_composes(client):
     dif = np.diff(ceq)
     assert (dif >= -1e-12).all(), "cash accrual went DOWN on some bar"
     ann = (ceq[-1] / ceq[0]) ** (252.0 / ceq.shape[0]) - 1.0
-    print("\n=== Leg13 USD_1M_rate cash leg (flat 1.8%/yr, per-leg equity) ===")
+    print("\n=== Leg13 USD_1M_rate cash leg (real RATE_US_CMT_1M series, per-leg equity) ===")
     print(f"bars={ceq.shape[0]} cash_eq_end={ceq[-1]:.6f} implied_ann={ann*100:.3f}%")
 
 
@@ -243,7 +244,8 @@ async def test_f1_leveraged_combine_two_legs(client):
     legs = {
         "vix3m": {"type": "continuous", "collection": _FUT_VIX, "strategy": "nth_nearest",
                   "rank": 3, "roll_offset": 2, "adjustment": "difference"},
-        "cash": {"type": "cash_rate", "cash_rate": {"kind": "flat", "rate_pct": 1.8}},
+        "cash": {"type": "cash_rate", "data_source": "v2",
+                 "cash_rate": {"collection": "RATE", "symbol": "RATE_US_CMT_1M"}},
     }
     weights = {"vix3m": -60.0, "cash": 100.0}   # gross = 160% > 100%
     base = {"legs": legs, "weights": weights, "start": "2018-01-02",

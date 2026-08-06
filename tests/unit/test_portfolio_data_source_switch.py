@@ -948,7 +948,10 @@ def test_used_optional_leg_fields_appear_in_dump_and_change_the_key():
     base_key = _portfolio_cache_key(base)
 
     b1 = _byte_identity_body()
-    b1["legs"]["a"]["cash_rate"] = {"kind": "flat", "rate_pct": 2.5}
+    b1["legs"]["a"]["cash_rate"] = {
+        "collection": "RATE",
+        "symbol": "RATE_US_CMT_1M",
+    }
     pr1 = PortfolioRequest(**b1)
     assert pr1.model_dump(mode="json")["legs"]["a"]["cash_rate"] is not None
     assert _portfolio_cache_key(pr1) != base_key

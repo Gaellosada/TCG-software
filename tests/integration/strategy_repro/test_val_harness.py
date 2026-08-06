@@ -327,12 +327,15 @@ def test_saved_legs_to_compute_body_50d():
 
 def test_saved_legs_to_compute_body_cash():
     saved = [
-        {"label": "cash", "type": "cash_rate", "weight": 100.0,
-         "cash_rate": {"kind": "flat", "rate_pct": 1.0, "compound": True}},
+        {"label": "cash", "type": "cash_rate", "weight": 100.0, "data_source": "v2",
+         "cash_rate": {"collection": "RATE", "symbol": "RATE_US_CMT_1M",
+                       "unit": "percent", "compound": True}},
     ]
     body = saved_legs_to_compute_body(saved)
     assert body["legs"]["cash"] == {
         "type": "cash_rate",
-        "cash_rate": {"kind": "flat", "rate_pct": 1.0, "compound": True},
+        "data_source": "v2",
+        "cash_rate": {"collection": "RATE", "symbol": "RATE_US_CMT_1M",
+                      "unit": "percent", "compound": True},
     }
     assert body["weights"] == {"cash": 100.0}
