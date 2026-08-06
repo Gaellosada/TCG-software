@@ -6,8 +6,9 @@ Contract
 --------
 - ``should_roll`` evaluates whether the held contract should be rolled on
   *as_of* given *rule*.  Returns a plain ``bool``.  For ``AtExpiry``, rolls
-  on or after ``held.expiration``.  For Phase-2 rules raises
-  ``NotImplementedError("phase_2_only: ...")``.
+  on or after ``held.expiration``.  For ``NDaysBeforeExpiry``, rolls on or
+  after ``rule.n`` trading days before ``held.expiration``.  For the Phase-2
+  rule ``DeltaCross`` raises ``NotImplementedError("phase_2_only: ...")``.
 - ``next_contract`` is the full round-trip: check roll condition → invoke
   Module 3 (selection) → return ``RollResult``.
 
@@ -41,8 +42,8 @@ from tcg.types.options import (
 class OptionsRoller(Protocol):
     """Evaluate roll conditions and produce the next contract.
 
-    Phase 1 implements ``AtExpiry`` only.  ``NDaysBeforeExpiry`` and
-    ``DeltaCross`` raise ``NotImplementedError("phase_2_only: ...")``.
+    Phase 1 implements ``AtExpiry`` and ``NDaysBeforeExpiry``.  Only
+    ``DeltaCross`` raises ``NotImplementedError("phase_2_only: ...")``.
     """
 
     async def next_contract(
@@ -79,7 +80,7 @@ class OptionsRoller(Protocol):
         Raises
         ------
         NotImplementedError
-            For ``NDaysBeforeExpiry`` and ``DeltaCross`` (Phase 2 only).
+            For ``DeltaCross`` (Phase 2 only).
         """
         ...
 
@@ -112,7 +113,7 @@ class OptionsRoller(Protocol):
         Raises
         ------
         NotImplementedError
-            For ``NDaysBeforeExpiry`` and ``DeltaCross`` (Phase 2 only).
+            For ``DeltaCross`` (Phase 2 only).
         ValueError
             For unrecognised rule types.
         """
