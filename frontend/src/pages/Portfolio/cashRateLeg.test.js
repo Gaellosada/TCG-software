@@ -1,67 +1,60 @@
 import { describe, it, expect } from 'vitest';
 import {
-  makeCashRateLeg,
   cashRateApiSpec,
   cashRateSummary,
   DEFAULT_CASH_RATE_SOURCE,
+  RATE_COLLECTION,
+  RATE_1M_SYMBOL,
 } from './cashRateLeg';
 
-describe('cashRateLeg helpers', () => {
-  it('makeCashRateLeg returns a flat 1%/yr, +100 leg with a readable label', () => {
-    const leg = makeCashRateLeg();
-    expect(leg.type).toBe('cash_rate');
-    expect(leg.weight).toBe(100);
-    expect(leg.label).toMatch(/cash/i);
-    expect(leg.cash_rate).toEqual(DEFAULT_CASH_RATE_SOURCE);
-    // Not a shared reference (mutating the leg must not mutate the default).
-    leg.cash_rate.rate_pct = 5;
-    expect(DEFAULT_CASH_RATE_SOURCE.rate_pct).toBe(1.0);
-  });
-
-  it('cashRateApiSpec emits a minimal flat wire spec', () => {
-    const leg = { type: 'cash_rate', cash_rate: { kind: 'flat', rate_pct: 2.5, compound: true } };
-    expect(cashRateApiSpec(leg)).toEqual({ kind: 'flat', rate_pct: 2.5, compound: true });
-  });
-
-  it('cashRateApiSpec falls back to flat 1% for a leg with no source', () => {
-    expect(cashRateApiSpec({ type: 'cash_rate' })).toEqual({
-      kind: 'flat',
-      rate_pct: 1.0,
+describe('cashRateLeg helpers (series-only, F4)', () => {
+  it('DEFAULT_CASH_RATE_SOURCE is the v2 1M CMT series (no flat kind/rate_pct)', () => {
+    expect(DEFAULT_CASH_RATE_SOURCE).toEqual({
+      collection: RATE_COLLECTION,
+      symbol: RATE_1M_SYMBOL,
+      unit: 'percent',
       compound: true,
     });
+    expect('kind' in DEFAULT_CASH_RATE_SOURCE).toBe(false);
+    expect('rate_pct' in DEFAULT_CASH_RATE_SOURCE).toBe(false);
   });
 
-  it('cashRateApiSpec emits the instrument ref for a series source', () => {
+  it('cashRateApiSpec emits the series wire spec (collection/symbol/unit/compound)', () => {
     const leg = {
       type: 'cash_rate',
       cash_rate: {
-        kind: 'series',
-        collection: 'FUT_RATE',
-        symbol: 'RATE_USD',
-        unit: 'percent',
-        rate_pct: 2.0,
-        compound: false,
+        collection: 'RATE', symbol: 'RATE_US_CMT_1M', unit: 'percent', compound: true,
       },
     };
     expect(cashRateApiSpec(leg)).toEqual({
-      kind: 'series',
-      collection: 'FUT_RATE',
-      symbol: 'RATE_USD',
-      unit: 'percent',
-      rate_pct: 2.0,
-      compound: false,
+      collection: 'RATE', symbol: 'RATE_US_CMT_1M', unit: 'percent', compound: true,
+    });
+    // No flat leftovers on the wire.
+    expect('kind' in cashRateApiSpec(leg)).toBe(false);
+    expect('rate_pct' in cashRateApiSpec(leg)).toBe(false);
+  });
+
+  it('cashRateApiSpec falls back to the default RATE ref for a leg with no source', () => {
+    expect(cashRateApiSpec({ type: 'cash_rate' })).toEqual({
+      collection: 'RATE', symbol: 'RATE_US_CMT_1M', unit: 'percent', compound: true,
     });
   });
 
-  it('cashRateApiSpec coerces a non-finite rate to 1.0 and compound defaults true', () => {
-    const leg = { type: 'cash_rate', cash_rate: { kind: 'flat', rate_pct: '' } };
-    expect(cashRateApiSpec(leg)).toEqual({ kind: 'flat', rate_pct: 1.0, compound: true });
+  it('cashRateApiSpec honours compound:false and unit:fraction', () => {
+    const leg = {
+      type: 'cash_rate',
+      cash_rate: {
+        collection: 'RATE', symbol: 'RATE_US_CMT_1M', unit: 'fraction', compound: false,
+      },
+    };
+    expect(cashRateApiSpec(leg)).toEqual({
+      collection: 'RATE', symbol: 'RATE_US_CMT_1M', unit: 'fraction', compound: false,
+    });
   });
 
-  it('cashRateSummary describes flat and series sources', () => {
-    expect(cashRateSummary({ cash_rate: { kind: 'flat', rate_pct: 3 } })).toBe('flat 3.00%/yr');
+  it('cashRateSummary describes the rate series reference', () => {
     expect(
-      cashRateSummary({ cash_rate: { kind: 'series', collection: 'FUT_RATE', symbol: 'RATE_USD' } }),
-    ).toBe('series FUT_RATE/RATE_USD');
+      cashRateSummary({ cash_rate: { collection: 'RATE', symbol: 'RATE_US_CMT_1M' } }),
+    ).toBe('rate RATE/RATE_US_CMT_1M');
   });
 });

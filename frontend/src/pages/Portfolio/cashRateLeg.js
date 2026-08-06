@@ -1,76 +1,52 @@
 // Cash / financing accrual leg (feature F4, SPEC §5.7).
 //
 // A cash-rate leg earns a short interest rate on cash collateral: near-zero
-// vol, all-positive drift. It is NOT chosen through the instrument picker (it
-// references no market instrument on the FLAT source) — it is a
-// configuration-only leg with a pluggable RATE SOURCE:
-//
-//   - flat:   a constant annual rate (%/yr). Zero data dependency; the default
-//             and, as of build time, the ONLY operative source — the dwh has no
-//             USD short-rate series (probe found only VIX-family indices), so a
-//             ``series`` source awaits Gael loading the instrument (P-DATA-2).
-//   - series: read an annualized-rate instrument (collection, symbol) from the
-//             warehouse; ``rate_pct`` is the fallback before the series begins.
+// vol, all-positive drift. It is a REAL rate instrument read from the warehouse
+// — a v2-only ``RATE`` series (e.g. RATE_US_CMT_1M, the FRED DGS1MO 1-month
+// Treasury CMT rate). The leg is created through the instrument picker's "Rate"
+// tab (there is no flat, made-up %/yr input — the rate comes from the data).
 //
 // The in-memory leg stores its source under ``cash_rate`` in the SAME snake_case
 // shape the backend ``LegSpec.cash_rate`` (CashRateSpec) expects, so it
 // round-trips through persistence (legsToWire / persistedDocToLegs) unchanged.
+// The leg also carries ``dataSource: 'v2'`` (rates are a v2-only object); the
+// compute builder stamps ``data_source: 'v2'`` on the wire leg.
 
-/** Default rate source: flat 1 %/yr (legacy §5.7 behaviour). */
+/** The v2 rate collection + the default 1-month CMT rate symbol. */
+export const RATE_COLLECTION = 'RATE';
+export const RATE_1M_SYMBOL = 'RATE_US_CMT_1M';
+
+/**
+ * Default (fallback) rate source: the v2 1-month CMT Treasury series, read as
+ * an annualized percent and 252-day compounded. Used as the display/emit
+ * fallback for a cash leg that somehow carries no explicit ``cash_rate``.
+ */
 export const DEFAULT_CASH_RATE_SOURCE = Object.freeze({
-  kind: 'flat',
-  rate_pct: 1.0,
+  collection: RATE_COLLECTION,
+  symbol: RATE_1M_SYMBOL,
   unit: 'percent',
   compound: true,
 });
 
-/** A fresh cash-rate leg with a default label, +100 weight and flat 1 %/yr. */
-export function makeCashRateLeg() {
-  return {
-    type: 'cash_rate',
-    label: 'Cash (USD 1M rate)',
-    weight: 100,
-    cash_rate: { ...DEFAULT_CASH_RATE_SOURCE },
-  };
-}
-
 /**
  * The clean wire ``cash_rate`` object for the compute body / persistence.
- * Emits ONLY the fields the active source needs so a flat leg stays minimal and
- * a series leg carries its instrument reference. Falls back to the flat default
- * when a leg has no ``cash_rate`` (legacy / hand-built).
+ * Series-only: the rate is a real instrument reference (collection + symbol),
+ * read as percent (÷100) and compounded. Falls back to the default RATE ref
+ * when a leg carries no ``cash_rate`` (legacy / hand-built).
  */
 export function cashRateApiSpec(leg) {
   const src = (leg && leg.cash_rate) || DEFAULT_CASH_RATE_SOURCE;
-  const kind = src.kind === 'series' ? 'series' : 'flat';
-  // Empty string (a blanked editor) or non-finite -> fall back to 1.0. Guard the
-  // empty case explicitly since Number('') === 0 (a finite, wrong value).
-  const rawRate = src.rate_pct;
-  const ratePct =
-    rawRate === '' || rawRate === null || rawRate === undefined || !Number.isFinite(Number(rawRate))
-      ? 1.0
-      : Number(rawRate);
-  const compound = src.compound !== false; // default true
-  if (kind === 'series') {
-    return {
-      kind: 'series',
-      collection: src.collection || null,
-      symbol: src.symbol || null,
-      unit: src.unit === 'fraction' ? 'fraction' : 'percent',
-      rate_pct: ratePct,
-      compound,
-    };
-  }
-  return { kind: 'flat', rate_pct: ratePct, compound };
+  return {
+    collection: src.collection || RATE_COLLECTION,
+    symbol: src.symbol || RATE_1M_SYMBOL,
+    unit: src.unit === 'fraction' ? 'fraction' : 'percent',
+    compound: src.compound !== false, // default true
+  };
 }
 
 /** A short, human-readable summary of a cash leg's rate source. */
 export function cashRateSummary(leg) {
   const src = (leg && leg.cash_rate) || DEFAULT_CASH_RATE_SOURCE;
-  if (src.kind === 'series') {
-    const ref = [src.collection, src.symbol].filter(Boolean).join('/') || '(unset)';
-    return `series ${ref}`;
-  }
-  const pct = Number.isFinite(Number(src.rate_pct)) ? Number(src.rate_pct) : 1.0;
-  return `flat ${pct.toFixed(2)}%/yr`;
+  const ref = [src.collection, src.symbol].filter(Boolean).join('/') || '(unset)';
+  return `rate ${ref}`;
 }

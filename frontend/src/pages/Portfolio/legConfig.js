@@ -83,6 +83,24 @@ export function instrumentToLegConfig(instrument) {
         : {}),
     };
   }
+  if (instrument.type === 'cash_rate') {
+    // Rate leg: the picker's "Rate" tab emits a cash_rate descriptor referencing
+    // a v2 RATE series (collection + instrument_id). Rates are a v2-ONLY object,
+    // so the leg ALWAYS carries dataSource 'v2' (independent of the modal's
+    // source toggle — the descriptor bakes data_source:'v2' in). The reference is
+    // stored under snake_case ``cash_rate`` (the backend CashRateSpec shape):
+    // percent (÷100), 252-day compounded.
+    return {
+      type: 'cash_rate',
+      dataSource: 'v2',
+      cash_rate: {
+        collection: instrument.collection || 'RATE',
+        symbol: instrument.instrument_id,
+        unit: 'percent',
+        compound: true,
+      },
+    };
+  }
   // spot -> instrument leg: rename instrument_id -> symbol, type spot -> instrument.
   return {
     ...legSourceFields(instrument),

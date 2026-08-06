@@ -60,6 +60,8 @@ export default function AddHoldingModal({
           label = `${config.collection} ${config.option_type} ${config.stream}`;
         } else if (config.type === 'continuous') {
           label = config.collection;
+        } else if (config.type === 'cash_rate') {
+          label = config.cash_rate?.symbol || 'Cash rate';
         } else {
           label = config.symbol;
         }
@@ -88,6 +90,10 @@ export default function AddHoldingModal({
       // Portfolio continuous legs (LegSpec.rank) support the NTH_NEAREST roll
       // strategy — surface it in the shared picker's strategy select.
       allowNthNearest={true}
+      // Portfolio-only: surface the "Rate" tab so a cash_rate leg is created by
+      // picking a real v2 RATE series (RATE_US_CMT_1M). Add-only — a cash_rate
+      // leg has no picker edit step (legToInitialConfig returns null for it).
+      allowRate={!editMode}
       // Choose the market-data source ONCE, at creation. Defaults to v1; the
       // user may pick v2 in the picker. instrumentToLegConfig maps the emitted
       // ``data_source`` onto the leg's ``dataSource``. In EDIT mode the selector

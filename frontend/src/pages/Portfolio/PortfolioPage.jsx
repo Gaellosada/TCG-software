@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import usePortfolio from './usePortfolio';
 import HoldingsList from './HoldingsList';
-import { makeCashRateLeg } from './cashRateLeg';
 import AddHoldingModal from './AddHoldingModal';
 import SignalPickerModal from './SignalPickerModal';
 import PortfolioPickerModal from './PortfolioPickerModal';
@@ -783,7 +782,6 @@ function PortfolioPage({ mode = 'pure' }) {
             onRemoveLeg={portfolio.removeLeg}
             onOpenAddModal={handleOpenModal}
             onOpenSignalModal={() => setSignalModalOpen(true)}
-            onAddCashLeg={() => portfolio.addLeg(makeCashRateLeg())}
             onEditLeg={handleEditLeg}
             readOnly={portfolio.persistedLocked}
             allowPortfolioLegs={allowPortfolioLegs}

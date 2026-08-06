@@ -25,8 +25,15 @@ const CATEGORY_CONFIG = [
   { key: 'assets', label: 'Assets', color: 'var(--cat-assets)', collections: ['ETF', 'FOREX', 'FUND'] },
   { key: 'futures', label: 'Futures', color: 'var(--cat-futures)', dynamicFutures: true },
   { key: 'options', label: 'Options', color: 'var(--cat-options)', dynamicOptions: true },
+  { key: 'rate', label: 'Rate', color: 'var(--cat-rate, #14b8a6)', dynamicRate: true },
   { key: 'baskets', label: 'Baskets', color: 'var(--cat-baskets, #8b5cf6)', dynamicBaskets: true },
 ];
+
+// The v2 rate collection surfaced by the "Rate" tab. Rates are a v2-ONLY object
+// (the AssetClass enum has no RATE member), so the tab hardcodes the collection
+// and always loads its instruments from v2 regardless of the modal's catalog
+// source. Selecting one emits a ``cash_rate`` descriptor (see handleSelectRate).
+const RATE_COLLECTION = 'RATE';
 
 const BASKET_ASSET_CLASSES = [
   { key: 'future', label: 'Future' },
@@ -108,6 +115,11 @@ export default function InstrumentPickerModal({
   title,
   hiddenCategories = [],
   allowBaskets = false,
+  // Opt-in for the "Rate" category (default-deny, like Baskets). Only the
+  // Portfolio Add-Holding picker passes true — a ``cash_rate`` leg is a
+  // portfolio-only concept. Selecting a rate instrument emits a ``cash_rate``
+  // descriptor (v2-only) that legConfig maps to a cash_rate leg.
+  allowRate = false,
   // Restrict the option-stream picker (the direct Options drill-down) to a
   // subset of streams.  The Portfolio add-holding flow passes ['mid'] so an
   // option leg is the option PRICE only — iv/greeks/volume are SIGNAL-level
@@ -201,6 +213,11 @@ export default function InstrumentPickerModal({
   // Basket composer state — see Composer state machine below.
   const [inBasketComposer, setInBasketComposer] = useState(false);
 
+  // Rate tab state — the v2 RATE series list (loaded from v2 on open when the
+  // Rate tab is visible; see the loader effect below).
+  const [rateInstruments, setRateInstruments] = useState([]);
+  const [rateLoading, setRateLoading] = useState(false);
+
   // Per-instrument data source chosen in this modal (opt-in; see the
   // ``showDataSourceSelector`` prop). 'v1' | 'v2'. Seeded from ``defaultSource``
   // on each open by the effect below.
@@ -227,9 +244,15 @@ export default function InstrumentPickerModal({
       // level pickers leave it false so the composer is not surfaced
       // in contexts where a basket descriptor is not a valid selection.
       if (c.key === 'baskets' && !allowBaskets) return false;
+      // Default-deny: the rate category needs explicit opt-in (Portfolio only).
+      if (c.key === 'rate' && !allowRate) return false;
       return true;
     }),
-    [hiddenCategories, allowBaskets],
+    [hiddenCategories, allowBaskets, allowRate],
+  );
+  const rateVisible = useMemo(
+    () => visibleCategories.some((c) => c.key === 'rate'),
+    [visibleCategories],
   );
   const optionsVisible = useMemo(
     () => visibleCategories.some((c) => c.key === 'options'),
@@ -284,7 +307,7 @@ export default function InstrumentPickerModal({
 
         setInstrumentsLoading(true);
         const nonFut = CATEGORY_CONFIG
-          .filter((c) => !c.dynamicFutures && !c.dynamicOptions && !c.dynamicBaskets)
+          .filter((c) => !c.dynamicFutures && !c.dynamicOptions && !c.dynamicBaskets && !c.dynamicRate)
           .flatMap((c) => c.collections)
           .filter((c) => collections.includes(c));
 
@@ -345,6 +368,30 @@ export default function InstrumentPickerModal({
     // ``catalogSource`` dep: a source toggle reloads the Options tab's roots so
     // v2 offers only its real option series.
   }, [isOpen, optionsVisible, basketsVisible, catalogSource]);
+
+  /* ── Load the RATE series list when the Rate tab is visible ──
+   *
+   * Rates are a v2-ONLY object, so this ALWAYS loads from v2 regardless of the
+   * modal's ``catalogSource`` (the v1 catalog does not serve RATE). Gated on the
+   * Rate tab being visible (portfolio opt-in) so no other picker surface pays
+   * for this fetch. */
+  useEffect(() => {
+    if (!isOpen || !rateVisible) return undefined;
+    let cancelled = false;
+    setRateLoading(true);
+    listInstruments(RATE_COLLECTION, { skip: 0, limit: 100, source: 'v2' })
+      .then((res) => {
+        if (cancelled) return;
+        setRateInstruments(res.items || []);
+        setRateLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRateInstruments([]);
+        setRateLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isOpen, rateVisible]);
 
   /* ── Self-heal the option-stream root when roots load / change ──
    *
@@ -433,6 +480,7 @@ export default function InstrumentPickerModal({
       setInOptionsDrillDown(false);
       setOptionStreamValue(null);
       setInBasketComposer(false);
+      setRateInstruments([]);
     }
   }, [isOpen]);
 
@@ -532,6 +580,23 @@ export default function InstrumentPickerModal({
   const handleSelectInstrument = useCallback(
     (symbol, collection) => {
       emitSelect({ type: 'spot', collection, instrument_id: symbol });
+      onClose();
+    },
+    [emitSelect, onClose],
+  );
+
+  const handleSelectRate = useCallback(
+    (symbol) => {
+      // A rate leg is v2-ONLY: bake ``data_source: 'v2'`` into the descriptor so
+      // it is stamped regardless of the modal's source toggle (emitSelect leaves
+      // an already-v2 descriptor intact). legConfig maps this ``cash_rate``
+      // descriptor to a cash_rate leg with the nested RATE reference.
+      emitSelect({
+        type: 'cash_rate',
+        collection: RATE_COLLECTION,
+        instrument_id: symbol,
+        data_source: 'v2',
+      });
       onClose();
     },
     [emitSelect, onClose],
@@ -783,7 +848,7 @@ export default function InstrumentPickerModal({
           ) : (
             /* ── Main view: toggleable categories ── */
             <>
-              {visibleCategories.filter((c) => !c.dynamicFutures && !c.dynamicOptions && !c.dynamicBaskets).map((cat) => {
+              {visibleCategories.filter((c) => !c.dynamicFutures && !c.dynamicOptions && !c.dynamicBaskets && !c.dynamicRate).map((cat) => {
                 const instruments = cat.collections.flatMap(
                   (coll) => (instrumentsByCollection[coll] || []).map((inst) => ({ ...inst, collection: coll })),
                 );
@@ -878,6 +943,48 @@ export default function InstrumentPickerModal({
                     </span>
                     <span className={styles.chevron}>&#8250;</span>
                   </button>
+                </div>
+              )}
+
+              {/* Rate — v2 RATE series (cash_rate leg source) */}
+              {rateVisible && (
+                <div className={styles.group}>
+                  <button
+                    className={styles.groupToggle}
+                    type="button"
+                    onClick={() => toggleCategory('rate')}
+                    data-testid="picker-rate-toggle"
+                  >
+                    <span className={styles.groupDot} style={{ background: 'var(--cat-rate, #14b8a6)' }} />
+                    <span className={styles.groupLabel}>Rate</span>
+                    <span className={styles.groupCount}>
+                      {rateLoading ? '...' : rateInstruments.length}
+                    </span>
+                    <span className={styles.chevron}>{expanded.rate ? '▾' : '▸'}</span>
+                  </button>
+                  {expanded.rate && (
+                    rateLoading ? (
+                      <div className={styles.state}>Loading...</div>
+                    ) : (
+                      <ul className={styles.instrumentList}>
+                        {rateInstruments.map((inst) => (
+                          <li
+                            key={`RATE-${inst.symbol}`}
+                            className={styles.instrumentItem}
+                            role="button"
+                            tabIndex={0}
+                            data-testid={`rate-instrument-${inst.symbol}`}
+                            onClick={() => handleSelectRate(inst.symbol)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') handleSelectRate(inst.symbol);
+                            }}
+                          >
+                            <span className={styles.instrumentSymbol}>{inst.symbol}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )
+                  )}
                 </div>
               )}
 
