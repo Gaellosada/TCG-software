@@ -183,39 +183,63 @@ def test_no_hedge_leaves_ratio_flat() -> None:
     np.testing.assert_allclose(ratio, np.ones(T), atol=1e-15)
 
 
-def test_futures_notional_leg_ignores_hedge() -> None:
-    """A hedge configured on a futures_notional leg is IGNORED by the engine
-    (the caller rejects the combination) — so it must NOT perturb the P&L."""
-    T = 4
-    premium = np.array([10.0, 11.0, 12.0, 13.0])
-    is_roll = np.array([True, False, False, False])
-    roll_premium = np.array([10.0, np.nan, np.nan, np.nan])
-    roll_fref = np.array([20.0, np.nan, np.nan, np.nan])
-    common = dict(
+def test_futures_notional_leg_hedge_accrues() -> None:
+    """GAP B: a delta_hedge on a futures_notional leg is now ACCEPTED and accrues.
+
+    The hedge sizes off the option's futures-notional quantity — the SAME
+    coefficient of ``dprem`` in the option's own contrib — so ``option_qty`` =
+    ``sign·nav_times·(seg_er/ratio[s])·mult_opt/(seg_fref·mult_fut)`` and
+    ``hold_contrib[s] = -factor·option_qty·delta[s]·ΔVX1[s]``.  A CONSTANT option
+    premium isolates the hedge (the option's own P&L is 0), so ``ratio`` moves ONLY
+    from the hedge.  Byte-checked against the closed form on a synthetic delta
+    series."""
+    T = 6
+    factor = 1.0 / 3.0
+    P0 = 10.0  # constant premium ⇒ option's own P&L is 0
+    sign = 1.0
+    nav_times = 1.0
+    m_fut = 1000.0
+    m_opt = 100.0
+    F_ref = 20.0
+    premium = np.full(T, P0, dtype=np.float64)
+    is_roll = np.zeros(T, dtype=np.bool_)
+    is_roll[0] = True
+    roll_premium = np.full(T, np.nan, dtype=np.float64)
+    roll_premium[0] = P0
+    roll_fref = np.full(T, np.nan, dtype=np.float64)
+    roll_fref[0] = F_ref
+    delta = np.array([0.5, 0.6, 0.4, 0.7, 0.55, 0.5])
+    vx1 = np.array([20.0, 21.0, 20.5, 22.0, 21.0, 20.0])
+    spec = _HoldPnLSpec(
         ref_id="_leg",
-        sign=1.0,
-        nav_times=1.0,
+        sign=sign,
+        nav_times=nav_times,
         premium=premium,
         is_roll=is_roll,
         roll_premium=roll_premium,
         pos_active=np.ones(T, dtype=np.bool_),
         sizing_mode="futures_notional",
         roll_future_ref=roll_fref,
-        mult_fut=1000.0,
-        mult_opt=100.0,
+        mult_fut=m_fut,
+        mult_opt=m_opt,
+        hedge_factor=factor,
+        hedge_delta=delta,
+        hedge_price=vx1,
+        hedge_active=np.ones(T, dtype=np.bool_),
     )
-    ratio_no = _run(_HoldPnLSpec(**common), T)[0]
-    ratio_hedge = _run(
-        _HoldPnLSpec(
-            **common,
-            hedge_factor=1.0 / 3.0,
-            hedge_delta=np.full(T, 0.5),
-            hedge_price=np.array([20.0, 30.0, 10.0, 40.0]),
-            hedge_active=np.ones(T, dtype=np.bool_),
-        ),
-        T,
-    )[0]
-    np.testing.assert_array_equal(ratio_no, ratio_hedge)
+    ratio, _scale, contrib = _run(spec, T)
+    booked = contrib["_leg"]
+    # single segment ⇒ seg_er == 1, seg_fref == F_ref frozen at bar 0.
+    for s in range(T - 1):
+        dvx = vx1[s + 1] - vx1[s]
+        option_qty = sign * nav_times * (1.0 / ratio[s]) * m_opt / (F_ref * m_fut)
+        expected = -factor * option_qty * delta[s] * dvx
+        assert booked[s] == pytest.approx(expected, abs=1e-12), f"step {s}"
+    # the hedge really moved the leg equity (not the ignored all-zeros of before).
+    assert not np.allclose(ratio, np.ones(T))
+    # reconciliation into equity.
+    recon = np.cumsum(_scale * ratio[:-1] * booked)
+    np.testing.assert_allclose(ratio[1:] - 1.0, recon, atol=1e-12)
 
 
 # ── Property tests (Hypothesis) ─────────────────────────────────────────────

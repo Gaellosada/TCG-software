@@ -28,6 +28,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
+    DeltaHedgeConfig,
     OptionStreamLabel,
     OptionStreamRef,
     _PerInstrumentSourceMixin,
@@ -86,7 +87,11 @@ from tcg.types.market import (
     InstrumentId,
     RollStrategy,
 )
-from tcg.types.multipliers import resolve_multipliers, root_from_collection
+from tcg.types.multipliers import (
+    collapse_index_point,
+    resolve_multipliers,
+    root_from_collection,
+)
 from tcg.types.portfolio import RebalanceFreq
 from tcg.types.signal import (
     DeltaHedgeSpec,
@@ -631,51 +636,6 @@ class CashRateSpec(BaseModel):
         return self
 
 
-class DeltaHedgeConfig(BaseModel):
-    """Wire model for the delta-hedge OVERLAY on a hold-mode option leg
-    (feature F2, SPEC §5.5/§5.6).
-
-    A futures HEDGE sized off the option leg's net delta, rebalanced DAILY and
-    accrued into the SAME leg equity: ``qty_hedge = -factor·Σ(option_qty·delta)``
-    (future per-unit delta = 1).  Maps to :class:`tcg.types.signal.DeltaHedgeSpec`.
-    Only valid on a ``premium_notional`` hold-mode PREMIUM leg (rejected otherwise).
-
-    The hedge is active on a day only when the GATE holds (default VVIX>150) AND
-    the option is not on a roll bar (SPEC §5.5 hedge-exit (3) "the call rolls").
-    The finer lifecycle exits (VIX<MA5 two consecutive days; VX1<VX2) reuse the
-    signals layer and are NOT applied by this standalone-leg overlay — see the
-    task PROBLEMS.md gap note for §5.5/§5.6 full fidelity.
-    """
-
-    enabled: bool = True
-    # Fraction of the option delta to hedge (SPEC default 1/3).
-    factor: float = 1.0 / 3.0
-    # Hedge future (VX1 = FUT_VIX front month, difference-adjusted continuous).
-    hedge_collection: str = "FUT_VIX"
-    # Gate index (SPEC: VVIX level via the INDEX collection).
-    gate_collection: str = "INDEX"
-    gate_symbol: str = "IND_VVIX"
-    gate_threshold: float = 150.0
-    gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
-
-    @field_validator("factor")
-    @classmethod
-    def _finite_positive_factor(cls, v: float) -> float:
-        if not math.isfinite(v) or v <= 0.0:
-            raise ValueError("delta_hedge factor must be a finite positive number")
-        return v
-
-    def to_spec(self) -> DeltaHedgeSpec:
-        return DeltaHedgeSpec(
-            factor=float(self.factor),
-            hedge_collection=self.hedge_collection,
-            gate_collection=self.gate_collection,
-            gate_symbol=self.gate_symbol,
-            gate_threshold=float(self.gate_threshold),
-            gate_op=self.gate_op,
-        )
-
-
 class LegSpec(_PerInstrumentSourceMixin):
     # Per-instrument warehouse selector ``data_source`` (``"v1"``/``"v2"``, or
     # inherit the run default) comes from ``_PerInstrumentSourceMixin`` and is
@@ -689,7 +649,11 @@ class LegSpec(_PerInstrumentSourceMixin):
     # so a plain instrument/continuous leg's dump — and thus the result-cache key —
     # is byte-identical to the pre-feature payload; a leg that sets one still
     # serialises it and changes the key.
-    _omit_when_none: ClassVar[tuple[str, ...]] = ("cash_rate", "delta_hedge")
+    _omit_when_none: ClassVar[tuple[str, ...]] = (
+        "cash_rate",
+        "delta_hedge",
+        "apply_contract_multiplier",
+    )
     type: str  # "instrument", "continuous", "signal", or "option_stream"
     collection: str | None = (
         None  # Required for "instrument"/"continuous"/"option_stream"
@@ -739,6 +703,12 @@ class LegSpec(_PerInstrumentSourceMixin):
     futures_reference: Literal[
         "nearest_on_or_after", "continuous_front", "nearest_abs"
     ] = "nearest_on_or_after"
+    # PER-INDEX-POINT sizing (GAP C).  Meaningful ONLY in ``futures_notional`` mode.
+    # ``None`` (unset, DEFAULT) / ``True`` = apply the real ``m_opt/m_fut`` ratio
+    # (byte-identical); ``False`` = size PER INDEX POINT (``m_opt := m_fut``), legacy
+    # VIX sizing (SPEC §6).  OMITTED from the dump when None (see ``_omit_when_none``)
+    # so a plain option leg's result-cache key is unperturbed.
+    apply_contract_multiplier: bool | None = None
     # COMPOSED-PORTFOLIO fields (required when type == "portfolio").  A portfolio
     # leg references a saved PURE portfolio reused as a building block: the
     # frontend RESOLVES the reference and INLINES the child's current saved spec
@@ -1542,6 +1512,11 @@ async def _evaluate_option_stream_leg(
             nav_times=leg.nav_times,
             sizing_mode=leg.sizing_mode,
             futures_reference=leg.futures_reference,
+            # GAP C / GAP A: thread the per-index-point flag and the delta-hedge
+            # overlay through the SAME ref → instrument converter the signal path
+            # uses, so ``instrument`` carries both (the collapse + the F2 hedge).
+            apply_contract_multiplier=leg.apply_contract_multiplier,
+            delta_hedge=leg.delta_hedge,
         )
     except PydanticValidationError as exc:
         raise ValidationError(f"Leg '{label}': {exc}") from exc
@@ -1653,6 +1628,12 @@ async def _evaluate_option_stream_leg(
             _mult_fn = getattr(fetcher, "fetch_hold_multipliers", None)
             if _mult_fn is not None:
                 mult_fut, mult_opt = await _mult_fn(instrument)
+            # GAP C: per-index-point sizing (m_opt := m_fut) when the leg opts out of
+            # the contract multiplier (legacy VIX option sizing).  No-op when apply
+            # is True/None or m_fut == m_opt (SPX/NDX).
+            mult_fut, mult_opt = collapse_index_point(
+                mult_fut, mult_opt, instrument.apply_contract_multiplier
+            )
         # ── Delta-hedge overlay (F2): resolve the runtime hedge arrays and
         #    attach them to the spec so the VX1 hedge is accrued into THIS leg
         #    equity.  Guarded: no config / disabled ⇒ the spec is byte-identical
@@ -1662,12 +1643,10 @@ async def _evaluate_option_stream_leg(
         _hedge_price: "npt.NDArray[np.float64] | None" = None
         _hedge_active: "npt.NDArray[np.bool_] | None" = None
         if leg.delta_hedge is not None and leg.delta_hedge.enabled:
-            if leg.sizing_mode == "futures_notional":
-                raise ValidationError(
-                    f"Leg '{label}': delta_hedge is only supported on a "
-                    f"premium_notional option leg (the hedge sizes off the "
-                    f"premium-notional option quantity), not futures_notional"
-                )
+            # GAP B: the hedge sizes off the option leg's OWN quantity in either
+            # notional basis (the engine sizes the futures-notional case off
+            # seg_fref·mult_fut·mult_opt), so a futures_notional hedged leg is
+            # accepted — no longer rejected here.
             _hspec = leg.delta_hedge.to_spec()
             _hedge_factor = _hspec.factor
             _roll_mask_axis = np.asarray(is_roll_f, dtype=np.float64) > 0.5

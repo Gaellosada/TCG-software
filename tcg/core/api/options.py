@@ -992,6 +992,18 @@ def option_stream_ref_to_instrument(
         nav_times=ref.nav_times,
         sizing_mode=ref.sizing_mode,
         futures_reference=ref.futures_reference,
+        # GAP C: None (unset) is treated as "apply the multiplier" (byte-identical);
+        # only an explicit False selects per-index-point sizing.
+        apply_contract_multiplier=ref.apply_contract_multiplier is not False,
+        # GAP A: thread the delta-hedge overlay into the engine instrument (was
+        # DROPPED here).  A disabled config maps to None (no hedge), so signal_exec /
+        # the fetcher never wire the F2 path for it — matching the portfolio path,
+        # which skips a ``delta_hedge`` whose ``enabled`` is False.
+        delta_hedge=(
+            ref.delta_hedge.to_spec()
+            if ref.delta_hedge is not None and ref.delta_hedge.enabled
+            else None
+        ),
         data_source=ref.data_source,
     )
 

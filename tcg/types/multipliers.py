@@ -58,6 +58,36 @@ FUTURES_NOTIONAL_MULTIPLIERS: dict[str, RootMultipliers] = {
 }
 
 
+def collapse_index_point(
+    mult_fut: float,
+    mult_opt: float,
+    apply_contract_multiplier: bool | None,
+) -> tuple[float, float]:
+    """Collapse (m_fut, m_opt) to PER-INDEX-POINT sizing when the contract
+    multiplier is NOT applied.
+
+    A futures-notional option leg's daily $-P&L carries the factor
+    ``m_opt / m_fut`` (option premium move scaled by ``m_opt``, sizing denominator
+    scaled by ``m_fut``).  For VIX that ratio is ``100 / 1000 = 0.1`` — so the
+    magnitude is a UNIFORM 10x too low versus the LEGACY convention, which sized
+    VIX options PER INDEX POINT (the contract multiplier omitted → ratio ``1.0``;
+    SPEC §6 multiplier note).
+
+    When ``apply_contract_multiplier`` is ``False`` this returns ``(m_fut, m_fut)``
+    so the ``m_opt / m_fut`` ratio is exactly ``1.0`` (per index point) while the
+    sizing denominator is unchanged — the whole and only effect is the ratio.  The
+    SPX/NDX case (``m_fut == m_opt``) is a NO-OP either way.
+
+    ``apply_contract_multiplier`` is ``None`` on an unset wire leg and is treated
+    as ``True`` (apply — byte-identical to the shipped futures-notional behaviour).
+    Pure; consumed at spec construction by both ``tcg.engine.signal_exec`` and
+    ``tcg.core.api.portfolio`` so the engine's sizing arithmetic stays untouched.
+    """
+    if apply_contract_multiplier is False:
+        return mult_fut, mult_fut
+    return mult_fut, mult_opt
+
+
 def root_from_collection(collection: str) -> str:
     """Strip the ``OPT_`` / ``FUT_`` prefix to the shared root.
 

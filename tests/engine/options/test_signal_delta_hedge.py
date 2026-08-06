@@ -133,9 +133,15 @@ def _make_fetcher(
     gate_threshold: float = 150.0,
     gate_op: str = "gt",
     with_hedge_channel: bool = True,
+    roll_future_ref: np.ndarray | None = None,
+    multipliers: tuple[float, float] | None = None,
 ):
     """Synthetic signal fetcher: option premium LEVEL + spot flat-100 + the
-    hold-roll and (optionally) delta-hedge side-channels."""
+    hold-roll and (optionally) delta-hedge side-channels.
+
+    When ``roll_future_ref`` / ``multipliers`` are supplied the roll-info side-
+    channel emits the 4-tuple (futures_notional) shape + a ``fetch_hold_multipliers``
+    accessor, so a futures_notional hold leg can be driven end-to-end."""
     spx = np.full(len(_DATES), 100.0, dtype=np.float64)
 
     async def fetch(instrument, field):
@@ -147,6 +153,13 @@ def _make_fetcher(
 
     async def fetch_hold_roll_info(instrument):
         assert isinstance(instrument, InstrumentOptionStream)
+        if roll_future_ref is not None:
+            return (
+                _DATES,
+                np.asarray(is_roll, dtype=np.float64).copy(),
+                np.asarray(roll_premium, dtype=np.float64).copy(),
+                np.asarray(roll_future_ref, dtype=np.float64).copy(),
+            )
         return (
             _DATES,
             np.asarray(is_roll, dtype=np.float64).copy(),
@@ -154,6 +167,13 @@ def _make_fetcher(
         )
 
     fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
+
+    if multipliers is not None:
+
+        async def fetch_hold_multipliers(instrument):
+            return multipliers
+
+        fetch.fetch_hold_multipliers = fetch_hold_multipliers  # type: ignore[attr-defined]
 
     if with_hedge_channel:
 
@@ -365,25 +385,55 @@ async def test_signal_hedge_without_channel_raises_loudly() -> None:
         )
 
 
-async def test_signal_hedge_on_futures_notional_rejected() -> None:
-    """delta_hedge on a futures_notional hold leg is rejected (the hedge sizes off
-    the premium-notional quantity), mirroring the portfolio path."""
+async def test_signal_hedge_on_futures_notional_accepted() -> None:
+    """GAP B: delta_hedge on a futures_notional hold leg is now ACCEPTED and accrues.
+
+    The hedge sizes off the option's futures-notional quantity (the coefficient of
+    ``dprem`` in the option's own contrib): ``option_qty = sign·nav_times·
+    (1/ratio[s])·m_opt/(F_ref·m_fut)``.  Constant premium isolates the hedge, so the
+    booked step P&L is byte-checked against ``-factor·option_qty·delta[s]·ΔVX1[s]``."""
+    factor = 1.0 / 3.0
+    sign = 1.0
+    nav_times = 1.0
+    m_fut, m_opt = 1000.0, 100.0
+    F_ref = 18.0
+    roll_fref = np.array([F_ref, np.nan, np.nan, np.nan, np.nan, np.nan])
+    gate = np.full(len(_DATES), 200.0)  # VVIX=200 > 150 → gate ON
     fetch = _make_fetcher(
         premium=_PREMIUM,
         is_roll=_IS_ROLL,
         roll_premium=_ROLL_PREMIUM,
         delta=_DELTA,
         vx1=_VX1,
-        gate=np.full(len(_DATES), 200.0),
+        gate=gate,
+        factor=factor,
+        roll_future_ref=roll_fref,
+        multipliers=(m_fut, m_opt),
     )
-    with pytest.raises(SignalDataError, match="premium_notional"):
-        await evaluate_signal(
-            _long_call_signal(
-                delta_hedge=DeltaHedgeSpec(), sizing_mode="futures_notional"
-            ),
-            {},
-            fetch,
-        )
+    res = await evaluate_signal(
+        _long_call_signal(
+            weight=10.0,
+            nav_times=nav_times,
+            delta_hedge=DeltaHedgeSpec(factor=factor),
+            sizing_mode="futures_notional",
+        ),
+        {},
+        fetch,
+    )
+    ratio = res.equity_ratio
+    assert np.all(np.isfinite(ratio))
+    # the hedge really moved the leg equity (no longer rejected / zeroed).
+    assert not np.allclose(ratio, np.ones(len(_DATES)))
+    T = len(_DATES)
+    for s in range(T - 1):
+        booked = ratio[s + 1] / ratio[s] - 1.0  # constant premium ⇒ hedge only
+        if _IS_ROLL[s] > 0.5:
+            assert booked == pytest.approx(0.0, abs=1e-13), f"roll step {s}"
+            continue
+        dvx = _VX1[s + 1] - _VX1[s]
+        option_qty = sign * nav_times * (1.0 / ratio[s]) * m_opt / (F_ref * m_fut)
+        expected = -factor * option_qty * _DELTA[s] * dvx
+        assert booked == pytest.approx(expected, abs=1e-12), f"step {s}"
 
 
 # ── Airtight byte-identical: current signal_exec vs git HEAD (no-hedge leg) ──

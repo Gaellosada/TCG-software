@@ -65,6 +65,7 @@ from tcg.core.api._models_options import (
     reject_contradicting_delta_sign,
 )
 from tcg.core.api.common import DataSource
+from tcg.types.signal import DeltaHedgeSpec
 
 
 class _PerInstrumentSourceMixin(BaseModel):
@@ -169,6 +170,59 @@ OptionStreamLabel = Literal[
 ]
 
 
+class DeltaHedgeConfig(BaseModel):
+    """Wire model for the delta-hedge OVERLAY on a hold-mode option leg
+    (feature F2, SPEC §5.5/§5.6).
+
+    A futures HEDGE sized off the option leg's net delta, rebalanced DAILY and
+    accrued into the SAME leg equity: ``qty_hedge = -factor·Σ(option_qty·delta)``
+    (future per-unit delta = 1).  Maps to :class:`tcg.types.signal.DeltaHedgeSpec`.
+
+    Valid on a hold-mode option leg in EITHER sizing mode: the hedge sizes off the
+    option leg's delta and its own (premium- OR futures-notional) quantity, so it is
+    well-defined regardless of the leg's notional basis (GAP B).
+
+    The hedge is active on a day only when the GATE holds (default VVIX>150) AND
+    the option is not on a roll bar (SPEC §5.5 hedge-exit (3) "the call rolls").
+    The finer lifecycle exits (VIX<MA5 two consecutive days; VX1<VX2) reuse the
+    signals layer and are NOT applied by this standalone-leg overlay — see the
+    task PROBLEMS.md gap note for §5.5/§5.6 full fidelity.
+
+    Defined HERE (not in ``portfolio.py``) so BOTH the signals wire model
+    :class:`OptionStreamRef` and the portfolio ``LegSpec`` share ONE definition —
+    the import-linter forbids ``_models`` depending on ``portfolio`` (same layer),
+    and forking the schema is exactly what the F2/GAP-A wiring must avoid.
+    """
+
+    enabled: bool = True
+    # Fraction of the option delta to hedge (SPEC default 1/3).
+    factor: float = 1.0 / 3.0
+    # Hedge future (VX1 = FUT_VIX front month, difference-adjusted continuous).
+    hedge_collection: str = "FUT_VIX"
+    # Gate index (SPEC: VVIX level via the INDEX collection).
+    gate_collection: str = "INDEX"
+    gate_symbol: str = "IND_VVIX"
+    gate_threshold: float = 150.0
+    gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
+
+    @field_validator("factor")
+    @classmethod
+    def _finite_positive_factor(cls, v: float) -> float:
+        if not math.isfinite(v) or v <= 0.0:
+            raise ValueError("delta_hedge factor must be a finite positive number")
+        return v
+
+    def to_spec(self) -> DeltaHedgeSpec:
+        return DeltaHedgeSpec(
+            factor=float(self.factor),
+            hedge_collection=self.hedge_collection,
+            gate_collection=self.gate_collection,
+            gate_symbol=self.gate_symbol,
+            gate_threshold=float(self.gate_threshold),
+            gate_op=self.gate_op,
+        )
+
+
 class OptionStreamRef(_PerInstrumentSourceMixin):
     """Series reference materialising a 1-D float stream off a selected
     option contract on each trade date.
@@ -253,6 +307,26 @@ class OptionStreamRef(_PerInstrumentSourceMixin):
     futures_reference: Literal[
         "nearest_on_or_after", "continuous_front", "nearest_abs"
     ] = "nearest_on_or_after"
+    # PER-INDEX-POINT sizing (GAP C).  Meaningful ONLY in ``futures_notional`` mode.
+    # ``None`` (unset, DEFAULT) / ``True`` = apply the real ``m_opt/m_fut`` ratio
+    # (byte-identical).  ``False`` = size PER INDEX POINT (``m_opt := m_fut`` so the
+    # ratio is 1.0) — legacy VIX option sizing (SPEC §6).  ``None`` is OMITTED from
+    # the dump (see ``_omit_when_none``) so an ordinary leg's payload / result-cache
+    # key is unperturbed; ``False`` serialises and changes the key (a real compute).
+    apply_contract_multiplier: bool | None = None
+    # DELTA-HEDGE overlay (feature F2, SPEC §5.5/§5.6): a VX1 futures hedge sized off
+    # THIS option leg's net delta, rebalanced daily, accrued into the leg equity.
+    # Mirrors the portfolio ``LegSpec.delta_hedge`` — the SAME :class:`DeltaHedgeConfig`
+    # (GAP A: the signals/durable/UI path previously DROPPED this field).  ``None``
+    # (default) = no hedge; OMITTED from the dump so a plain leg stays byte-identical.
+    delta_hedge: DeltaHedgeConfig | None = None
+    # OMIT the two optional overlays from the JSON dump when unset (mirrors the
+    # portfolio ``LegSpec._omit_when_none`` discipline) so a plain option leg's
+    # payload — and its result-cache key — is BYTE-IDENTICAL to a pre-feature body.
+    _omit_when_none: ClassVar[tuple[str, ...]] = (
+        "apply_contract_multiplier",
+        "delta_hedge",
+    )
 
     @field_validator("cycle", mode="before")
     @classmethod

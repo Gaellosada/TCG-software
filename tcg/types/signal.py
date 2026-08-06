@@ -166,6 +166,15 @@ class InstrumentOptionStream:
     futures_reference: Literal[
         "nearest_on_or_after", "continuous_front", "nearest_abs"
     ] = "nearest_on_or_after"
+    # PER-INDEX-POINT sizing (GAP C, SPEC §6 multiplier note).  Meaningful ONLY in
+    # ``futures_notional`` mode.  ``True`` (DEFAULT, byte-identical): the daily $-P&L
+    # carries the real ``m_opt/m_fut`` ratio.  ``False``: size PER INDEX POINT — the
+    # contract multiplier is NOT applied (``m_opt := m_fut`` so the ratio is exactly
+    # 1.0), reproducing the LEGACY VIX option sizing (whose ~10x-low magnitude under
+    # the multiplier path — VIX m_opt/m_fut = 0.1 — is the whole reason this exists).
+    # The collapse is applied at spec construction (:func:`tcg.types.multipliers.
+    # collapse_index_point`); the SPX/NDX case (m_fut==m_opt) is a no-op either way.
+    apply_contract_multiplier: bool = True
     # DELTA-HEDGE overlay (feature F2, SPEC §5.5/§5.6): a VX1 futures hedge sized
     # off THIS option leg's net delta, rebalanced daily, gated (VVIX>150) and
     # accrued into the SAME leg equity ("call + VX1 hedge" is ONE leg).  Only

@@ -98,6 +98,7 @@ from tcg.types.signal import (
     Signal,
     Trade,
 )
+from tcg.types.multipliers import collapse_index_point
 
 
 # ---------------------------------------------------------------------------
@@ -1597,6 +1598,13 @@ async def evaluate_signal(
                 # reads dwh).  A NaN pair triggers the engine's tail carry-forward.
                 if _mult_fetch is not None:
                     mult_fut, mult_opt = await _mult_fetch(inp.instrument)
+                # GAP C: per-index-point sizing (m_opt := m_fut) when the leg opts
+                # out of the contract multiplier — legacy VIX option sizing.  No-op
+                # (byte-identical) when apply_contract_multiplier is True/None or
+                # when m_fut == m_opt (SPX/NDX).
+                mult_fut, mult_opt = collapse_index_point(
+                    mult_fut, mult_opt, inp.instrument.apply_contract_multiplier
+                )
             hold_roll_info[ref_id] = (
                 is_roll_aligned,
                 roll_premium_aligned,
@@ -1638,15 +1646,10 @@ async def evaluate_signal(
                 and inp.instrument.delta_hedge is not None
             ):
                 continue
-            # The hedge accrues only in premium_notional mode (its qty is sized off
-            # the premium-notional option quantity); reject on a futures_notional
-            # hold leg exactly like the portfolio path does (loud, never silent).
-            if inp.instrument.sizing_mode == "futures_notional":
-                raise SignalDataError(
-                    f"input {ref_id!r}: delta_hedge is only supported on a "
-                    f"premium_notional option leg (the hedge sizes off the "
-                    f"premium-notional option quantity), not futures_notional"
-                )
+            # GAP B: the hedge is sized off the option leg's OWN quantity in EITHER
+            # notional basis (the engine sizes the futures-notional case off
+            # seg_fref·mult_fut·mult_opt), so a futures_notional hedged leg is
+            # accepted — no longer rejected here.
             if ref_id not in hold_roll_info:
                 # A hedged hold input MUST have its roll structure (the gate ANDs
                 # with ~is_roll); its absence is the same loud wiring error the
