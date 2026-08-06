@@ -159,10 +159,6 @@ async def test_usd_1m_rate_persisted_entity(client):
     print(f"[USD persisted] repro ann_ret={cmp.repro_ann_ret_pct:.3f}% "
           f"(given {_USD_RATE_GIVEN_ANN}%, |Δ|={cmp.ann_ret_abs_diff_pp:.2f}pp) "
           f"min_equity={cmp.repro_min_equity:.4f} ruin_ok={cmp.ruin_ok}")
-    print(f"[USD persisted] maxDD_ratio_monthly={cmp.maxdd_ratio_monthly} "
-          f"(repro_m={cmp.repro_maxdd_monthly_pct:.3f}% target_m={cmp.target_maxdd_monthly_pct:.3f}%)")
-    for line in verdict.reasons:
-        print(f"  band: {line}")
 
     # Shape: monotone-up (rate >= 0 over the window), never below funding.
     assert np.all(np.diff(cash_eq) >= -1e-9), "cash equity went down"
@@ -171,8 +167,6 @@ async def test_usd_1m_rate_persisted_entity(client):
     f_pre08 = _seg_avg_daily_factor(dates, cash_eq, "2006-08-01", "2007-12-31")
     f_zirp = _seg_avg_daily_factor(dates, cash_eq, "2011-01-01", "2015-01-01")
     f_2324 = _seg_avg_daily_factor(dates, cash_eq, "2023-06-01", "2024-12-31")
-    print(f"[USD persisted] daily factors pre08={f_pre08:.8f} "
-          f"zirp={f_zirp:.8f} 2023-24={f_2324:.8f}")
     assert f_pre08 > f_zirp, "pre-2008 (~5%) did not out-accrue ZIRP"
     assert f_2324 > f_zirp, "2023-24 (~5%) did not out-accrue ZIRP"
     assert f_zirp == pytest.approx(1.0, abs=5e-6), "ZIRP window should be ~flat"
