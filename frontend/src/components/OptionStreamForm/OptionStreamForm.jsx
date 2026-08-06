@@ -488,13 +488,54 @@ function SizeAndLeverage({
   );
 }
 
+// Helper text for the advanced (optional) hedge knobs — mirrors the backend
+// ``DeltaHedgeConfig`` field semantics. All three are OMITTED from the wire
+// object until the user touches them, so a hedge configured with defaults
+// serialises byte-identically to a pre-generalisation hedge.
+const DH_INTERVAL_HELP =
+  'Re-size the hedge every N trading days (1 = daily, the current behaviour). Whole number ≥ 1.';
+const DH_QTY_CAP_HELP =
+  'Cap the hedge size at this multiple of the option quantity: |qty_hedge| ≤ mult × |option_qty|. Number > 0.';
+const DH_PAUSE_HELP =
+  "Pause the hedge on the hedged option's roll bar (current behaviour when checked).";
+const DH_INTERVAL_INVALID = 'Interval must be a whole number ≥ 1 — reset to 1.';
+const DH_QTY_CAP_INVALID = 'Cap multiple must be greater than 0 — reset to 10.';
+
 /**
  * Delta-hedge overlay controls (F2, SPEC §5.5/§5.6). Enable checkbox + hedge
- * factor (default 1/3) + gate threshold (default VVIX>150). Emits/clears the
- * ``delta_hedge`` field via the supplied setters. Rendered only when the
- * consumer sets ``showDeltaHedge`` (the Portfolio option-leg picker).
+ * factor (default 1/3) + gate threshold (default VVIX>150). An "Advanced"
+ * disclosure exposes THREE optional knobs generalising the hedge — rebalance
+ * interval (default 1 = daily), qty cap multiple (default 10× the option qty)
+ * and pause-on-roll (default on). Each of the three maps 1:1 onto the wire keys
+ * ``rebalance_interval_days`` / ``qty_cap_mult`` / ``pause_on_roll`` and is only
+ * written once the user interacts, so an untouched hedge is byte-identical to
+ * today. Emits/clears the ``delta_hedge`` field via the supplied setters.
+ * Rendered only when the consumer sets ``showDeltaHedge``.
  */
-function DeltaHedgeControls({ enabled, factor, threshold, onEnabled, onFactor, onThreshold, disabled }) {
+function DeltaHedgeControls({
+  enabled, factor, threshold,
+  interval, qtyCap, pauseOnRoll,
+  onEnabled, onFactor, onThreshold,
+  onInterval, onQtyCap, onPauseOnRoll,
+  disabled,
+}) {
+  // Transient invalid-entry flags so a bad interval/cap surfaces a hint even
+  // though the emitted value is settled to the default (matching the coerce-
+  // to-valid discipline the Size/nav_times input uses).
+  const [intervalInvalid, setIntervalInvalid] = useState(false);
+  const [qtyCapInvalid, setQtyCapInvalid] = useState(false);
+
+  const handleInterval = (raw) => {
+    const n = Number.parseInt(raw, 10);
+    setIntervalInvalid(!(Number.isFinite(n) && n >= 1) && raw !== '');
+    onInterval(raw);
+  };
+  const handleQtyCap = (raw) => {
+    const n = Number.parseFloat(raw);
+    setQtyCapInvalid(!(Number.isFinite(n) && n > 0) && raw !== '');
+    onQtyCap(raw);
+  };
+
   return (
     <label className={styles.row}>
       <span className={styles.label}>Delta hedge</span>
@@ -542,6 +583,75 @@ function DeltaHedgeControls({ enabled, factor, threshold, onEnabled, onFactor, o
                 data-testid="delta-hedge-threshold"
               />
             </label>
+            {/* Advanced (optional) knobs — collapsed by default, keys omitted
+                until touched so an untouched hedge stays byte-identical. */}
+            <details className={styles.row} data-testid="delta-hedge-advanced" style={{ width: '100%' }}>
+              <summary style={{ cursor: 'pointer', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                Advanced
+              </summary>
+              <div className={styles.subgroup} style={{ marginTop: 6 }}>
+                <label className={styles.fieldInline} title={DH_INTERVAL_HELP}>
+                  Rebalance interval (days)
+                  <input
+                    type="number"
+                    className={styles.input}
+                    min={1}
+                    step={1}
+                    value={interval}
+                    onChange={(e) => handleInterval(e.target.value)}
+                    disabled={disabled}
+                    aria-label="Delta-hedge rebalance interval (days)"
+                    data-testid="delta-hedge-interval"
+                  />
+                </label>
+                <label className={styles.fieldInline} title={DH_QTY_CAP_HELP}>
+                  Qty cap (× option qty)
+                  <input
+                    type="number"
+                    className={styles.input}
+                    min={0}
+                    step="any"
+                    value={qtyCap}
+                    onChange={(e) => handleQtyCap(e.target.value)}
+                    disabled={disabled}
+                    aria-label="Delta-hedge qty cap multiple"
+                    data-testid="delta-hedge-qty-cap"
+                  />
+                </label>
+                <label className={styles.fieldInline} title={DH_PAUSE_HELP}>
+                  <input
+                    type="checkbox"
+                    checked={!!pauseOnRoll}
+                    onChange={(e) => onPauseOnRoll(e.target.checked)}
+                    disabled={disabled}
+                    aria-label="Delta-hedge pause on roll"
+                    data-testid="delta-hedge-pause-on-roll"
+                  />
+                  Pause on roll bar
+                </label>
+                <span style={{ flexBasis: '100%', fontSize: '0.7rem', color: 'var(--text-secondary)', opacity: 0.85 }}>
+                  {DH_INTERVAL_HELP} {DH_QTY_CAP_HELP} {DH_PAUSE_HELP}
+                </span>
+                {intervalInvalid ? (
+                  <span
+                    data-testid="delta-hedge-interval-hint"
+                    role="note"
+                    style={{ flexBasis: '100%', fontSize: '0.7rem', color: BAND_COLORS.red || 'crimson' }}
+                  >
+                    {DH_INTERVAL_INVALID}
+                  </span>
+                ) : null}
+                {qtyCapInvalid ? (
+                  <span
+                    data-testid="delta-hedge-qty-cap-hint"
+                    role="note"
+                    style={{ flexBasis: '100%', fontSize: '0.7rem', color: BAND_COLORS.red || 'crimson' }}
+                  >
+                    {DH_QTY_CAP_INVALID}
+                  </span>
+                ) : null}
+              </div>
+            </details>
           </>
         ) : null}
       </div>
@@ -807,6 +917,25 @@ export default function OptionStreamForm({
   const setDeltaHedgeThreshold = useCallback((raw) => {
     const n = Number.parseFloat(raw);
     emit({ delta_hedge: { ...(dh || { enabled: true }), gate_threshold: Number.isFinite(n) ? n : raw } });
+  }, [emit, dh]);
+  // ── Advanced (optional) hedge knobs ───────────────────────────────────────
+  // rebalance_interval_days (int ≥ 1, default 1) / qty_cap_mult (> 0, default
+  // 10) / pause_on_roll (bool, default true). Coerced to a VALID value here so
+  // the emitted payload is always runnable (invalid → settle to the backend
+  // default; the control surfaces the hint). Only written once a setter fires,
+  // so an untouched hedge omits all three keys → byte-identical to today.
+  const setDeltaHedgeInterval = useCallback((raw) => {
+    const n = Number.parseInt(raw, 10);
+    const value = Number.isFinite(n) && n >= 1 ? n : 1;
+    emit({ delta_hedge: { ...(dh || { enabled: true }), rebalance_interval_days: value } });
+  }, [emit, dh]);
+  const setDeltaHedgeQtyCap = useCallback((raw) => {
+    const n = Number.parseFloat(raw);
+    const value = Number.isFinite(n) && n > 0 ? n : 10.0;
+    emit({ delta_hedge: { ...(dh || { enabled: true }), qty_cap_mult: value } });
+  }, [emit, dh]);
+  const setDeltaHedgePauseOnRoll = useCallback((checked) => {
+    emit({ delta_hedge: { ...(dh || { enabled: true }), pause_on_roll: !!checked } });
   }, [emit, dh]);
 
   // Roll offset is the unified {value, unit}. A legacy int (days-only) is read
@@ -1267,9 +1396,15 @@ export default function OptionStreamForm({
                 enabled={dhEnabled}
                 factor={(dh && dh.factor != null) ? dh.factor : 1 / 3}
                 threshold={(dh && dh.gate_threshold != null) ? dh.gate_threshold : 150}
+                interval={(dh && dh.rebalance_interval_days != null) ? dh.rebalance_interval_days : 1}
+                qtyCap={(dh && dh.qty_cap_mult != null) ? dh.qty_cap_mult : 10}
+                pauseOnRoll={!(dh && dh.pause_on_roll === false)}
                 onEnabled={setDeltaHedgeEnabled}
                 onFactor={setDeltaHedgeFactor}
                 onThreshold={setDeltaHedgeThreshold}
+                onInterval={setDeltaHedgeInterval}
+                onQtyCap={setDeltaHedgeQtyCap}
+                onPauseOnRoll={setDeltaHedgePauseOnRoll}
                 disabled={disabled || sizingMode === 'futures_notional'}
               />
             ) : null}

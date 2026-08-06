@@ -81,6 +81,72 @@ describe('<OptionStreamForm> delta-hedge overlay (F2)', () => {
   });
 });
 
+describe('<OptionStreamForm> delta-hedge ADVANCED knobs (modular hedge)', () => {
+  const hedged = () => ({
+    ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+    delta_hedge: { enabled: true, factor: 1 / 3, gate_threshold: 150 },
+  });
+
+  it('renders the three advanced inputs with defaults once the hedge is enabled', () => {
+    renderForm({ showDeltaHedge: true, value: hedged() });
+    const interval = screen.getByTestId('delta-hedge-interval');
+    const qtyCap = screen.getByTestId('delta-hedge-qty-cap');
+    const pause = screen.getByTestId('delta-hedge-pause-on-roll');
+    expect(interval).toBeTruthy();
+    expect(qtyCap).toBeTruthy();
+    expect(pause).toBeTruthy();
+    // Defaults shown even though the wire object omits the keys.
+    expect(Number(interval.value)).toBe(1);
+    expect(Number(qtyCap.value)).toBe(10);
+    expect(pause.checked).toBe(true);
+  });
+
+  it('does NOT render the advanced inputs while the hedge is disabled', () => {
+    renderForm({ showDeltaHedge: true, value: buildDefaultOptionStream({ availableRoots: ROOTS }) });
+    expect(screen.queryByTestId('delta-hedge-interval')).toBeNull();
+    expect(screen.queryByTestId('delta-hedge-qty-cap')).toBeNull();
+    expect(screen.queryByTestId('delta-hedge-pause-on-roll')).toBeNull();
+  });
+
+  it('threads the three fields onto delta_hedge with the exact wire keys', () => {
+    const onChange = vi.fn();
+    renderForm({ showDeltaHedge: true, onChange, value: hedged() });
+    fireEvent.change(screen.getByTestId('delta-hedge-interval'), { target: { value: '5' } });
+    expect(onChange.mock.calls.at(-1)[0].delta_hedge.rebalance_interval_days).toBe(5);
+    fireEvent.change(screen.getByTestId('delta-hedge-qty-cap'), { target: { value: '3.5' } });
+    expect(onChange.mock.calls.at(-1)[0].delta_hedge.qty_cap_mult).toBe(3.5);
+    fireEvent.click(screen.getByTestId('delta-hedge-pause-on-roll'));
+    expect(onChange.mock.calls.at(-1)[0].delta_hedge.pause_on_roll).toBe(false);
+  });
+
+  it('coerces an invalid interval to 1 (int ≥ 1) and shows a hint', () => {
+    const onChange = vi.fn();
+    renderForm({ showDeltaHedge: true, onChange, value: hedged() });
+    fireEvent.change(screen.getByTestId('delta-hedge-interval'), { target: { value: '0' } });
+    expect(onChange.mock.calls.at(-1)[0].delta_hedge.rebalance_interval_days).toBe(1);
+    expect(screen.getByTestId('delta-hedge-interval-hint')).toBeTruthy();
+  });
+
+  it('coerces a non-positive qty cap to the default 10 and shows a hint', () => {
+    const onChange = vi.fn();
+    renderForm({ showDeltaHedge: true, onChange, value: hedged() });
+    fireEvent.change(screen.getByTestId('delta-hedge-qty-cap'), { target: { value: '-2' } });
+    expect(onChange.mock.calls.at(-1)[0].delta_hedge.qty_cap_mult).toBe(10);
+    expect(screen.getByTestId('delta-hedge-qty-cap-hint')).toBeTruthy();
+  });
+
+  it('enabling the hedge with defaults OMITS all three advanced keys (byte-identical)', () => {
+    const onChange = vi.fn();
+    renderForm({ showDeltaHedge: true, onChange, value: buildDefaultOptionStream({ availableRoots: ROOTS }) });
+    fireEvent.click(screen.getByTestId('delta-hedge-enabled'));
+    const dh = onChange.mock.calls.at(-1)[0].delta_hedge;
+    expect(dh.enabled).toBe(true);
+    expect('rebalance_interval_days' in dh).toBe(false);
+    expect('qty_cap_mult' in dh).toBe(false);
+    expect('pause_on_roll' in dh).toBe(false);
+  });
+});
+
 describe('legConfig delta-hedge round-trip', () => {
   it('forwards an enabled delta_hedge onto the leg config', () => {
     const instrument = {
