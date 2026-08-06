@@ -226,8 +226,12 @@ export function migrateCondition(current, nextOp) {
     const nextIsCross = CROSS_OPS.includes(nextOp);
     const currIsCross = CROSS_OPS.includes(current.op);
     if (nextIsCross && !currIsCross) {
+      // ``consecutive_days`` rides on PLAIN comparators only (see BlockEditor);
+      // a cross op does not carry it, so drop it on the way in — mirroring how
+      // the reverse branch drops count/window — rather than leak a stale value.
+      const { consecutive_days: _cd, ...rest } = current;
       return {
-        ...current,
+        ...rest,
         op: nextOp,
         count: Number.isInteger(current.count) && current.count >= 1 ? current.count : 1,
         window: Number.isInteger(current.window) && current.window >= 1 ? current.window : 1,
