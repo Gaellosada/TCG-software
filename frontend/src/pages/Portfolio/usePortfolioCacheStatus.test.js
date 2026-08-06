@@ -35,6 +35,7 @@ vi.mock('../../api/persistence', () => ({ getPortfolio: vi.fn() }));
 
 import { getPortfolioCacheStatus } from '../../api/portfolio';
 import { getPortfolio } from '../../api/persistence';
+import { resolvePortfolioRange } from './resolvePortfolioRange';
 
 const ACTIVE_LEG = { id: 1, label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 100 };
 
@@ -87,6 +88,33 @@ describe('usePortfolioCacheStatus', () => {
       expect(result.current.activeCached).toBe(true);
       expect(result.current.rowStatusById['row-1']).toBe('not-cached');
     }, { timeout: 2000 });
+  });
+
+  it('seeds a cadence-cliff row probe from recommendedStart, not raw start (cache-key parity)', async () => {
+    // A saved (non-active) row whose overlap has a cadence cliff: Compute keys the
+    // result under recommendedStart, so the status probe must key the SAME start —
+    // else the row shows a false "not-cached" badge.
+    resolvePortfolioRange.mockResolvedValue({
+      ranges: {},
+      overlapRange: { start: '2010-01-01', end: '2020-12-31', recommendedStart: '2016-05-01' },
+    });
+    getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }, { cached: true }] });
+    const row = {
+      id: 'row-cliff', rebalance: 'none',
+      legs: [{ label: 'OPT', type: 'instrument', collection: 'INDEX', symbol: 'X', weight: 100 }],
+    };
+    renderHook((props) => usePortfolioCacheStatus(props), {
+      initialProps: baseProps({ portfolios: [row] }),
+    });
+    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalled(), { timeout: 2000 });
+    const queries = getPortfolioCacheStatus.mock.calls[0][0];
+    // queries[0] = active (from overlapRange prop); queries[1] = the saved row —
+    // it must key from recommendedStart (2016-05-01), NOT the raw start (2010-01-01).
+    expect(queries[1].start).toBe('2016-05-01');
+    // Restore the module default for subsequent tests.
+    resolvePortfolioRange.mockResolvedValue({
+      ranges: {}, overlapRange: { start: '2020-01-01', end: '2020-12-31' },
+    });
   });
 
   it('re-probes when the active config changes (edit → flips)', async () => {
@@ -156,5 +184,41 @@ describe('usePortfolioCacheStatus', () => {
     });
     await waitFor(() => expect(result.current.rowStatusById['pure-1']).toBe('cached'), { timeout: 2000 });
     expect(getPortfolio).not.toHaveBeenCalled(); // pure rows fetch no children
+  });
+
+  // PER-INSTRUMENT: a saved row's source rides its own persisted leg. The probe
+  // body must carry the leg's source on the LEG (present only for v2), never as
+  // a top-level field. docSignature captures ``doc.legs`` (which include the
+  // per-leg source), so the memo stays content-addressed on it.
+  it('probes a v1 row with NO source key and a v2 row with data_source:"v2" on the leg', async () => {
+    getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }, { cached: true }] });
+    const v1Row = {
+      id: 'v1-row', rebalance: 'none',
+      legs: [{ label: 'NDX', type: 'instrument', collection: 'INDEX', symbol: 'NDX', weight: 100 }],
+    };
+    const v2Row = {
+      id: 'v2-row', rebalance: 'none',
+      legs: [{ label: 'NDX', type: 'instrument', collection: 'INDEX', symbol: 'NDX', weight: 100, dataSource: 'v2' }],
+    };
+    // No active legs → the ONLY probed bodies are the rows'.
+    renderHook((p) => usePortfolioCacheStatus(p), {
+      initialProps: baseProps({ legs: [], portfolios: [v1Row, v2Row] }),
+    });
+    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalled(), { timeout: 2000 });
+    // Collect every probed body across all calls, keyed by whether its NDX leg is v2.
+    const bodies = getPortfolioCacheStatus.mock.calls.flatMap((c) => c[0]);
+    await waitFor(() => {
+      const all = getPortfolioCacheStatus.mock.calls.flatMap((c) => c[0]);
+      expect(all.length).toBeGreaterThanOrEqual(2);
+    }, { timeout: 2000 });
+    const finalBodies = getPortfolioCacheStatus.mock.calls.flatMap((c) => c[0]);
+    for (const b of finalBodies) {
+      expect(b.data_source).toBeUndefined(); // never a top-level field
+    }
+    const v1Body = finalBodies.find((b) => !('data_source' in b.legs.NDX));
+    const v2Body = finalBodies.find((b) => b.legs.NDX.data_source === 'v2');
+    expect(v1Body).toBeTruthy();
+    expect(v2Body).toBeTruthy();
+    expect(bodies).toBeDefined();
   });
 });

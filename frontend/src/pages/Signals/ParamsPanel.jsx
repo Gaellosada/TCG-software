@@ -12,7 +12,9 @@ import styles from './Signals.module.css';
  *   capital            {number}       display-only initial capital for P&L scaling
  *   onCapitalChange    {Function}     (number) => void
  */
-function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capital, onCapitalChange }) {
+function ParamsPanel({
+  signal, onRun, running, canRun, runDisabledReason, capital, onCapitalChange,
+}) {
   // v4: rules shape is now `{ entries, exits }` (section model); weight sign
   // carries long/short on each entry block.
   const rules = signal?.rules || {};
@@ -55,6 +57,9 @@ function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capita
             data-testid="initial-capital"
           />
         </div>
+        {/* Market-data source is chosen per input at add time (in the input's
+            instrument picker) and shown read-only in the Inputs panel — there is
+            no page-level default and no run-level source. */}
         <button
           type="button"
           className={styles.runBtn}

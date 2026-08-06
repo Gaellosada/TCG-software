@@ -29,7 +29,7 @@ export function toLongEquivalent(values) {
  */
 export function formatReturn(value) {
   if (value == null || isNaN(value)) return '\u2013';
-  const pct = (value * 100).toFixed(1);
+  const pct = (value * 100).toFixed(2);
   const sign = value > 0 ? '+' : '';
   return `${sign}${pct}%`;
 }

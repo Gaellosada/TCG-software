@@ -1,11 +1,12 @@
 import { Fragment, useState } from 'react';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import SourceBadge from '../../components/SourceBadge';
 import { formatInstrument } from './formatInstrument';
 import { DEFAULT_CASH_RATE_SOURCE } from './cashRateLeg';
 import styles from './HoldingsList.module.css';
 
-const COL_COUNT = 7;
+const COL_COUNT = 8;
 
 /**
  * Displays portfolio holdings with editable weights and remove buttons.
@@ -122,6 +123,7 @@ export default function HoldingsList({
                 <th className={styles.thLabel}>Label</th>
                 <th className={styles.thType}>Type</th>
                 <th className={styles.thInstrument}>Instrument</th>
+                <th className={styles.thSource}>Source</th>
                 <th className={styles.thRange}>Start Date</th>
                 <th className={styles.thRange}>End Date</th>
                 <th className={styles.thWeight}>Weight</th>
@@ -268,6 +270,31 @@ export default function HoldingsList({
                             <span className={styles.instrumentPrimary}>{leg.symbol}</span>
                             <span className={styles.instrumentSecondary}>{leg.collection}</span>
                           </span>
+                        )}
+                      </td>
+                      <td className={styles.sourceCell}>
+                        {isSignal ? (
+                          <span
+                            className={styles.instrumentSecondary}
+                            title="Signal legs carry a market-data source per input (set when each input is added)."
+                          >
+                            per input
+                          </span>
+                        ) : leg.type === 'portfolio' ? (
+                          <span
+                            className={styles.instrumentSecondary}
+                            title="Composed portfolios carry a market-data source per underlying instrument."
+                          >
+                            per leg
+                          </span>
+                        ) : (
+                          // Read-only badge: the source is fixed at add time
+                          // (chosen in the Add Holding picker). To change it,
+                          // remove the holding and re-add it from the other DB.
+                          <SourceBadge
+                            source={leg.dataSource}
+                            testId={`leg-datasource-${leg.id}`}
+                          />
                         )}
                       </td>
                       <td className={styles.rangeCell}>

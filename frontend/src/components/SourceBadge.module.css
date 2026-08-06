@@ -1,0 +1,23 @@
+.badge {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  user-select: none;
+}
+
+.v1 {
+  color: var(--text-secondary);
+  background: var(--bg-tertiary, rgba(127, 127, 127, 0.12));
+  border-color: var(--border, rgba(127, 127, 127, 0.25));
+}
+
+.v2 {
+  color: var(--accent, #3b82f6);
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.4);
+}

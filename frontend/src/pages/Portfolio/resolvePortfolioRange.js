@@ -37,7 +37,12 @@ export function getChildPortfolioId(leg) {
  * nested inside a child is not resolved (returns nulls), mirroring the compute
  * builder + backend guard.
  */
-export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
+export async function resolveLegRange(leg, { queryClient, dataSource = 'v1' }, _depth = 0) {
+  // PER-INSTRUMENT: this leg's coverage floor (esp. the option E7 floor, whose
+  // history differs sharply between v1 and v2) must come from the leg's OWN
+  // source, falling back to the build/page default, else v1 — mirroring the
+  // compute builder's ``leg.dataSource || dataSource`` fold.
+  const effSource = leg.dataSource || dataSource;
   if (leg.type === 'portfolio') {
     // Composed leg: its available range is the OVERLAP of its referenced child's
     // legs (the same grid the backend/compute builder use). Without this, a
@@ -54,10 +59,21 @@ export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
       const childLegs = persistedDocToLegs(child);
       if (childLegs.length === 0) return { id: leg.id, start: null, end: null };
       const childResults = await Promise.all(
-        childLegs.map((cl) => resolveLegRange(cl, { queryClient }, _depth + 1)),
+        // The child's legs inherit THIS composed leg's effective source as their
+        // fold default (a child leg with its own source still wins inside).
+        childLegs.map((cl) => resolveLegRange(cl, { queryClient, dataSource: effSource }, _depth + 1)),
       );
       const overlap = overlapRangeOf(childResults);
-      return { id: leg.id, start: overlap?.start ?? null, end: overlap?.end ?? null };
+      // Propagate the cadence recommendation/band up: a composed leg wrapping an
+      // option leg must still surface the recommended default + lower-cadence
+      // span so the parent slider seeds/warns/shades correctly.
+      return {
+        id: leg.id,
+        start: overlap?.start ?? null,
+        end: overlap?.end ?? null,
+        recommendedStart: overlap?.recommendedStart ?? overlap?.start ?? null,
+        segments: overlap?.segments ?? [],
+      };
     } catch {
       return { id: leg.id, start: null, end: null };
     }
@@ -66,7 +82,7 @@ export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
     return fetchSignalLegRange(leg);
   }
   if (leg.type === 'option_stream') {
-    return fetchOptionLegRange(queryClient, leg);
+    return fetchOptionLegRange(queryClient, leg, effSource);
   }
   try {
     let dates;
@@ -105,21 +121,54 @@ export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
 
 /**
  * PURE: overlap of per-leg ranges = latest start → earliest end. Returns
- * `{ start, end }` or null (no valid leg, or the ranges don't overlap).
+ * `{ start, end, recommendedStart, segments }` or null (no valid leg, or the
+ * ranges don't overlap).
+ *
+ * `recommendedStart` folds the per-leg recommendation the same way `start`
+ * folds raw starts (LATEST wins — the most conservative full-cadence floor),
+ * clamped into `[start, end]`. A leg without a recommendation defaults to its
+ * own raw start, so non-option legs never pull the recommendation earlier than
+ * the raw overlap. `segments` carries the cadence band of the option leg that
+ * actually exhibits a cliff (>1 segment) and binds the latest recommendation —
+ * that is the span the slider shades and the overlap warning references. Legacy
+ * callers reading only `start`/`end` are unaffected (fields are additive).
  */
 export function overlapRangeOf(perLegResults) {
   const starts = [];
   const ends = [];
+  const recStarts = [];
+  let bandSegments = [];
+  let bandRec = null;
   for (const r of perLegResults) {
     if (r && r.start) {
       starts.push(r.start);
       ends.push(r.end);
+      const rec = r.recommendedStart || r.start;
+      recStarts.push(rec);
+      // A real cadence cliff has >1 segment; keep the band of the leg whose
+      // recommendation binds latest (the one the default seeds to).
+      if (Array.isArray(r.segments) && r.segments.length > 1) {
+        if (bandRec === null || rec > bandRec) {
+          bandRec = rec;
+          bandSegments = r.segments;
+        }
+      }
     }
   }
   if (starts.length === 0) return null;
   const overlapStart = starts.reduce((a, b) => (a > b ? a : b));
   const overlapEnd = ends.reduce((a, b) => (a < b ? a : b));
-  return overlapStart <= overlapEnd ? { start: overlapStart, end: overlapEnd } : null;
+  if (overlapStart > overlapEnd) return null;
+  // LATEST recommendation across legs, clamped into the overlap window.
+  let recommendedStart = recStarts.reduce((a, b) => (a > b ? a : b), overlapStart);
+  if (recommendedStart < overlapStart) recommendedStart = overlapStart;
+  if (recommendedStart > overlapEnd) recommendedStart = overlapEnd;
+  return {
+    start: overlapStart,
+    end: overlapEnd,
+    recommendedStart,
+    segments: bandSegments,
+  };
 }
 
 /**
@@ -199,9 +248,11 @@ export async function childRangeAccessorFor(legs, { queryClient }) {
  * @returns {Promise<{ ranges: Record<string,{start,end}>, overlapRange: {start,end}|null }>}
  * Never throws (each leg read is wrapped).
  */
-export async function resolvePortfolioRange(legs, { queryClient }) {
+export async function resolvePortfolioRange(legs, { queryClient, dataSource = 'v1' }) {
   if (!legs || legs.length === 0) return { ranges: {}, overlapRange: null };
-  const results = await Promise.all(legs.map((leg) => resolveLegRange(leg, { queryClient })));
+  const results = await Promise.all(
+    legs.map((leg) => resolveLegRange(leg, { queryClient, dataSource })),
+  );
   const ranges = {};
   for (const r of results) ranges[r.id] = { start: r.start, end: r.end };
   return { ranges, overlapRange: overlapRangeOf(results) };

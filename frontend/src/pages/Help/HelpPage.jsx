@@ -354,6 +354,19 @@ function HelpPage() {
           infrequent enough to limit transaction costs. Rebalance dates appear as dashed
           purple lines on the chart.
         </p>
+        <p className={styles.conceptText}>
+          If a holding in a rebalanced portfolio <strong>falls to zero</strong> and
+          cannot recover &mdash; an option expiring worthless, a wiped-out signal, or a
+          bankrupt instrument &mdash; it is held at zero for the rest of the backtest
+          instead of being topped back up to its target weight. There is no idle-cash
+          sleeve to fund it from, so its weight is <strong>spread across the surviving
+          holdings</strong>, which increases their effective exposure (a 50/50 book
+          becomes fully invested in the survivor). This matches what happens with no
+          rebalancing at all, so a dead holding never silently drains the rest of the
+          portfolio. Note: <strong>daily rebalancing is not available</strong> for a
+          portfolio holding a hold-mode option leg &mdash; use weekly, monthly,
+          quarterly, annually, or none.
+        </p>
 
         <h3 className={styles.conceptTitle}>Transaction costs (slippage &amp; fees)</h3>
         <p className={styles.conceptText}>

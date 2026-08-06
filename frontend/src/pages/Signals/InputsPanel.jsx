@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import SourceBadge from '../../components/SourceBadge';
 import { nextInputId } from './storage';
 import { isInputConfigured } from './blockShape';
 import styles from './InputsPanel.module.css';
@@ -161,7 +162,19 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
 
   function handlePickerSelect(instrument) {
     if (pickerIdx !== null) {
-      onChange(list.map((x, i) => (i !== pickerIdx ? x : { ...x, instrument })));
+      // The source is chosen ONCE, at add time (the picker's source selector,
+      // enabled only for an unconfigured slot). When RE-opening a configured
+      // input's picker to change its settings the selector is hidden and the
+      // modal emits no ``data_source``, so preserve the input's existing source
+      // here — an input's source is immutable; delete + re-add to change it.
+      onChange(list.map((x, i) => {
+        if (i !== pickerIdx) return x;
+        const prevSrc = x.instrument && x.instrument.data_source;
+        const next = (prevSrc === 'v2' && !(instrument && instrument.data_source))
+          ? { ...instrument, data_source: 'v2' }
+          : instrument;
+        return { ...x, instrument: next };
+      }));
     }
     setPickerIdx(null);
   }
@@ -317,6 +330,15 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
                     {label || 'Select instrument'}
                   </button>
                 </div>
+                {/* Read-only source badge — the source is fixed when the input's
+                    instrument is first picked. Shown once configured; to change
+                    it, delete the input and re-add it from the other DB. */}
+                {ok && (
+                  <SourceBadge
+                    source={input.instrument && input.instrument.data_source}
+                    testId={`input-datasource-${idx}`}
+                  />
+                )}
                 <button
                   type="button"
                   className={styles.deleteBtn}
@@ -462,6 +484,11 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
         // edited (the exact object onSelect gave us — no reshaping). null
         // for an unconfigured row falls back to create mode, unchanged.
         initialConfig={pickerIdx !== null ? list[pickerIdx].instrument : null}
+        // Source is chosen ONCE, at add time: the selector shows only while the
+        // slot is still unconfigured (first instrument pick). Re-opening a
+        // configured input to edit its settings hides it (source is immutable),
+        // and handlePickerSelect preserves the existing source.
+        showDataSourceSelector={pickerIdx !== null && !isInputConfigured(list[pickerIdx])}
         // Locked signal → view-only (onSelect never fires inside the modal).
         readOnly={readOnly}
       />

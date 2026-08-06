@@ -44,15 +44,17 @@ remain free of.  ``persistence.py`` redefines the same shape file-local
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, ClassVar, Literal, Union
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Discriminator,
     Field,
+    SerializerFunctionWrapHandler,
     Tag,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -62,6 +64,50 @@ from tcg.core.api._models_options import (
     SelectionCriterion,
     reject_contradicting_delta_sign,
 )
+from tcg.core.api.common import DataSource
+
+
+class _PerInstrumentSourceMixin(BaseModel):
+    """Adds a per-instrument ``data_source`` that is OMITTED from the JSON dump
+    whenever it is unset or ``"v1"``.
+
+    Per-instrument v1/v2 selection means every spot / continuous / option-stream
+    ref (and the portfolio ``LegSpec``) carries its own warehouse choice.  The
+    field defaults to ``None`` = "inherit the enclosing body's source" and the
+    frontend attaches it ONLY when ``"v2"`` (the emit-only-when-non-default rule,
+    mirroring costs / the per-run source).
+
+    The wrap serializer reproduces that omission on the backend: a ``None`` or
+    ``"v1"`` value serialises to NOTHING, so an all-v1 / no-``data_source`` body's
+    ``model_dump(mode="json")`` — and therefore the portfolio result-cache key —
+    is BYTE-IDENTICAL to a pre-feature payload (no ``COMPUTE_VERSION`` bump).  A
+    ``"v2"`` value is kept, so a v2 leaf still participates in the cache key and
+    round-trips through persistence.
+    """
+
+    data_source: DataSource | None = None
+
+    # Subclasses may name ADDITIONAL optional fields to OMIT from the JSON dump
+    # when left at their ``None`` default, reusing the SAME conditional-serializer
+    # as ``data_source``.  A field only meaningful when explicitly set (e.g. the
+    # portfolio ``LegSpec``'s ``cash_rate`` / ``delta_hedge`` overlays) is dropped
+    # when unused, so a leg that does not use it stays BYTE-IDENTICAL to a
+    # pre-feature payload (its result-cache key is unperturbed); a leg that DOES
+    # set it still serialises it and correctly changes the key.
+    _omit_when_none: ClassVar[tuple[str, ...]] = ()
+
+    @model_serializer(mode="wrap")
+    def _omit_default_data_source(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> Any:
+        data = handler(self)
+        if isinstance(data, dict):
+            if data.get("data_source") in (None, "v1"):
+                data.pop("data_source", None)
+            for name in self._omit_when_none:
+                if data.get(name) is None:
+                    data.pop(name, None)
+        return data
 
 
 def _validate_nav_times(v: float) -> float:
@@ -79,13 +125,13 @@ def _validate_nav_times(v: float) -> float:
     return float(v)
 
 
-class SpotInstrumentRef(BaseModel):
+class SpotInstrumentRef(_PerInstrumentSourceMixin):
     type: Literal["spot"]
     collection: str
     instrument_id: str
 
 
-class ContinuousInstrumentRef(BaseModel):
+class ContinuousInstrumentRef(_PerInstrumentSourceMixin):
     type: Literal["continuous"]
     collection: str
     adjustment: Literal["none", "ratio", "difference"] = "none"
@@ -123,7 +169,7 @@ OptionStreamLabel = Literal[
 ]
 
 
-class OptionStreamRef(BaseModel):
+class OptionStreamRef(_PerInstrumentSourceMixin):
     """Series reference materialising a 1-D float stream off a selected
     option contract on each trade date.
 

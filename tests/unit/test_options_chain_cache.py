@@ -206,21 +206,21 @@ async def test_each_dimension_change_is_a_miss(override):
 
 
 def test_make_key_stable_and_version_salted(monkeypatch):
-    k1 = make_chain_bulk_key(**BASE_ARGS)
-    k2 = make_chain_bulk_key(**BASE_ARGS)
+    k1 = make_chain_bulk_key(source="src", **BASE_ARGS)
+    k2 = make_chain_bulk_key(source="src", **BASE_ARGS)
     assert k1 == k2
     assert k1[0] == CHAIN_CACHE_VERSION
     # Bumping the version salt changes the key (stale-shaped entry can't be hit).
     import tcg.core.api._options_chain_cache as mod
 
     monkeypatch.setattr(mod, "CHAIN_CACHE_VERSION", CHAIN_CACHE_VERSION + 1)
-    k3 = make_chain_bulk_key(**BASE_ARGS)
+    k3 = make_chain_bulk_key(source="src", **BASE_ARGS)
     assert k3 != k1
 
 
 def test_cycle_normalization_order_free():
-    a = make_chain_bulk_key(**{**BASE_ARGS, "expiration_cycle": ["M", "W"]})
-    b = make_chain_bulk_key(**{**BASE_ARGS, "expiration_cycle": ["W", "M"]})
+    a = make_chain_bulk_key(source="src", **{**BASE_ARGS, "expiration_cycle": ["M", "W"]})
+    b = make_chain_bulk_key(source="src", **{**BASE_ARGS, "expiration_cycle": ["W", "M"]})
     assert a == b
 
 

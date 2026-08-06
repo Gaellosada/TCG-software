@@ -33,6 +33,23 @@
 // ``normaliseBlock`` AND a new round-trip test in ``requestShape.test.js``.
 
 import { collectIndicatorIds } from '../../api/signals';
+import { dataSourceFieldsForRequest } from '../../lib/dataSource';
+
+/**
+ * Normalise the per-instrument market-data source on a signal input's
+ * instrument ref for the wire. PER-INSTRUMENT: the source rides the instrument
+ * ref itself (chosen once, at add time; not a top-level body field and not a
+ * page/run default). Emitted ONLY for 'v2' (via the shared
+ * ``dataSourceFieldsForRequest``), so a v1/absent ref carries NO ``data_source``
+ * key and stays byte-identical to a pre-feature payload. Strips any stale source
+ * key (either casing) before re-emitting so a UI-held value can never leak an
+ * un-encoded key onto the wire.
+ */
+function instrumentForWire(instrument) {
+  if (!instrument || typeof instrument !== 'object') return instrument ?? null;
+  const { data_source, dataSource, ...rest } = instrument;
+  return { ...rest, ...dataSourceFieldsForRequest(data_source ?? dataSource) };
+}
 import {
   MAX_ABS_WEIGHT,
   SECTIONS,
@@ -87,7 +104,9 @@ export function normaliseSpecForRequest(signal) {
     const blocks = Array.isArray(rules[section]) ? rules[section] : [];
     outRules[section] = blocks.map((b) => normaliseBlock(b, section));
   }
-  const inputs = Array.isArray(signal.inputs) ? signal.inputs.map(normaliseInput) : [];
+  const inputs = Array.isArray(signal.inputs)
+    ? signal.inputs.map((inp) => normaliseInput(inp))
+    : [];
   return { ...signal, inputs, rules: outRules };
 }
 
@@ -122,7 +141,8 @@ function normaliseInput(input) {
   const cap = normalisePositionCap(input.position_cap);
   return {
     id: typeof input.id === 'string' ? input.id : '',
-    instrument: input.instrument ?? null,
+    // Per-instrument market-data source rides the instrument ref (v2 only).
+    instrument: instrumentForWire(input.instrument),
     ...(cap !== undefined ? { position_cap: cap } : {}),
   };
 }
@@ -285,8 +305,11 @@ export function buildComputeRequestBody(signal, availableIndicators, costs) {
     const cleanMap = {};
     for (const [label, ref] of Object.entries(ind.seriesMap || {})) {
       if (ref && typeof ref === 'object' && ref.collection) {
-        const { type: _drop, ...rest } = ref;
-        cleanMap[label] = rest;
+        // Strip the frontend-only ``type`` key AND normalise the per-instrument
+        // source (v2 only; v1/absent emits nothing → byte-identical). No fold
+        // default: an indicator series slot carries its own source or none.
+        const { type: _drop, data_source, dataSource, ...rest } = ref;
+        cleanMap[label] = { ...rest, ...dataSourceFieldsForRequest(data_source ?? dataSource) };
       } else {
         // Placeholder — backend ignores primary-label value.
         cleanMap[label] = { collection: '_', instrument_id: '_' };
@@ -303,6 +326,8 @@ export function buildComputeRequestBody(signal, availableIndicators, costs) {
   }
   return {
     body: {
+      // Per-instrument source rides each input's instrument ref inside
+      // normaliseSpecForRequest — there is NO top-level ``data_source`` field.
       spec: normaliseSpecForRequest(signal),
       indicators: indicatorList,
       // Global execution costs — present only when > 0 (see costFieldsForRequest).

@@ -150,3 +150,58 @@ describe('AddHoldingModal — option_stream leg mapping', () => {
     expect(leg.futures_reference).toBe('nearest_on_or_after');
   });
 });
+
+describe('AddHoldingModal — per-instrument data source chosen ONCE at creation', () => {
+  it('opts the picker into the source selector in ADD mode (default v1)', () => {
+    render(<AddHoldingModal isOpen onClose={vi.fn()} onAddLeg={vi.fn()} />);
+    expect(capturedPickerProps.showDataSourceSelector).toBe(true);
+  });
+
+  it('a v2 pick lands dataSource:v2 on the new leg', () => {
+    const onAddLeg = vi.fn();
+    render(<AddHoldingModal isOpen onClose={vi.fn()} onAddLeg={onAddLeg} />);
+    capturedOnSelect({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX', data_source: 'v2' });
+    const leg = onAddLeg.mock.calls[0][0];
+    expect(leg.dataSource).toBe('v2');
+  });
+
+  it('a v1 pick carries NO dataSource key (byte-identity)', () => {
+    const onAddLeg = vi.fn();
+    render(<AddHoldingModal isOpen onClose={vi.fn()} onAddLeg={onAddLeg} />);
+    capturedOnSelect({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX' });
+    const leg = onAddLeg.mock.calls[0][0];
+    expect('dataSource' in leg).toBe(false);
+  });
+
+  it('EDIT mode hides the source selector — the source is immutable', () => {
+    render(
+      <AddHoldingModal
+        isOpen
+        onClose={vi.fn()}
+        onAddLeg={vi.fn()}
+        onUpdateLeg={vi.fn()}
+        editLeg={{ type: 'continuous', collection: 'FUT_ES', dataSource: 'v2' }}
+      />,
+    );
+    expect(capturedPickerProps.showDataSourceSelector).toBe(false);
+  });
+
+  it('EDIT mode emits config WITHOUT dataSource so the merge preserves the leg source', () => {
+    // In edit mode the picker's source selector is hidden, so it emits no
+    // data_source; the config forwarded to onUpdateLeg carries none, and
+    // usePortfolio.updateLeg's {...leg, ...config} merge keeps the leg's own.
+    const onUpdateLeg = vi.fn();
+    render(
+      <AddHoldingModal
+        isOpen
+        onClose={vi.fn()}
+        onAddLeg={vi.fn()}
+        onUpdateLeg={onUpdateLeg}
+        editLeg={{ type: 'continuous', collection: 'FUT_ES', dataSource: 'v2' }}
+      />,
+    );
+    capturedOnSelect({ type: 'continuous', collection: 'FUT_ES', strategy: 'front_month', adjustment: 'none' });
+    const config = onUpdateLeg.mock.calls[0][0];
+    expect('dataSource' in config).toBe(false);
+  });
+});

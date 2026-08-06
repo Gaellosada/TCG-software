@@ -2,6 +2,8 @@ export { default } from './OptionStreamForm';
 export {
   buildDefaultOptionStream,
   validateOptionStream,
+  deriveCycleOptions,
+  pickDefaultCycle,
   defaultMaturity,
   defaultSelection,
   ALL_OPTION_TYPES,

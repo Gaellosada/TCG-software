@@ -88,6 +88,13 @@ export default function AddHoldingModal({
       // Portfolio continuous legs (LegSpec.rank) support the NTH_NEAREST roll
       // strategy — surface it in the shared picker's strategy select.
       allowNthNearest={true}
+      // Choose the market-data source ONCE, at creation. Defaults to v1; the
+      // user may pick v2 in the picker. instrumentToLegConfig maps the emitted
+      // ``data_source`` onto the leg's ``dataSource``. In EDIT mode the selector
+      // is hidden — the source is immutable, and because the picker then emits
+      // no ``data_source``, updateLeg's merge preserves the leg's existing
+      // source untouched (settings-only edit).
+      showDataSourceSelector={!editMode}
     />
   );
 }

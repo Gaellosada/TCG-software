@@ -22,9 +22,18 @@
  * caller). Shared by the add flow (which then stamps a label + default weight)
  * and the edit flow (which merges these fields into the existing leg).
  */
+// Per-instrument market-data source, translated from the modal's snake_case
+// ``data_source`` onto the leg's camelCase ``dataSource``. Emit-only-when-v2:
+// a v1/absent source adds NO key, so a v1 leg stays byte-identical to before
+// (same idiom as storage.js + the compute builder). Spread onto every leg type.
+function legSourceFields(instrument) {
+  return instrument && instrument.data_source === 'v2' ? { dataSource: 'v2' } : {};
+}
+
 export function instrumentToLegConfig(instrument) {
   if (instrument.type === 'option_stream') {
     return {
+      ...legSourceFields(instrument),
       type: 'option_stream',
       collection: instrument.collection,
       option_type: instrument.option_type,
@@ -59,6 +68,7 @@ export function instrumentToLegConfig(instrument) {
   }
   if (instrument.type === 'continuous') {
     return {
+      ...legSourceFields(instrument),
       type: 'continuous',
       collection: instrument.collection,
       strategy: instrument.strategy,
@@ -75,6 +85,7 @@ export function instrumentToLegConfig(instrument) {
   }
   // spot -> instrument leg: rename instrument_id -> symbol, type spot -> instrument.
   return {
+    ...legSourceFields(instrument),
     type: 'instrument',
     collection: instrument.collection,
     symbol: instrument.instrument_id,

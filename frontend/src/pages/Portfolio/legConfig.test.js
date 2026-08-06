@@ -252,3 +252,40 @@ describe('round-trip identity (a no-op edit must not rewrite the leg config)', (
     expect(roundTripped).toEqual(legConfig);
   });
 });
+
+describe('instrumentToLegConfig — per-instrument data source (emit-only-when-v2)', () => {
+  it('maps data_source:v2 onto the leg dataSource for spot/continuous/option', () => {
+    const spot = instrumentToLegConfig({
+      type: 'spot', collection: 'INDEX', instrument_id: 'SPX', data_source: 'v2',
+    });
+    expect(spot).toEqual({
+      type: 'instrument', collection: 'INDEX', symbol: 'SPX', dataSource: 'v2',
+    });
+
+    const cont = instrumentToLegConfig({
+      type: 'continuous', collection: 'FUT_ES', strategy: 'front_month',
+      adjustment: 'none', cycle: null, rollOffset: 0, data_source: 'v2',
+    });
+    expect(cont.dataSource).toBe('v2');
+
+    const opt = instrumentToLegConfig({
+      type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C',
+      cycle: null, maturity: { kind: 'fixed', date: '2025-06-20' },
+      selection: { kind: 'by_moneyness', target: 1.0 }, stream: 'close',
+      roll_offset: 0, data_source: 'v2',
+    });
+    expect(opt.dataSource).toBe('v2');
+  });
+
+  it('adds NO dataSource key for a v1/absent source (byte-identity)', () => {
+    const v1 = instrumentToLegConfig({
+      type: 'spot', collection: 'INDEX', instrument_id: 'SPX', data_source: 'v1',
+    });
+    expect('dataSource' in v1).toBe(false);
+
+    const absent = instrumentToLegConfig({
+      type: 'spot', collection: 'INDEX', instrument_id: 'SPX',
+    });
+    expect('dataSource' in absent).toBe(false);
+  });
+});

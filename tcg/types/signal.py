@@ -51,6 +51,11 @@ class InstrumentSpot:
     collection: str
     instrument_id: str
     kind: Literal["spot"] = "spot"
+    # Per-instrument warehouse selector carried from the ref: ``"v1"``/``"v2"`` for
+    # an explicit override, ``None`` to inherit the enclosing body's source. The
+    # fetcher resolves ``svc_for(data_source)`` per instrument; the engine never
+    # reads this (it stays source-agnostic — svc is injected per fetch).
+    data_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,8 @@ class InstrumentContinuous:
     # regardless of expiry; default ``front_month`` keeps existing specs valid.
     strategy: Literal["front_month", "end_of_month"] = "front_month"
     kind: Literal["continuous"] = "continuous"
+    # Per-instrument warehouse selector (see :class:`InstrumentSpot`).
+    data_source: str | None = None
 
 
 # Streams readable off a single option contract row.  Mirrors the engine
@@ -169,6 +176,8 @@ class InstrumentOptionStream:
     # analog of the portfolio path's ``LegSpec.delta_hedge``.
     delta_hedge: "DeltaHedgeSpec | None" = None
     kind: Literal["option_stream"] = "option_stream"
+    # Per-instrument warehouse selector (see :class:`InstrumentSpot`).
+    data_source: str | None = None
 
 
 @dataclass(frozen=True)

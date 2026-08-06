@@ -91,8 +91,9 @@ describe('<InstrumentPickerModal> edit mode + readOnly', () => {
     expect(screen.getByTestId('continuous-spec-picker-roll-offset').value).toBe('7');
 
     // Cycle resolves once getAvailableCycles(FUT_ES) loads the option list.
+    // The loader now passes the catalog source ('v1' here — selector not shown).
     await waitFor(() =>
-      expect(getAvailableCycles).toHaveBeenCalledWith('FUT_ES'),
+      expect(getAvailableCycles).toHaveBeenCalledWith('FUT_ES', { source: 'v1' }),
     );
     await waitFor(() =>
       expect(screen.getByTestId('continuous-spec-picker-cycle').value).toBe('H'),

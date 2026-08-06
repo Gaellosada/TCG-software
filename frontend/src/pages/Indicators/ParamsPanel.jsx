@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
 import OptionDateRangeControl from '../../components/OptionDateRangeControl';
+import SourceBadge from '../../components/SourceBadge';
 import { getSeriesSummary } from '../../api/seriesSummary';
 import styles from './ParamsPanel.module.css';
 
@@ -223,7 +224,18 @@ function ParamsPanel({
 
   function handlePickerSelect(instrument) {
     if (pickerLabel) {
-      onSeriesSave(pickerLabel, fromPickerValue(instrument));
+      // Source is chosen ONCE, at add time (the picker's source selector, shown
+      // only for an unpicked slot). When RE-opening a picked slot to change its
+      // settings the selector is hidden and the modal emits no ``data_source``,
+      // so preserve the slot's existing source here — a series source is
+      // immutable; re-pick from the other DB to change it.
+      const prev = (indicator?.seriesMap || {})[pickerLabel];
+      const prevSrc = prev && prev.data_source;
+      const picked = fromPickerValue(instrument);
+      const next = (prevSrc === 'v2' && !(picked && picked.data_source))
+        ? { ...picked, data_source: 'v2' }
+        : picked;
+      onSeriesSave(pickerLabel, next);
     }
     setPickerLabel(null);
   }
@@ -384,6 +396,15 @@ function ParamsPanel({
                       </button>
                     )}
                     {picked && (
+                      // Read-only source badge — the source is fixed when the
+                      // series instrument is first picked. To change it, re-pick
+                      // the instrument from the other DB.
+                      <SourceBadge
+                        source={picked.data_source}
+                        testId={`series-datasource-${label}`}
+                      />
+                    )}
+                    {picked && (
                       <button
                         className={styles.iconBtn}
                         onClick={() => toggleDetails(label, picked)}
@@ -486,6 +507,10 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
         onSelect={handlePickerSelect}
         title="Select Instrument"
         initialConfig={pickerLabel !== null ? (seriesMap[pickerLabel] || null) : null}
+        // Source is chosen ONCE, at add time: the selector shows only while the
+        // slot is still unpicked. Re-opening a picked slot to edit its settings
+        // hides it (source is immutable); handlePickerSelect preserves it.
+        showDataSourceSelector={pickerLabel !== null && !seriesMap[pickerLabel]}
         readOnly={readOnly}
       />
     </div>
