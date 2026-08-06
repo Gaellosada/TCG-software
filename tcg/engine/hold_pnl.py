@@ -227,6 +227,16 @@ class _HoldPnLSpec:
     #   the pre-modularization ``·1`` behaviour).  A near-zero / non-finite entry
     #   books 0 that step (guarded in :func:`delta_hedge_qty`).
     hedge_unit_delta: "npt.NDArray[np.float64] | None" = None
+    # ``rebalance_interval_days`` — re-size the hedge off TODAY's delta only on
+    #   rebalance bars (axis-step index ``s`` with ``s % N == 0``); FREEZE the delta
+    #   sizing between them (delta drift ignored until the next rebalance).  ``N = 1``
+    #   (DEFAULT) rebalances every bar ⇒ EXACTLY the pre-parametrization daily
+    #   behaviour (byte-identical); ``N <= 1`` is treated as ``1``.
+    rebalance_interval_days: int = 1
+    # ``qty_cap_mult`` — the symmetric per-step quantity cap fed to
+    #   :func:`delta_hedge_qty` (``|qty_hedge| ≤ qty_cap_mult·|option_qty|``).  The
+    #   ``10.0`` default never binds for the VX1/future path ⇒ byte-identical.
+    qty_cap_mult: float = 10.0
 
 
 def _compound_with_hold(
@@ -296,6 +306,12 @@ def _compound_with_hold(
     # each roll/open point.  On a gapless segment this equals ``premium[s]`` on every
     # interior step, so the default (continuous-quote) path is byte-identical.
     last_finite: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
+    # Delta-hedge rebalance state: the option delta + hedge-unit delta CAPTURED at
+    # the most recent rebalance bar, reused on frozen (non-rebalance) bars.  NaN
+    # until the first rebalance capture.  At ``rebalance_interval_days == 1`` every
+    # bar recaptures ⇒ these carry no cross-step effect (byte-identical daily path).
+    hedge_frozen_delta: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
+    hedge_frozen_hud: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
 
     # Seed bar-0 sizing: the loop below sizes at bar s+1, so the initial open at
     # bar 0 (a leg latched at bar 0, whose first date is a segment open) must be
@@ -467,18 +483,32 @@ def _compound_with_hold(
                                     / seg_p_h
                                 )
                         if option_qty_cur is not None:
-                            delta_s = float(hd[s])
+                            # Rebalance-freeze: recapture the delta sizing (option
+                            # delta + hedge-unit delta) on a rebalance bar
+                            # (``s % N == 0``), else REUSE the last capture — "re-size
+                            # off today's delta only on rebalance bars".  ``N <= 1``
+                            # recaptures every bar ⇒ byte-identical daily behaviour.
+                            N = spec.rebalance_interval_days
+                            # ``δ_hedge = 1`` for a spot/future (all-ones array or None).
+                            raw_hud = float(hud[s]) if hud is not None else 1.0
+                            if (
+                                N <= 1
+                                or (s % N == 0)
+                                or not np.isfinite(hedge_frozen_delta[rid])
+                            ):
+                                hedge_frozen_delta[rid] = float(hd[s])
+                                hedge_frozen_hud[rid] = raw_hud
+                            delta_s = hedge_frozen_delta[rid]
+                            hud_s = hedge_frozen_hud[rid]
                             d_hedge = float(hp[s + 1]) - float(hp[s])
                             if np.isfinite(delta_s) and np.isfinite(d_hedge):
-                                # ``δ_hedge = 1`` for a spot/future (all-ones array
-                                # or ``None``) — divide is exact ⇒ byte-identical.
-                                hud_s = float(hud[s]) if hud is not None else 1.0
                                 contrib += hedge_step_contrib(
                                     factor=spec.hedge_factor,
                                     option_qty_cur=option_qty_cur,
                                     delta_opt_s=delta_s,
                                     hedge_unit_delta_s=hud_s,
                                     d_hedge_price=d_hedge,
+                                    cap_mult=spec.qty_cap_mult,
                                 )
             hold_contrib[rid][s] = contrib
             net += contrib

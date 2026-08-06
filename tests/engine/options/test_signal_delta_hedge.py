@@ -370,6 +370,47 @@ async def test_signal_hedge_daily_rebalance_tracks_changing_delta() -> None:
     assert not np.allclose(r1.equity_ratio, r2.equity_ratio)
 
 
+# ── P2a: pause_on_roll flag (book 0 on the roll bar vs hedge through it) ──────
+# Two hold segments: open at bar 0 AND a mid-hold roll at bar 3.
+_IS_ROLL_2SEG = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+_ROLL_PREMIUM_2SEG = np.array([_P0, np.nan, np.nan, _P0, np.nan, np.nan])
+
+
+async def test_signal_hedge_pause_on_roll_flag() -> None:
+    """``pause_on_roll`` gates the hedge on the option's roll bars.
+
+    Constant premium ⇒ the leg equity moves ONLY from the hedge.  With a roll at
+    bar 3 and a NON-ZERO ΔVX1 there, hedging THROUGH the roll (``pause_on_roll=
+    False``) books a hedge contrib that the paused (default True) run skips ⇒ the
+    two equities differ; the paused run matches the shipped default byte-for-bit."""
+    gate = np.full(len(_DATES), 200.0)  # gate ON every bar
+    base = dict(
+        premium=_PREMIUM,
+        is_roll=_IS_ROLL_2SEG,
+        roll_premium=_ROLL_PREMIUM_2SEG,
+        delta=_DELTA,
+        vx1=_VX1,  # ΔVX1 at bar 3 = 44 - 41 = 3 ≠ 0
+        gate=gate,
+    )
+    r_paused = await evaluate_signal(
+        _long_call_signal(delta_hedge=DeltaHedgeSpec(pause_on_roll=True)),
+        {},
+        _make_fetcher(**base),
+    )
+    r_through = await evaluate_signal(
+        _long_call_signal(delta_hedge=DeltaHedgeSpec(pause_on_roll=False)),
+        {},
+        _make_fetcher(**base),
+    )
+    r_default = await evaluate_signal(
+        _long_call_signal(delta_hedge=DeltaHedgeSpec()),  # default pause_on_roll=True
+        {},
+        _make_fetcher(**base),
+    )
+    assert not np.allclose(r_paused.equity_ratio, r_through.equity_ratio)
+    np.testing.assert_array_equal(r_paused.equity_ratio, r_default.equity_ratio)
+
+
 async def test_signal_hedge_without_channel_raises_loudly() -> None:
     """A hedged hold option whose fetcher LACKS ``fetch_delta_hedge_series`` must
     fail LOUDLY — the hedge cannot be built without the delta/VX1/gate arrays."""

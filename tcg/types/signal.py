@@ -224,6 +224,21 @@ class DeltaHedgeSpec:
     gate_symbol: str = "IND_VVIX"
     gate_threshold: float = 150.0
     gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
+    # ── P2 parametrization (all defaults are byte-identical to the shipped VX1
+    #    path — daily rebalance, an inert 10× cap, and roll-pause ON) ──────────
+    # ``rebalance_interval_days`` — re-size the hedge quantity off today's delta
+    #   only on rebalance bars (axis-step ``s % N == 0``); freeze the delta sizing
+    #   between them.  ``N = 1`` (default, ``N <= 1`` is treated as 1) rebalances
+    #   every bar ⇒ EXACTLY the shipped daily behaviour.
+    rebalance_interval_days: int = 1
+    # ``qty_cap_mult`` — the symmetric per-step quantity cap
+    #   (``|qty_hedge| ≤ qty_cap_mult·|option_qty|``).  The 10× default never binds
+    #   for the VX1/future regime ⇒ byte-identical.
+    qty_cap_mult: float = 10.0
+    # ``pause_on_roll`` — when True (default) the hedge books 0 on the hedged
+    #   option's roll bar (``hedge_active = gate ∧ ~is_roll`` — the VX1 default);
+    #   False hedges THROUGH the roll (``hedge_active = gate``).
+    pause_on_roll: bool = True
 
 
 @dataclass(frozen=True)
@@ -284,6 +299,9 @@ def delta_hedge_to_hedge_spec(dh: DeltaHedgeSpec) -> HedgeSpec:
             strategy=dh.hedge_roll_strategy,  # type: ignore[arg-type]
         ),
         factor=dh.factor,
+        rebalance_interval_days=dh.rebalance_interval_days,
+        qty_cap_mult=dh.qty_cap_mult,
+        pause_on_roll=dh.pause_on_roll,
         gate_collection=dh.gate_collection,
         gate_symbol=dh.gate_symbol,
         gate_threshold=dh.gate_threshold,

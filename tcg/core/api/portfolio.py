@@ -1423,7 +1423,12 @@ async def _build_delta_hedge_arrays(
         else:  # "le"
             gate_on = gate_level <= thr
     gate_on = gate_on & np.isfinite(gate_level)
-    hedge_active = gate_on & (~is_roll_mask)
+    # ``pause_on_roll`` (default True) ANDs ``~is_roll`` so the hedge books 0 on the
+    # option's roll bar (SPEC §5.5 exit (3), the VX1 default); False hedges through.
+    if hedge.pause_on_roll:
+        hedge_active = gate_on & (~is_roll_mask)
+    else:
+        hedge_active = gate_on
     return hedge_delta, hedge_price, hedge_active.astype(np.bool_)
 
 
@@ -1664,6 +1669,8 @@ async def _evaluate_option_stream_leg(
         _hedge_delta: "npt.NDArray[np.float64] | None" = None
         _hedge_price: "npt.NDArray[np.float64] | None" = None
         _hedge_active: "npt.NDArray[np.bool_] | None" = None
+        _hedge_rebalance_interval_days: int = 1
+        _hedge_qty_cap_mult: float = 10.0
         if leg.delta_hedge is not None and leg.delta_hedge.enabled:
             # GAP B: the hedge sizes off the option leg's OWN quantity in either
             # notional basis (the engine sizes the futures-notional case off
@@ -1671,6 +1678,8 @@ async def _evaluate_option_stream_leg(
             # accepted — no longer rejected here.
             _hspec = leg.delta_hedge.to_spec()
             _hedge_factor = _hspec.factor
+            _hedge_rebalance_interval_days = _hspec.rebalance_interval_days
+            _hedge_qty_cap_mult = _hspec.qty_cap_mult
             _roll_mask_axis = np.asarray(is_roll_f, dtype=np.float64) > 0.5
             _hedge_delta, _hedge_price, _hedge_active = (
                 await _build_delta_hedge_arrays(
@@ -1705,6 +1714,8 @@ async def _evaluate_option_stream_leg(
             hedge_delta=_hedge_delta,
             hedge_price=_hedge_price,
             hedge_active=_hedge_active,
+            rebalance_interval_days=_hedge_rebalance_interval_days,
+            qty_cap_mult=_hedge_qty_cap_mult,
         )
         equity_ratio, _step_scale, _hold_contrib = _compound_with_hold(
             np.zeros(max(T - 1, 0), dtype=np.float64), [spec]

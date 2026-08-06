@@ -204,6 +204,14 @@ class DeltaHedgeConfig(BaseModel):
     gate_symbol: str = "IND_VVIX"
     gate_threshold: float = 150.0
     gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
+    # ── P2 parametrization (byte-identical defaults; absent in old JSONB ⇒ these
+    #    defaults load, so persisted configs are back-compatible) ──────────────
+    # Re-size the hedge only every N bars (freeze qty between); N=1 = shipped daily.
+    rebalance_interval_days: int = 1
+    # Symmetric per-step quantity cap |qty_hedge| ≤ qty_cap_mult·|option_qty|.
+    qty_cap_mult: float = 10.0
+    # Book 0 hedge on the option's roll bar (default) vs hedge through the roll.
+    pause_on_roll: bool = True
 
     @field_validator("factor")
     @classmethod
@@ -211,6 +219,19 @@ class DeltaHedgeConfig(BaseModel):
         if not math.isfinite(v) or v <= 0.0:
             raise ValueError("delta_hedge factor must be a finite positive number")
         return v
+
+    @field_validator("rebalance_interval_days")
+    @classmethod
+    def _interval_at_least_one(cls, v: int) -> int:
+        # A finite int ≥ 1; any value ≤ 1 is treated as 1 (rebalance every bar).
+        return max(1, int(v))
+
+    @field_validator("qty_cap_mult")
+    @classmethod
+    def _finite_positive_cap(cls, v: float) -> float:
+        if not math.isfinite(v) or v <= 0.0:
+            raise ValueError("delta_hedge qty_cap_mult must be a finite positive number")
+        return float(v)
 
     def to_spec(self) -> DeltaHedgeSpec:
         return DeltaHedgeSpec(
@@ -220,6 +241,9 @@ class DeltaHedgeConfig(BaseModel):
             gate_symbol=self.gate_symbol,
             gate_threshold=float(self.gate_threshold),
             gate_op=self.gate_op,
+            rebalance_interval_days=int(self.rebalance_interval_days),
+            qty_cap_mult=float(self.qty_cap_mult),
+            pause_on_roll=bool(self.pause_on_roll),
         )
 
 

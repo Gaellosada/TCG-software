@@ -1723,9 +1723,13 @@ async def evaluate_signal(
                 gate_on = _COMPARE_OPS[gate_op](gate_level, float(gate_threshold))
             gate_on = gate_on & np.isfinite(gate_level)
             # ``hold_roll_info[ref_id][0]`` is ``is_roll_aligned`` (float 0/1 on the
-            # union axis); the hedge is OFF on a roll bar (SPEC §5.5 exit (3)).
+            # union axis).  ``pause_on_roll`` (default True) turns the hedge OFF on a
+            # roll bar (SPEC §5.5 exit (3)); False hedges THROUGH the roll.
             is_roll_aligned = hold_roll_info[ref_id][0]
-            hedge_active = gate_on & (is_roll_aligned <= 0.5)
+            if inp.instrument.delta_hedge.pause_on_roll:
+                hedge_active = gate_on & (is_roll_aligned <= 0.5)
+            else:
+                hedge_active = gate_on
             hold_hedge_info[ref_id] = (
                 float(hedge_factor),
                 hedge_delta,
@@ -2274,6 +2278,18 @@ async def evaluate_signal(
                 hedge_delta=(_hedge[1] if _hedge is not None else None),
                 hedge_price=(_hedge[2] if _hedge is not None else None),
                 hedge_active=(_hedge[3] if _hedge is not None else None),
+                # rebalance/cap are read off the (non-None-when-hedged) config spec;
+                # the byte-identical defaults apply on the unhedged path.
+                rebalance_interval_days=(
+                    inp.instrument.delta_hedge.rebalance_interval_days
+                    if _hedge is not None
+                    else 1
+                ),
+                qty_cap_mult=(
+                    inp.instrument.delta_hedge.qty_cap_mult
+                    if _hedge is not None
+                    else 10.0
+                ),
             )
         elif price_values is not None and T >= 2:
             prev_price = price_values[:-1]

@@ -59,6 +59,55 @@ def test_delta_hedge_maps_into_instrument() -> None:
     assert inst.delta_hedge.gate_op == "gt"
 
 
+# ── P2a: rebalance / qty-cap / pause-on-roll config → spec threading ─────────
+def test_hedge_p2a_defaults_byte_identical() -> None:
+    # Absent P2a keys (old JSONB) load with the byte-identical shipped defaults.
+    spec = DeltaHedgeConfig().to_spec()
+    assert spec.rebalance_interval_days == 1
+    assert spec.qty_cap_mult == pytest.approx(10.0)
+    assert spec.pause_on_roll is True
+
+
+def test_hedge_p2a_fields_thread_to_spec() -> None:
+    spec = DeltaHedgeConfig(
+        rebalance_interval_days=5, qty_cap_mult=3.5, pause_on_roll=False
+    ).to_spec()
+    assert spec.rebalance_interval_days == 5
+    assert spec.qty_cap_mult == pytest.approx(3.5)
+    assert spec.pause_on_roll is False
+
+
+def test_hedge_p2a_reaches_instrument() -> None:
+    inst = option_stream_ref_to_instrument(
+        _ref(delta_hedge=DeltaHedgeConfig(rebalance_interval_days=3, pause_on_roll=False))
+    )
+    assert inst.delta_hedge is not None
+    assert inst.delta_hedge.rebalance_interval_days == 3
+    assert inst.delta_hedge.pause_on_roll is False
+
+
+def test_hedge_p2a_back_compat_old_jsonb_loads() -> None:
+    # A persisted payload WITHOUT the P2a keys still validates → shipped defaults.
+    cfg = DeltaHedgeConfig.model_validate(
+        {"factor": 1.0 / 3.0, "hedge_collection": "FUT_VIX", "gate_threshold": 150.0}
+    )
+    assert cfg.rebalance_interval_days == 1
+    assert cfg.qty_cap_mult == pytest.approx(10.0)
+    assert cfg.pause_on_roll is True
+
+
+@pytest.mark.parametrize("bad,expect", [(0, 1), (-4, 1), (1, 1), (7, 7)])
+def test_hedge_rebalance_interval_clamped_to_one(bad, expect) -> None:
+    # rebalance_interval_days ≤ 1 is treated as 1 (never rejected).
+    assert DeltaHedgeConfig(rebalance_interval_days=bad).rebalance_interval_days == expect
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+def test_hedge_qty_cap_mult_rejects_nonpositive_or_nonfinite(bad) -> None:
+    with pytest.raises(Exception):  # pydantic ValidationError wraps the ValueError
+        DeltaHedgeConfig(qty_cap_mult=bad)
+
+
 def test_delta_hedge_disabled_maps_to_none() -> None:
     ref = _ref(delta_hedge=DeltaHedgeConfig(enabled=False))
     inst = option_stream_ref_to_instrument(ref)

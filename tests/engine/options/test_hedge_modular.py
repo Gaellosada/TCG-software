@@ -165,3 +165,104 @@ def test_prop_all_ones_equals_none(delta, vx_step) -> None:
     r1, s1, c1 = _compound_with_hold(np.zeros(max(T - 1, 0)), [mk(np.ones(T))])
     np.testing.assert_array_equal(r0, r1)
     np.testing.assert_array_equal(c0["_leg"], c1["_leg"])
+
+
+# ── P2a: rebalance_interval_days (freeze qty between rebalance bars) ──────────
+def _rebalance_spec(*, interval, delta, T=6, cap=10.0):
+    P0 = 10.0
+    premium = np.full(T, P0, dtype=np.float64)  # constant ⇒ option contrib 0
+    is_roll = np.zeros(T, dtype=np.bool_)
+    is_roll[0] = True
+    roll_premium = np.full(T, np.nan, dtype=np.float64)
+    roll_premium[0] = P0
+    return _HoldPnLSpec(
+        ref_id="_leg",
+        sign=1.0,
+        nav_times=1.0,
+        premium=premium,
+        is_roll=is_roll,
+        roll_premium=roll_premium,
+        pos_active=np.ones(T, dtype=np.bool_),
+        hedge_factor=1.0 / 3.0,
+        hedge_delta=np.asarray(delta, dtype=np.float64),
+        hedge_price=np.array([20.0, 21.0, 22.0, 23.0, 24.0, 25.0][:T]),
+        hedge_active=np.ones(T, dtype=np.bool_),
+        rebalance_interval_days=interval,
+        qty_cap_mult=cap,
+    )
+
+
+# A DRIFTING delta so freezing between rebalances changes the sizing.
+_DRIFT_DELTA = [0.2, 0.9, 0.9, 0.9, 0.3, 0.3]
+
+
+def test_rebalance_n1_byte_identical_to_default() -> None:
+    # N=1 (explicit) reproduces the default (no rebalance param) bit-for-bit.
+    default = _rebalance_spec(interval=1, delta=_DRIFT_DELTA)
+    # Same spec but constructed WITHOUT touching the param (defaults to 1).
+    T = 6
+    base = _HoldPnLSpec(
+        ref_id="_leg",
+        sign=1.0,
+        nav_times=1.0,
+        premium=np.full(T, 10.0),
+        is_roll=np.array([True, False, False, False, False, False]),
+        roll_premium=np.array([10.0, np.nan, np.nan, np.nan, np.nan, np.nan]),
+        pos_active=np.ones(T, dtype=np.bool_),
+        hedge_factor=1.0 / 3.0,
+        hedge_delta=np.asarray(_DRIFT_DELTA, dtype=np.float64),
+        hedge_price=np.array([20.0, 21.0, 22.0, 23.0, 24.0, 25.0]),
+        hedge_active=np.ones(T, dtype=np.bool_),
+    )
+    r_def, _, c_def = _compound_with_hold(np.zeros(T - 1), [default])
+    r_base, _, c_base = _compound_with_hold(np.zeros(T - 1), [base])
+    np.testing.assert_array_equal(r_def, r_base)
+    np.testing.assert_array_equal(c_def["_leg"], c_base["_leg"])
+
+
+def test_rebalance_n3_freezes_and_differs_from_daily() -> None:
+    T = 6
+    daily = _rebalance_spec(interval=1, delta=_DRIFT_DELTA)
+    frozen = _rebalance_spec(interval=3, delta=_DRIFT_DELTA)
+    r_daily, _, _ = _compound_with_hold(np.zeros(T - 1), [daily])
+    r_frozen, _, _ = _compound_with_hold(np.zeros(T - 1), [frozen])
+    # With a DRIFTING delta the N=3 freeze must move the equity away from daily.
+    assert not np.allclose(r_daily, r_frozen)
+
+
+def test_rebalance_no_effect_when_delta_constant() -> None:
+    # Freezing a CONSTANT delta changes nothing ⇒ N=3 == N=1 byte-identical.
+    T = 6
+    const = [0.5] * T
+    r1, _, _ = _compound_with_hold(np.zeros(T - 1), [_rebalance_spec(interval=1, delta=const)])
+    r3, _, _ = _compound_with_hold(np.zeros(T - 1), [_rebalance_spec(interval=3, delta=const)])
+    np.testing.assert_array_equal(r1, r3)
+
+
+# ── P2a: qty_cap_mult through the engine spec ────────────────────────────────
+def test_qty_cap_binds_through_engine_spec() -> None:
+    # A LARGE delta drives |qty| far past a tight cap ⇒ a tight cap clips and the
+    # equity diverges from an effectively-uncapped run.
+    T = 6
+    big = [60.0] * T
+    r_capped, _, _ = _compound_with_hold(
+        np.zeros(T - 1), [_rebalance_spec(interval=1, delta=big, cap=0.5)]
+    )
+    r_uncapped, _, _ = _compound_with_hold(
+        np.zeros(T - 1), [_rebalance_spec(interval=1, delta=big, cap=1e9)]
+    )
+    assert not np.allclose(r_capped, r_uncapped)
+
+
+def test_qty_cap_default_inert_for_vx1_regime() -> None:
+    # |δ|≤1, factor=1/3, δ_hedge=1 ⇒ |qty|≤0.33·|option_qty| ⇒ the 10× cap never
+    # binds ⇒ cap=10 (default) is byte-identical to an astronomically large cap.
+    T = 6
+    r10, _, c10 = _compound_with_hold(
+        np.zeros(T - 1), [_rebalance_spec(interval=1, delta=_DRIFT_DELTA, cap=10.0)]
+    )
+    rbig, _, cbig = _compound_with_hold(
+        np.zeros(T - 1), [_rebalance_spec(interval=1, delta=_DRIFT_DELTA, cap=1e12)]
+    )
+    np.testing.assert_array_equal(r10, rbig)
+    np.testing.assert_array_equal(c10["_leg"], cbig["_leg"])
