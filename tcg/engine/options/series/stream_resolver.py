@@ -997,6 +997,14 @@ async def _resolve_hold(
     # roll (NaN off-roll / when unresolvable → engine tail carry-forward).  Only
     # populated when a ``futures_reference_resolver`` is injected (futures mode).
     roll_future_ref: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
+    # P-OFFROLL-SIZING side-channel: the SAME reference future's close on EVERY
+    # trade date (not only at rolls).  A signal leg that latches OFF a roll bar has
+    # no ``roll_future_ref`` there and — before any roll-while-held — no carried
+    # ``seg_fref`` either, so the engine could not size it and booked ZERO.  This
+    # per-date price lets the engine size an off-roll open; it is a pure ADD (the
+    # engine consults it only in that previously-NaN case, so roll-aligned legs are
+    # byte-identical).  NaN where the reference future does not quote / futures mode off.
+    daily_future_ref: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
     # Live multiplier hints, surfaced so the core layer can prefer them over the
     # signed-off config: the first held OPTION contract's contract_size, and the
     # first reference FUTURE's contract_size (from the futures_reference_resolver).
@@ -1182,6 +1190,24 @@ async def _resolve_hold(
                     except (TypeError, ValueError):
                         pass
 
+            # P-OFFROLL-SIZING: resolve the SAME reference future's close on EVERY
+            # date of this segment (not only the roll day) so an off-roll signal
+            # entry can be sized.  The reference contract depends only on the
+            # segment's option expiry (``seg_exp``), so every date shares one
+            # window-memoized future series — these are in-memory lookups after the
+            # first ranged fetch, not per-date round-trips.  Runs even when the
+            # roll-day reference (``_ref``) is missing: other dates may still quote.
+            for _idx, _d in seg:
+                _dref = await futures_reference_resolver(_d, seg_exp)
+                if _dref is not None:
+                    _dprice, _ = _dref
+                    if (
+                        _dprice is not None
+                        and np.isfinite(_dprice)
+                        and _dprice > 0.0
+                    ):
+                        daily_future_ref[_idx] = float(_dprice)
+
             # SC3 diagnostic half: in futures-notional mode a roll whose covering
             # future is MISSING (no reference price) is sized off the CARRIED-FORWARD
             # quantity (stale) — surface it on EVERY such roll (incl. verified roots
@@ -1340,6 +1366,8 @@ async def _resolve_hold(
         # a scalar carried as a length-1 array so the out-dict stays a uniform
         # ``dict[str, NDArray]``; NaN when no live contract_size was found.
         roll_info_out["roll_future_ref"] = roll_future_ref
+        # P-OFFROLL-SIZING side-channel (per-date reference future for off-roll opens).
+        roll_info_out["daily_future_ref"] = daily_future_ref
         roll_info_out["mult_opt_live"] = np.array([mult_opt_live], dtype=np.float64)
         roll_info_out["mult_fut_live"] = np.array([mult_fut_live], dtype=np.float64)
         # close→mid fallback markers (0.0/1.0, same axis as ``is_roll``): where the

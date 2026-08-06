@@ -1538,8 +1538,10 @@ async def evaluate_signal(
     # lacks the capability is a wiring error (loud, not silent — the $-P&L path
     # cannot be run without the roll structure).
     # Each entry: (is_roll_aligned, roll_premium_aligned, roll_future_ref_aligned,
-    # mult_fut, mult_opt).  ``roll_future_ref_aligned`` is None + the multipliers are
-    # NaN for a premium_notional leg (they are read only in futures_notional mode).
+    # mult_fut, mult_opt, daily_future_ref_aligned).  ``roll_future_ref_aligned`` /
+    # ``daily_future_ref_aligned`` are None + the multipliers are NaN for a
+    # premium_notional leg (read only in futures_notional mode).  The last entry
+    # (P-OFFROLL-SIZING) is the per-date front-future reference for off-roll opens.
     hold_roll_info: dict[
         str,
         tuple[
@@ -1548,6 +1550,7 @@ async def evaluate_signal(
             "npt.NDArray[np.float64] | None",
             float,
             float,
+            "npt.NDArray[np.float64] | None",
         ],
     ] = {}
     if T > 0:
@@ -1566,11 +1569,15 @@ async def evaluate_signal(
                     f"fetcher to provide 'fetch_hold_roll_info' (fixed-contract "
                     f"dollar-P&L roll structure); none available"
                 )
-            # 3→4-tuple ripple (Guardrail Sign 4): the production fetcher returns
-            # ``(dates, is_roll, roll_premium, roll_future_ref)``; a legacy 3-tuple
-            # double (premium_notional only) still works — roll_future_ref → None.
+            # Tuple-arity ripple (Guardrail Sign 4): the production fetcher returns
+            # ``(dates, is_roll, roll_premium, roll_future_ref, daily_future_ref)``
+            # (P-OFFROLL-SIZING added the 5th).  Legacy 4-tuple (no daily) and 3-tuple
+            # (premium_notional only) still work — the missing arrays → None.
             _rres = await _roll_fetch(inp.instrument)
-            if len(_rres) == 4:
+            r_daily_fref: "npt.NDArray[np.float64] | None" = None
+            if len(_rres) == 5:
+                r_dates, r_is_roll, r_roll_premium, r_roll_fref, r_daily_fref = _rres
+            elif len(_rres) == 4:
                 r_dates, r_is_roll, r_roll_premium, r_roll_fref = _rres
             else:
                 r_dates, r_is_roll, r_roll_premium = _rres
@@ -1583,6 +1590,7 @@ async def evaluate_signal(
             )
             fut_mode = inp.instrument.sizing_mode == "futures_notional"
             roll_fref_aligned: "npt.NDArray[np.float64] | None" = None
+            daily_fref_aligned: "npt.NDArray[np.float64] | None" = None
             mult_fut = float("nan")
             mult_opt = float("nan")
             if fut_mode:
@@ -1590,6 +1598,16 @@ async def evaluate_signal(
                     roll_fref_aligned = _align_series_to_index(
                         r_dates,
                         np.asarray(r_roll_fref, dtype=np.float64),
+                        index,
+                        fill=np.nan,
+                    )
+                # P-OFFROLL-SIZING: align the per-date front-future reference the same
+                # way; the engine uses it ONLY to size an off-roll open whose roll /
+                # segment reference is NaN (roll-aligned legs never read it).
+                if r_daily_fref is not None:
+                    daily_fref_aligned = _align_series_to_index(
+                        r_dates,
+                        np.asarray(r_daily_fref, dtype=np.float64),
                         index,
                         fill=np.nan,
                     )
@@ -1611,6 +1629,7 @@ async def evaluate_signal(
                 roll_fref_aligned,
                 float(mult_fut),
                 float(mult_opt),
+                daily_fref_aligned,
             )
 
     # ── 3c. Delta-hedge overlay side-channel (F2, SPEC §5.5/§5.6) ──
@@ -2218,6 +2237,7 @@ async def evaluate_signal(
                 roll_fref_arr,
                 mult_fut,
                 mult_opt,
+                daily_fref_arr,
             ) = hold_roll_info[ref_id]
             # Direction is the SIGN of the net latched position; ``nav_times`` is
             # the SIZE (a separate field, may exceed the |weight| the sign carries).
@@ -2247,6 +2267,7 @@ async def evaluate_signal(
                 pos_active=pos != 0.0,
                 sizing_mode=inp.instrument.sizing_mode,
                 roll_future_ref=roll_fref_arr,
+                daily_future_ref=daily_fref_arr,
                 mult_fut=mult_fut,
                 mult_opt=mult_opt,
                 hedge_factor=(_hedge[0] if _hedge is not None else None),

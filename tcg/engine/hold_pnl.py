@@ -26,6 +26,20 @@ def _fref_at(spec: "_HoldPnLSpec", idx: int) -> float:
     return float(arr[idx])
 
 
+def _daily_fref_at(spec: "_HoldPnLSpec", idx: int) -> float:
+    """The per-date reference-future price at output index ``idx`` (NaN if absent).
+
+    P-OFFROLL-SIZING rescue source: unlike :func:`_fref_at` (finite only at roll /
+    segment-open bars) this is the SAME reference future's close on EVERY trade
+    date, used ONLY to size an off-roll open whose roll/segment reference and
+    carried ``seg_fref`` are both NaN.  ``None`` (the default) returns NaN so the
+    rescue never fires and the shipped path stays byte-identical."""
+    arr = spec.daily_future_ref
+    if arr is None or idx < 0 or idx >= arr.size:
+        return np.nan
+    return float(arr[idx])
+
+
 def delta_hedge_qty(factor: float, option_qty: float, option_delta: float) -> float:
     """Delta-hedge futures quantity for a single option position (F2 core mechanic).
 
@@ -111,6 +125,18 @@ class _HoldPnLSpec:
     # values (or NaN → tail carry-forward) — NEVER a silent 1.0 (Guardrail Sign 2).
     mult_fut: float = 1.0
     mult_opt: float = 1.0
+    # ── Off-roll open sizing (P-OFFROLL-SIZING; None = byte-identical) ──────────
+    # ``roll_future_ref`` is finite ONLY at the option's roll / segment-open bars.
+    # A SIGNAL leg whose entry latches on an arbitrary INTERIOR (off-roll) bar —
+    # before any roll-while-held has frozen ``seg_fref`` — therefore read NaN, could
+    # not be sized, and silently booked ZERO across the whole hold (this dropped the
+    # §5.5 Aug-2024 spike gain).  ``daily_future_ref`` (length ``T``) carries the
+    # SAME reference future's price on EVERY trade date, so an off-roll open can be
+    # sized off the current front-future price.  RESCUE ONLY: it is consulted
+    # exclusively when the roll/segment reference AND the carried ``seg_fref`` are
+    # both NaN on an OFF-ROLL bar — a roll-aligned leg never touches it, so the
+    # shipped (roll-held) path is byte-identical.  ``None`` disables it entirely.
+    daily_future_ref: "npt.NDArray[np.float64] | None" = None
     # ── Delta-hedge overlay (F2; None = NO hedge → byte-identical, the new path is
     #    fully guarded).  Models a futures HEDGE sized off THIS option's net delta
     #    and accrued into the SAME leg equity (faithful to SPEC §5.5/§5.6:
@@ -222,6 +248,13 @@ def _compound_with_hold(
                     # first roll that HAS a covering future (nothing to carry from at
                     # bar 0).
                     fref0 = _fref_at(spec, 0)
+                    # P-OFFROLL-SIZING: a bar-0 OFF-ROLL open (no roll reference)
+                    # is sized off the per-date front-future price so it is not left
+                    # unsized until the first roll.  Guarded on ``not is_roll[0]`` so
+                    # a roll-with-missing-future bar-0 keeps its tail/flat behaviour
+                    # (byte-identical).
+                    if not np.isfinite(fref0) and not bool(spec.is_roll[0]):
+                        fref0 = _daily_fref_at(spec, 0)
                     if _futures_denom_ok(spec, fref0):
                         seg_premium[rid] = float(open_prem)
                         seg_fref[rid] = float(fref0)
@@ -433,14 +466,18 @@ def _compound_with_hold(
                     # same roll period, so the segment's frozen reference (captured
                     # at its roll) is the correct anchor: carry it forward to size
                     # the re-entry.  A genuine roll bar keeps its own fref_here.
-                    # KNOWN LIMITATION: if the leg is flat ACROSS a roll (the roll's
-                    # resize was skipped while flat) and then re-enters off-roll,
-                    # ``seg_fref`` is stale by one+ roll period, so the re-entry is
-                    # approximately (not exactly) sized until the next roll re-anchors
-                    # it.  Same-roll-period re-entry is exact; and this is strictly
-                    # better than the prior behaviour (ZERO P&L for the whole window).
+                    # P-OFFROLL-SIZING: when the carried ``seg_fref`` is ALSO NaN
+                    # (the leg was never held at a roll — e.g. a signal entry that
+                    # FIRST latches off-roll), fall back to the per-date front-future
+                    # price so the open is sized instead of booking ZERO for the whole
+                    # hold.  RESCUE ONLY — reached exclusively on an off-roll bar where
+                    # both references are NaN, so a roll-aligned leg (finite
+                    # roll_future_ref) and a same-roll-period re-entry (finite
+                    # seg_fref) are byte-identical.
                     if not bool(spec.is_roll[s + 1]) and not np.isfinite(fref_here):
                         fref_here = seg_fref[rid]
+                        if not np.isfinite(fref_here):
+                            fref_here = _daily_fref_at(spec, s + 1)
                     if (
                         np.isfinite(open_prem)
                         and open_prem > 0.0
@@ -552,6 +589,11 @@ def hold_leg_notional_fractions(spec: _HoldPnLSpec) -> npt.NDArray[np.float64]:
         open_prem = roll_premium[0] if bool(is_roll[0]) else premium[0]
         if np.isfinite(open_prem) and open_prem > 0.0:
             fref0 = _fref_at(spec, 0)
+            # P-OFFROLL-SIZING (mirror the P&L seed): rescue a bar-0 OFF-ROLL open
+            # with the per-date front-future price so cost turnover matches the
+            # sizing path.  Guarded on ``not is_roll[0]`` → byte-identical otherwise.
+            if not np.isfinite(fref0) and not bool(is_roll[0]):
+                fref0 = _daily_fref_at(spec, 0)
             if _futures_denom_ok(spec, fref0):
                 seg_premium = float(open_prem)
                 seg_fref = float(fref0)
@@ -572,9 +614,14 @@ def hold_leg_notional_fractions(spec: _HoldPnLSpec) -> npt.NDArray[np.float64]:
             fref_here = _fref_at(spec, b)
             # Off-roll re-open reads NaN (roll_future_ref is finite only at rolls)
             # -> carry the segment's frozen reference forward (same-roll-period
-            # re-entry), matching the P&L path.
+            # re-entry), matching the P&L path.  P-OFFROLL-SIZING: when seg_fref is
+            # ALSO NaN (never held at a roll) fall back to the per-date front-future
+            # price so cost turnover matches the sizing rescue (byte-identical
+            # otherwise — reached only when both references are NaN off-roll).
             if not bool(is_roll[b]) and not np.isfinite(fref_here):
                 fref_here = seg_fref
+                if not np.isfinite(fref_here):
+                    fref_here = _daily_fref_at(spec, b)
             if np.isfinite(open_prem) and open_prem > 0.0:
                 seg_premium = float(open_prem)
                 if _futures_denom_ok(spec, fref_here):

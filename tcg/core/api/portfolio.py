@@ -1543,8 +1543,15 @@ async def _evaluate_option_stream_leg(
             # roll_future_ref for futures-notional sizing; a legacy 3-tuple double
             # (premium_notional only) still works.
             _rres = await fetcher.fetch_hold_roll_info(instrument)
-            if len(_rres) == 4:
-                _d, is_roll_f, roll_premium, roll_fref = _rres
+            # Tuple-arity ripple: the production fetcher now returns a 5-tuple
+            # ``(dates, is_roll, roll_premium, roll_future_ref, daily_future_ref)``
+            # (P-OFFROLL-SIZING added the trailing per-date reference).  A portfolio
+            # option leg is ALWAYS-ON — held continuously and sized at its first
+            # roll-while-held — so it never hits the off-roll-first-open case and does
+            # not consume ``daily_future_ref``; take the first four (or three) and
+            # ignore any trailing element.  Legacy 4- and 3-tuples still work.
+            if len(_rres) >= 4:
+                _d, is_roll_f, roll_premium, roll_fref = _rres[:4]
             else:
                 _d, is_roll_f, roll_premium = _rres
                 roll_fref = None

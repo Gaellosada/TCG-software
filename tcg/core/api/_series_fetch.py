@@ -564,7 +564,7 @@ def make_signal_fetcher(
     # input (which runs FIRST, via operand resolution) and read by
     # ``fetch_hold_roll_info`` (which ``signal_exec`` calls afterwards for the
     # fixed-contract dollar-P&L path) — so the resolver runs ONCE per hold input.
-    _hold_roll_info_cache: dict[Any, tuple[Any, Any, Any, Any]] = {}
+    _hold_roll_info_cache: dict[Any, tuple[Any, Any, Any, Any, Any]] = {}
     # Companion: the resolved (m_fut, m_opt) multipliers for a futures-notional
     # hold input, keyed the same way, populated during the same ``fetch``.  Read by
     # ``fetch_hold_multipliers`` (signal_exec / portfolio) — the engine never reads
@@ -782,12 +782,17 @@ def make_signal_fetcher(
                 key = _hold_key(instrument)
                 # 3→4-tuple ripple (Guardrail Sign 4): carry roll_future_ref (NaN
                 # array in premium mode where the resolver populated nothing).
+                # 4→5-tuple ripple (P-OFFROLL-SIZING): also carry daily_future_ref
+                # (the per-date front-future price for off-roll opens; None/NaN when
+                # premium mode or the resolver omitted it → engine rescue never fires).
                 _roll_fref = roll_info_out.get("roll_future_ref")
+                _daily_fref = roll_info_out.get("daily_future_ref")
                 _hold_roll_info_cache[key] = (
                     dates_arr,
                     roll_info_out["is_roll"],
                     roll_info_out["roll_premium"],
                     _roll_fref,
+                    _daily_fref,
                 )
                 # Companion: stash the per-date diagnostics so the portfolio hold
                 # path can name the dominant cause on an all-NaN resolve.
@@ -942,14 +947,17 @@ def make_signal_fetcher(
         npt.NDArray[np.float64],
         npt.NDArray[np.float64],
         "npt.NDArray[np.float64] | None",
+        "npt.NDArray[np.float64] | None",
     ]:
         """Return the hold-mode roll structure for ``signal_exec``'s dollar-P&L path.
 
-        ``(dates, is_roll, roll_premium, roll_future_ref)`` — populated during the
-        normal ``fetch`` of this hold-mode option input (which runs first, so the
-        cache is warm).  ``roll_future_ref`` is a NaN array in premium_notional mode
-        (the resolver populates it only in futures_notional mode).  Falls back to a
-        fresh resolve if, defensively, the cache is cold.
+        ``(dates, is_roll, roll_premium, roll_future_ref, daily_future_ref)`` —
+        populated during the normal ``fetch`` of this hold-mode option input (which
+        runs first, so the cache is warm).  ``roll_future_ref`` is a NaN array in
+        premium_notional mode (the resolver populates it only in futures_notional
+        mode); ``daily_future_ref`` (P-OFFROLL-SIZING) is the per-date front-future
+        price used to size an off-roll open, ``None``/NaN when premium mode or the
+        resolver omitted it.  Falls back to a fresh resolve if the cache is cold.
         """
         key = _hold_key(instrument)
         cached = _hold_roll_info_cache.get(key)
