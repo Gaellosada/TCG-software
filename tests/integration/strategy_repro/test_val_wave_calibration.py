@@ -66,6 +66,11 @@ def _finite(seq) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 # USD_1M_rate(P) — §5.7 F4 cash leg (REAL US 1M CMT rate series, CASH-ONLY)
 # --------------------------------------------------------------------------- #
+# Legacy-reported headline ann_ret for the §5.7 cash leg (target section header
+# "cash leg; ann_ret ~1.8%, ~0 vol").  Only feeds the ann_ret |Δ| band gate.
+_USD_RATE_GIVEN_ANN = 1.8
+
+
 def _seg_avg_daily_factor(dates, equity, lo_iso: str, hi_iso: str) -> float:
     """Mean per-bar growth factor of ``equity`` over the [lo, hi) date window.
 
@@ -114,6 +119,21 @@ async def test_usd_1m_rate_persisted_entity(client):
         start="2006-01-03", end="2026-06-11",
     )
     assert doc["category"] == REPRO_VISIBLE_CATEGORY and doc["category"] != "DELETED"
+    # ---- REPOINT CONFIRMATION (read-back the STORED entity) ---------------- #
+    # The durable entity must now be a SINGLE real-rate cash leg with NO FUT_VIX
+    # calendar companion.  Assert the stored doc's legs directly (this is the
+    # tcg_app_data round-trip, not the in-memory saved_legs).
+    stored = doc["legs"]
+    assert len(stored) == 1, f"expected a single leg, got {stored}"
+    only = stored[0]
+    assert only["type"] == "cash_rate", only
+    assert not any(
+        (leg.get("type") == "continuous") or (leg.get("collection") == "FUT_VIX")
+        for leg in stored
+    ), f"a FUT_VIX companion still remains: {stored}"
+    assert only["data_source"] == "v2", only
+    assert only["cash_rate"]["collection"] == "RATE", only
+    assert only["cash_rate"]["symbol"] == "RATE_US_CMT_1M", only
     # Cash-only accepted: the single leg's own base-100 accrual curve.
     dates = result["dates"]
     cash_eq = _finite(result["leg_equities"]["cash"])
@@ -124,15 +144,25 @@ async def test_usd_1m_rate_persisted_entity(client):
     cmp = compare(
         dates, cash_eq, target,
         section="USD_1M_rate(P) series [persisted]",
-        given_ann_ret_pct=None, given_maxdd_pct=None,
+        # Legacy-reported headline for the §5.7 cash leg (target section header:
+        # "ann_ret ~1.8%").  Used only for the ann_ret |Δ| band gate (2.0pp).
+        given_ann_ret_pct=_USD_RATE_GIVEN_ANN, given_maxdd_pct=None,
         checksums=checks, ruin_floor=99.0,
     )
+    # Cash leg: target is a monotone-up monthly grid, so gate the drawdown on the
+    # MONTHLY-vs-MONTHLY basis (daily-vs-monthly is apples-to-oranges here).
+    verdict = check_band(cmp, DEFAULT_BAND, maxdd_basis="monthly")
     print("\n" + format_side_by_side(cmp.repro_grid, target,
                                      title="USD_1M_rate(P) persisted: real series vs target"))
     print(f"\n[USD persisted] bars={cash_eq.shape[0]} overlap_months={cmp.n_overlap_months} "
           f"monthly_corr={cmp.monthly_corr:.4f} equity_log_corr={cmp.equity_log_corr:.4f}")
     print(f"[USD persisted] repro ann_ret={cmp.repro_ann_ret_pct:.3f}% "
+          f"(given {_USD_RATE_GIVEN_ANN}%, |Δ|={cmp.ann_ret_abs_diff_pp:.2f}pp) "
           f"min_equity={cmp.repro_min_equity:.4f} ruin_ok={cmp.ruin_ok}")
+    print(f"[USD persisted] maxDD_ratio_monthly={cmp.maxdd_ratio_monthly} "
+          f"(repro_m={cmp.repro_maxdd_monthly_pct:.3f}% target_m={cmp.target_maxdd_monthly_pct:.3f}%)")
+    for line in verdict.reasons:
+        print(f"  band: {line}")
 
     # Shape: monotone-up (rate >= 0 over the window), never below funding.
     assert np.all(np.diff(cash_eq) >= -1e-9), "cash equity went down"
@@ -146,9 +176,14 @@ async def test_usd_1m_rate_persisted_entity(client):
     assert f_pre08 > f_zirp, "pre-2008 (~5%) did not out-accrue ZIRP"
     assert f_2324 > f_zirp, "2023-24 (~5%) did not out-accrue ZIRP"
     assert f_zirp == pytest.approx(1.0, abs=5e-6), "ZIRP window should be ~flat"
-    # Tracks the real rate-path SHAPE — materially better than the old flat leg
-    # (whose monthly_corr was < 0.30 by construction).
-    assert cmp.monthly_corr > 0.30
+    # The repointed real-rate series TRACKS the §5.7 golden and PASSES the Wave-0
+    # band (monthly_corr>=0.80, equity_corr>=0.90, ann_ret|Δ|<=2pp, min>50) —
+    # MATERIALLY better than the removed flat-1% leg (whose monthly_corr was 0.07).
+    assert cmp.checksum_failures == [], cmp.checksum_failures
+    assert verdict.passed, verdict.reasons
+    # Tight regression floors just below the observed real-dwh values (0.90/0.99).
+    assert cmp.monthly_corr >= 0.85, cmp.monthly_corr
+    assert cmp.equity_log_corr >= 0.98, cmp.equity_log_corr
 
 
 # --------------------------------------------------------------------------- #
