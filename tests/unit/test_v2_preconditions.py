@@ -202,3 +202,75 @@ def test_composed_child_body_re_roots_inheritance():
     }
     with pytest.raises(ValidationError):
         check_v2_preconditions(payload, data_source="v1")
+
+
+# --- A1: basket-nested v2 option legs (invisible to the wire-JSON walk) --------
+
+
+def _v2_basket_input(*, cycle, stream):
+    """A resolved basket input carrying ONE v2 option leg (data_source inherited).
+
+    Mirrors what ``_resolve_basket_inputs`` produces for a SAVED basket — the leg
+    is a materialised ``InstrumentOptionStream``, NOT anything on the request wire.
+    """
+    from tcg.core.api.signals import _ResolvedBasketInput
+    from tcg.types.options import ByMoneyness, NextThirdFriday
+    from tcg.types.signal import InstrumentOptionStream
+
+    leg = InstrumentOptionStream(
+        collection="OPT_SP_500",
+        option_type="P",
+        cycle=cycle,
+        maturity=NextThirdFriday(offset_months=1),
+        selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.01),
+        stream=stream,
+        data_source=None,  # inherits the run default
+    )
+    return _ResolvedBasketInput(id="opt_in", legs=((leg, 1.0),), basket_id="b1")
+
+
+def test_wire_precondition_cannot_see_basket_legs_documents_the_gap():
+    """The wire-JSON checker walks only the request body; a saved basket is just
+    an id, so its option legs are invisible — this is the A1 gap the new helper
+    closes. A bad stream/cycle on a basket leg passes the wire walk here.
+    """
+    payload = {"spec": {"inputs": [{"instrument": {"type": "basket", "basket_id": "b1"}}]}}
+    # No option_stream node on the wire → nothing to reject, even though the
+    # resolved basket below carries an unserviceable v2 'mid' leg.
+    check_v2_preconditions(payload, data_source="v2")  # does not raise (the gap)
+
+
+def test_basket_nested_v2_mid_stream_is_rejected():
+    """A v2 option leg reached through a basket with the default ``stream="mid"``
+    (v2 cannot serve) must 400 at the boundary, not degrade to an all-NaN curve.
+    """
+    from tcg.core.api.signals import check_v2_basket_option_legs
+
+    inputs = [_v2_basket_input(cycle="W", stream="mid")]
+    with pytest.raises(ValidationError) as ei:
+        check_v2_basket_option_legs(inputs, default_source="v2")
+    assert "opt_in" in str(ei.value)  # labelled with the basket input id
+
+
+def test_basket_nested_v2_bad_cycle_is_rejected():
+    from tcg.core.api.signals import check_v2_basket_option_legs
+
+    inputs = [_v2_basket_input(cycle=None, stream="close")]
+    with pytest.raises(ValidationError):
+        check_v2_basket_option_legs(inputs, default_source="v2")
+
+
+def test_basket_nested_v1_leg_no_ops():
+    """An all-v1 run (or v1 default) must not touch the v2 gate (Sign 1)."""
+    from tcg.core.api.signals import check_v2_basket_option_legs
+
+    inputs = [_v2_basket_input(cycle=None, stream="mid")]
+    # default_source v1 and the leg inherits it → effective v1 → no raise.
+    check_v2_basket_option_legs(inputs, default_source="v1")
+
+
+def test_basket_nested_serviceable_v2_leg_passes():
+    from tcg.core.api.signals import check_v2_basket_option_legs
+
+    inputs = [_v2_basket_input(cycle="W", stream="close")]
+    check_v2_basket_option_legs(inputs, default_source="v2")  # serviceable → OK

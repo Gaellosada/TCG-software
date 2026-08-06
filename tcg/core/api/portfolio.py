@@ -54,6 +54,7 @@ from tcg.core.api.signals import (
     IndicatorSpecIn,
     SignalIn,
     _resolve_basket_inputs,
+    check_v2_basket_option_legs,
     compute_input_overlap,
     make_signal_fetcher,
     parse_signal,
@@ -1037,6 +1038,12 @@ async def _evaluate_signal_leg(
         signal = parse_signal(leg.signal_spec.spec, resolved_inputs=resolved_inputs)
     except SignalValidationError as exc:
         raise ValidationError(f"Leg '{label}': signal validation error: {exc}") from exc
+
+    # Pure v2 preconditions for BASKET-nested option legs on this signal leg —
+    # invisible to the wire-JSON walk in ``_check_v2_option_legs`` (a saved basket
+    # is only an id). Gated on each leg's own effective source (default = this
+    # signal leg's effective source); raises a labelled ValidationError → 400.
+    check_v2_basket_option_legs(resolved_inputs, default_source=default_source)
 
     if len(signal.inputs) == 0:
         raise ValidationError(f"Leg '{label}': signal has no inputs")

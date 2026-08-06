@@ -115,6 +115,7 @@ from tcg.core.api._series_fetch import (
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api._v2_preconditions import (
     check_v2_option_coverage_floor,
+    check_v2_option_node,
     check_v2_preconditions,
     collect_v2_option_roots,
 )
@@ -497,6 +498,43 @@ async def _resolve_basket_inputs(
         else:
             out.append(inp)
     return out
+
+
+def check_v2_basket_option_legs(
+    resolved_inputs: "Iterable[_InputIn | _ResolvedBasketInput]",
+    *,
+    default_source: str,
+) -> None:
+    """Gate v2 option legs materialised from a basket, which the wire-JSON
+    precondition walk cannot see.
+
+    A saved basket is only an id on the request, so
+    :func:`check_v2_preconditions` (which walks ``model_dump``) never reaches its
+    option legs. Without this a v2 option leg nested in a basket with the default
+    ``stream="mid"`` or a cycle v2 cannot serve skips the collection/cycle/stream
+    check and regresses to the exact unattributable all-NaN curve the
+    preconditions exist to prevent. Mirrors the coverage-floor union: each
+    resolved basket option leg is gated on its OWN effective source, so an all-v1
+    (or v1-basket) run no-ops entirely (Sign 1). Called by BOTH the signals route
+    and the portfolio signal-leg path, right after basket resolution.
+    """
+    for inp in resolved_inputs:
+        if not isinstance(inp, _ResolvedBasketInput):
+            continue
+        for inst, _weight in inp.legs:
+            if (
+                isinstance(inst, InstrumentOptionStream)
+                and effective_data_source(inst.data_source, default_source) == "v2"
+            ):
+                check_v2_option_node(
+                    {
+                        "type": "option_stream",
+                        "collection": inst.collection,
+                        "cycle": inst.cycle,
+                        "stream": inst.stream,
+                    },
+                    label=f"Basket '{inp.id}'",
+                )
 
 
 def _parse_position_cap(raw: Any, *, iid: str) -> tuple[float, float] | None:
@@ -1383,6 +1421,12 @@ async def compute_signal(
         signal = parse_signal(body.spec, resolved_inputs=resolved_inputs)
     except SignalValidationError as exc:
         return error_response("validation", str(exc))
+
+    # Pure v2 preconditions for BASKET-nested option legs — invisible to the
+    # wire-JSON check above (a saved basket is just an id). Runs before the DB
+    # floor so a bad cycle/stream fails without a round-trip. Raises the same
+    # ``ValidationError`` → uniform HTTP-400 as ``check_v2_preconditions``.
+    check_v2_basket_option_legs(resolved_inputs, default_source=body.data_source)
 
     # E7 option coverage floor — the ONE v2 precondition that needs a query, so it
     # runs here rather than in the pure checker above. Deferred until after basket
