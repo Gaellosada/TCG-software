@@ -91,8 +91,15 @@ def _trading_calendar(name: str = "CME"):  # type: ignore[return]
     return _get_calendar(_CALENDAR_ALIASES.get(name, name))
 
 
+@functools.lru_cache(maxsize=512)
 def _n_trading_days_before(expiration: date, n: int, calendar: str = "CME") -> date:
     """Return the date that is *n* TRADING days before *expiration*.
+
+    Memoized: the result is a pure function of ``(expiration, n, calendar)`` and
+    the underlying exchange calendar is static, so caching removes the
+    per-``should_roll`` ``cal.valid_days`` recomputation during a backtest
+    without changing any roll decision. ``ValueError`` (bad ``n`` / empty
+    window) is NOT cached by ``lru_cache`` and re-raises on every call.
 
     Anchor = the last trading day on/before ``expiration`` (== ``expiration``
     itself whenever expiration is a trading day, which every real option

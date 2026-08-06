@@ -262,3 +262,26 @@ def test_should_roll_delta_cross_raises_not_implemented() -> None:
     row = _make_row()
     with pytest.raises(NotImplementedError, match="phase_2_only"):
         roller.should_roll(held, row, as_of=date(2024, 4, 15), rule=DeltaCross(threshold=0.30))
+
+
+def test_n_trading_days_before_is_memoized_identical_decisions() -> None:
+    """A6a: ``_n_trading_days_before`` is memoized so repeated ``should_roll``
+    calls during a backtest do not recompute ``cal.valid_days``. Caching must be
+    transparent — identical inputs give identical outputs, and the memoized value
+    matches a fresh (uncached) recomputation.
+    """
+    from tcg.engine.options.roll.roller import _n_trading_days_before
+
+    _n_trading_days_before.cache_clear()
+    exp = date(2024, 4, 22)  # Monday; n=1 trading day before = Fri 2024-04-19
+    first = _n_trading_days_before(exp, 1)
+    assert first == date(2024, 4, 19)
+    # Recompute uncached (bypass the wrapper) and confirm agreement.
+    fresh = _n_trading_days_before.__wrapped__(exp, 1)
+    assert fresh == first
+    # Repeat calls hit the cache rather than recompute.
+    before = _n_trading_days_before.cache_info()
+    for _ in range(5):
+        assert _n_trading_days_before(exp, 1) == first
+    after = _n_trading_days_before.cache_info()
+    assert after.hits - before.hits == 5

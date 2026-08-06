@@ -106,7 +106,10 @@ def accrue_cash_equity(
     np.ndarray of shape (n,) : ``equity[0] == base``; monotonically
     non-decreasing when every rate >= 0.
     """
-    if np.isscalar(rate_annual):
+    # ``np.ndim(x) == 0`` treats a Python scalar AND a 0-d ndarray as scalar;
+    # ``np.isscalar`` misses the 0-d array case and misroutes it into the 1-D
+    # array branch below (spurious "must be 1-D" error).
+    if np.ndim(rate_annual) == 0:
         if n is None:
             raise ValueError("n is required when rate_annual is a scalar")
         rate = np.full(int(n), float(rate_annual), dtype=np.float64)

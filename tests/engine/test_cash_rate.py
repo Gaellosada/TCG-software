@@ -112,3 +112,14 @@ def test_reindex_empty_source_returns_fallback() -> None:
         fallback=0.01,
     )
     assert np.all(out == 0.01)
+
+
+def test_zero_dim_ndarray_treated_as_scalar() -> None:
+    """A6b: a 0-d ndarray (``np.array(0.01)``) must route through the scalar
+    branch — ``np.isscalar`` returns False for it, wrongly sending it to the
+    1-D array branch and raising "must be 1-D". It should equal the scalar path.
+    """
+    zerod = accrue_cash_equity(np.array(0.01), n=5, base=100.0, compound=True)
+    scalar = accrue_cash_equity(0.01, n=5, base=100.0, compound=True)
+    assert zerod.shape == (5,)
+    np.testing.assert_array_equal(zerod, scalar)
