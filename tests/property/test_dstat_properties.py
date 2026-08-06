@@ -65,14 +65,23 @@ def test_raw_dstat_length_warmup_finite(close):
     got = run_indicator(DSTAT_SRC, {"ma_window": MA_W, "vol_window": VOL_W}, {"close": close})
     assert got.shape == close.shape                       # P1 length
     assert np.all(np.isnan(got[:WARM]))                   # P2 warm-up
-    # P3: with |ret| <= 0.08 and n-1 distinct-ish returns, vol can still be 0
-    # only if a whole window is perfectly flat. Where finite, it must be finite
-    # (never inf). And at least the steady-state region must contain finite values.
-    assert not np.any(np.isinf(got))
-    steady = got[WARM:]
-    # Not every bar is guaranteed finite (a flat vol window -> NaN), but the
-    # array must not be entirely NaN past warm-up for a non-flat walk.
-    assert np.any(np.isfinite(steady)) or np.allclose(np.diff(close), 0.0)
+    assert not np.any(np.isinf(got))                      # P3 never inf
+    # P4: a steady bar is finite EXACTLY where its vol window carries nonzero
+    # dispersion. Closes are strictly positive (100*exp(...)) so the MA term is
+    # always > 0; the only cause of a NaN in the steady region is a flat vol
+    # window (all vol_window log-returns identical => sample std == 0 => vol == 0
+    # => division undefined => left NaN by design, never +/-inf). A flat run can
+    # cover the entire steady tail even when the overall series jumped, so we
+    # gate per-bar on the vol-window dispersion computed the same way the
+    # indicator does, rather than assuming any bar must be finite.
+    for i in range(WARM, close.shape[0]):
+        chunk = close[i - VOL_W : i + 1]                  # vol_window + 1 closes
+        rets = np.log(chunk[1:] / chunk[:-1])             # vol_window log-returns
+        vol = np.std(rets, ddof=1)                        # zero iff window flat
+        if vol > 0.0:
+            assert np.isfinite(got[i]), f"bar {i}: non-flat vol window must be finite"
+        else:
+            assert np.isnan(got[i]), f"bar {i}: flat vol window must stay NaN"
 
 
 @settings(max_examples=60, deadline=None)
