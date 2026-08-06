@@ -60,6 +60,7 @@ from tcg.core.api.signals import (
     resolve_delta_hedge_raw,
 )
 from tcg.data._utils import date_to_int, int_to_iso
+from tcg.data._v2_compat._mapping import V2_RATE_1M_SYMBOL, V2_RATE_COLLECTION
 from tcg.data.protocols import MarketDataService
 from tcg.persistence import WriteRepository
 from tcg.engine import (
@@ -592,23 +593,22 @@ class SignalLegSpec(BaseModel):
 class CashRateSpec(BaseModel):
     """Rate source for a ``cash_rate`` leg (SPEC §5.7, feature F4).
 
-    Two pluggable sources; ``flat`` is the always-available default (zero data
-    dependency, legacy ~1 %/yr behaviour).  ``series`` reads an annualized-rate
-    instrument from the dwh (e.g. a future ``RATE_USD`` USD-1M series) through
-    the ordinary market-data path.  As of build time NO usable USD short-rate
-    series exists in the warehouse (probe found only VIX-family indices), so the
-    ``series`` source is wired-and-tested but awaits Gael loading the instrument
-    (SPEC P-DATA-2); the operative source is ``flat``.
+    A cash-rate leg reads a real annualized short-rate SERIES from the dwh and
+    accrues it day by day. The canonical source is the US 1-Month Treasury CMT
+    yield (``RATE``/``RATE_US_CMT_1M``, FRED DGS1MO, ``data_source='v2'``); the
+    values are quoted in PERCENT and the wiring layer divides by 100. Bars before
+    the series' first observation accrue at 0 (the DGS1MO history starts 2001-07,
+    so the §5.7 window is fully covered and this edge is never hit).
+
+    The former always-available ``flat`` constant source was REMOVED: a cash leg
+    is now a series source only (the series supplies its own trading calendar, so
+    a rate-only portfolio needs no companion instrument).
     """
 
-    # "flat": constant ``rate_pct`` %/yr. "series": read (collection, symbol)
-    # from the dwh, interpret values per ``unit``; ``rate_pct`` is the fallback
-    # for target bars BEFORE the series' first observation.
-    kind: Literal["flat", "series"] = "flat"
-    # Annual rate in PERCENT (1.0 == 1 %/yr). Legacy §5.7 default.
-    rate_pct: float = 1.0
-    collection: str | None = None  # series source
-    symbol: str | None = None  # series source
+    # Series source: read ``(collection, symbol)`` from the dwh and interpret its
+    # values per ``unit`` as an annual rate. Both are REQUIRED.
+    collection: str | None = None
+    symbol: str | None = None
     # How the fetched series values are quoted: "percent" (4.5 == 4.5 %/yr,
     # divided by 100) or "fraction" (0.045 == 4.5 %/yr, used as-is).
     unit: Literal["percent", "fraction"] = "percent"
@@ -616,22 +616,12 @@ class CashRateSpec(BaseModel):
     # False = simple interest (r/252). Compound is the default / more correct.
     compound: bool = True
 
-    @field_validator("rate_pct")
-    @classmethod
-    def _finite_rate(cls, v: float) -> float:
-        if not math.isfinite(v):
-            raise ValueError("rate_pct must be finite")
-        # A rate <= -100 %/yr makes the compound factor undefined; reject early
-        # with the same bound the engine enforces.
-        if v <= -100.0:
-            raise ValueError("rate_pct must be > -100 (i.e. rate > -100 %/yr)")
-        return v
-
     @model_validator(mode="after")
     def _series_requires_ref(self) -> CashRateSpec:
-        if self.kind == "series" and (not self.collection or not self.symbol):
+        if not self.collection or not self.symbol:
             raise ValueError(
-                "cash_rate series source requires 'collection' and 'symbol'"
+                "cash_rate source requires 'collection' and 'symbol' "
+                "(e.g. collection='RATE', symbol='RATE_US_CMT_1M')"
             )
         return self
 
@@ -755,9 +745,25 @@ class LegSpec(_PerInstrumentSourceMixin):
 
     @model_validator(mode="after")
     def validate_cash_rate_has_spec(self) -> LegSpec:
-        """A cash_rate leg without an explicit source defaults to flat 1 %/yr."""
+        """A cash_rate leg without an explicit source defaults to the canonical
+        US 1-Month CMT rate series (``RATE``/``RATE_US_CMT_1M``, ``v2``).
+
+        Rates are a v2-only object, so the default ALSO stamps ``data_source``
+        ``"v2"`` — otherwise the specless default would resolve against v1 and
+        fail the fetch. (The frontend always sends both explicitly; this is the
+        safety net.)
+        """
         if self.type == "cash_rate" and self.cash_rate is None:
-            object.__setattr__(self, "cash_rate", CashRateSpec())
+            object.__setattr__(
+                self,
+                "cash_rate",
+                CashRateSpec(
+                    collection=V2_RATE_COLLECTION,
+                    symbol=V2_RATE_1M_SYMBOL,
+                ),
+            )
+            if self.data_source not in ("v2",):
+                object.__setattr__(self, "data_source", "v2")
         return self
 
     @model_validator(mode="after")
@@ -2201,10 +2207,10 @@ async def _compute_portfolio_uncached(
     portfolio_legs = {
         label: leg for label, leg in body.legs.items() if leg.type == "portfolio"
     }
-    # CASH-RATE legs (F4 / SPEC §5.7): earn a short rate on cash. They carry no
-    # market series of their own on the FLAT source, so they ADOPT the
-    # portfolio's common trading calendar (evaluated after §5); a SERIES source
-    # contributes its own dwh date grid (so a cash leg can also stand alone).
+    # CASH-RATE legs (F4 / SPEC §5.7): earn a real short-rate series on cash. In
+    # a MIXED portfolio they ADOPT the common trading calendar (evaluated after
+    # §5) and never constrain it; a CASH-ONLY portfolio takes its calendar from
+    # the rate series' own dwh dates (§4.7), so a cash leg can also stand alone.
     cash_rate_legs = {
         label: leg for label, leg in body.legs.items() if leg.type == "cash_rate"
     }
@@ -2453,26 +2459,31 @@ async def _compute_portfolio_uncached(
         portfolio_leg_closes[label] = pf_equity
         all_date_grids.append(pf_dates)
 
-    # ── 4.7. Fetch SERIES-source cash-rate legs (if any) ──
+    # ── 4.7. Fetch cash-rate legs' rate series (if any) ──
     #
-    # A cash_rate leg's equity is built AFTER the common calendar is known (§5.5)
-    # so it simply accrues on whatever days the portfolio trades — a cash leg
-    # NEVER constrains the calendar (flat OR series): a real short-rate series is
-    # piecewise-constant / sparsely quoted, so intersecting the portfolio grid
-    # with it would wrongly collapse the calendar to the rate's change dates.
-    # We fetch the SERIES values here (converted to FRACTION units) and reindex
-    # them (hold-last) onto common_dates in §5.5. A cash-only portfolio therefore
-    # has no calendar of its own and is rejected below.
+    # A cash_rate leg reads a real annualized short-rate series (e.g. the US 1M
+    # CMT yield, RATE/RATE_US_CMT_1M, data_source='v2') and its equity is built
+    # AFTER the common calendar is known (§5.5), so it simply accrues on whatever
+    # days the portfolio trades. In a MIXED portfolio a cash leg NEVER constrains
+    # the calendar: a short-rate series is piecewise-constant / sparsely quoted,
+    # so intersecting the portfolio grid with it would wrongly collapse the
+    # calendar to the rate's change dates. We fetch the values here (converted to
+    # FRACTION units) and reindex them (hold-last) onto common_dates in §5.5.
+    # A CASH-ONLY portfolio has no market legs, so below we seed the calendar
+    # from the rate series' OWN dates — a rate-only portfolio is valid (no dummy
+    # companion instrument needed).
+    #
+    # Rates are a v2-only object, so each leg is fetched through ITS OWN bound
+    # service (``_leg_svc``) — a data_source='v1' rate leg would (correctly) find
+    # nothing, since v1 has no rate warehouse.
     cash_series_rates_frac: dict[str, npt.NDArray[np.float64]] = {}
     cash_series_dates_map: dict[str, npt.NDArray[np.int64]] = {}
     for label, leg in cash_rate_legs.items():
         spec = leg.cash_rate
         assert spec is not None  # guaranteed by validate_cash_rate_has_spec
-        if spec.kind != "series":
-            continue
         # Read the annualized-rate instrument through the ordinary market path
         # (READ-ONLY dwh). ``get_prices`` returns a PriceSeries (dates + close).
-        series = await svc.get_prices(
+        series = await _leg_svc(leg).get_prices(
             spec.collection or "",
             spec.symbol or "",
             start=start_date,
@@ -2490,13 +2501,14 @@ async def _compute_portfolio_uncached(
         cash_series_rates_frac[label] = src_vals / divisor
         cash_series_dates_map[label] = src_dates
 
-    # A cash-only portfolio has no calendar of its own — reject with a clear
-    # message rather than the generic "no price-like legs".
+    # A CASH-ONLY portfolio (no market legs) takes its trading calendar from the
+    # rate series themselves — the series supplies real trade dates, so no
+    # companion instrument is required. In a MIXED portfolio we deliberately do
+    # NOT append these (a cash leg must never constrain the shared calendar; see
+    # above), so this seeding only fires when there is nothing else.
     if cash_rate_legs and not all_date_grids:
-        raise ValidationError(
-            "a cash-rate leg has no calendar of its own; add at least one dated "
-            "leg (instrument / continuous / signal / option)"
-        )
+        for label in cash_rate_legs:
+            all_date_grids.append(cash_series_dates_map[label])
 
     # ── 5. Align all series to common dates ──
 
@@ -2576,23 +2588,19 @@ async def _compute_portfolio_uncached(
     # (``common_dates``), producing a base-100, near-zero-vol, all-positive-drift
     # equity curve (SPEC §5.7). Its DIRECTION is the leg weight sign (NOT baked
     # into the curve), so it is an ordinary +weight leg in the combine — never a
-    # hold_option_label. FLAT source: a constant rate over common_dates. SERIES
-    # source: the fetched rate reindexed (piecewise-constant hold) onto
-    # common_dates, with the flat ``rate_pct`` covering any bars before the
-    # series begins.
+    # hold_option_label. The fetched rate is reindexed (piecewise-constant hold)
+    # onto common_dates; bars BEFORE the series' first observation accrue at 0
+    # (``reindex_rate_series`` default fallback) — for the canonical US 1M CMT
+    # series (history from 2001-07) the §5.7 window is fully covered, so this
+    # edge is never hit.
     for label, leg in cash_rate_legs.items():
         spec = leg.cash_rate
         assert spec is not None
-        fallback_frac = spec.rate_pct / 100.0
-        if spec.kind == "series":
-            rate_frac = reindex_rate_series(
-                cash_series_dates_map[label],
-                cash_series_rates_frac[label],
-                common_dates,
-                fallback=fallback_frac,
-            )
-        else:
-            rate_frac = np.full(len(common_dates), fallback_frac, dtype=np.float64)
+        rate_frac = reindex_rate_series(
+            cash_series_dates_map[label],
+            cash_series_rates_frac[label],
+            common_dates,
+        )
         aligned_closes[label] = accrue_cash_equity(
             rate_frac, compound=spec.compound
         )
@@ -2643,8 +2651,13 @@ async def _compute_portfolio_uncached(
         full_date_grids.append(option_stream_dates_map[label])
     for label in portfolio_leg_dates_map:
         full_date_grids.append(portfolio_leg_dates_map[label])
-    # Cash-rate legs (flat OR series) adopt the common calendar and contribute no
-    # date grid of their own (see §4.7), so nothing to add here.
+    # In a MIXED portfolio a cash-rate leg adopts the common calendar and
+    # contributes no date grid of its own (see §4.7). But a CASH-ONLY portfolio
+    # has no market grids at all, so the rate series' own dates ARE the full
+    # range (mirrors the §4.7 calendar seeding).
+    if not full_date_grids and cash_rate_legs:
+        for label in cash_rate_legs:
+            full_date_grids.append(cash_series_dates_map[label])
 
     full_common_all = full_date_grids[0]
     for grid in full_date_grids[1:]:

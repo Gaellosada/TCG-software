@@ -9,9 +9,9 @@ by day.
 This module owns ONLY the numerics (``tcg.engine`` may depend on
 ``tcg.types`` but never on ``tcg.data``): given a per-bar annual rate it
 produces a base-100 equity curve that other legs' curves combine with in the
-weighted portfolio.  The rate SOURCE — a flat constant or a fetched dwh series
-— is resolved by the wiring layer (``tcg.core``) and handed here as a plain
-array; the reindex helper below is the only series-shaping logic and is pure.
+weighted portfolio.  The rate SOURCE — a fetched dwh short-rate series — is
+resolved by the wiring layer (``tcg.core``) and handed here as a plain array;
+the reindex helper below is the only series-shaping logic and is pure.
 
 Unit / convention (documented, verified in tests)
 --------------------------------------------------
