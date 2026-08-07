@@ -23,8 +23,13 @@ describe('overlapRangeOf()', () => {
   });
 
   it('single leg → that leg’s range', () => {
+    // No cadence info on the leg → recommendedStart defaults to raw start,
+    // segments to []. start/end unchanged (additive fields only).
     expect(overlapRangeOf([{ start: '2020-01-01', end: '2020-12-31' }]))
-      .toEqual({ start: '2020-01-01', end: '2020-12-31' });
+      .toEqual({
+        start: '2020-01-01', end: '2020-12-31',
+        recommendedStart: '2020-01-01', segments: [],
+      });
   });
 
   it('overlap = latest start → earliest end', () => {
@@ -33,7 +38,10 @@ describe('overlapRangeOf()', () => {
       { start: '2015-06-01', end: '2020-03-15' },
       { start: '2012-01-01', end: '2025-01-01' },
     ]);
-    expect(out).toEqual({ start: '2015-06-01', end: '2020-03-15' });
+    expect(out).toEqual({
+      start: '2015-06-01', end: '2020-03-15',
+      recommendedStart: '2015-06-01', segments: [],
+    });
   });
 
   it('ignores null-range legs but uses the valid ones', () => {
@@ -41,7 +49,10 @@ describe('overlapRangeOf()', () => {
       { start: null, end: null },
       { start: '2018-01-01', end: '2019-01-01' },
     ]);
-    expect(out).toEqual({ start: '2018-01-01', end: '2019-01-01' });
+    expect(out).toEqual({
+      start: '2018-01-01', end: '2019-01-01',
+      recommendedStart: '2018-01-01', segments: [],
+    });
   });
 
   it('disjoint ranges (start > end) → null', () => {
@@ -57,7 +68,36 @@ describe('overlapRangeOf()', () => {
       { start: '2019-01-01', end: '2020-06-30' },
       { start: '2020-06-30', end: '2021-01-01' },
     ]);
-    expect(out).toEqual({ start: '2020-06-30', end: '2020-06-30' });
+    expect(out).toEqual({
+      start: '2020-06-30', end: '2020-06-30',
+      recommendedStart: '2020-06-30', segments: [],
+    });
+  });
+
+  it('folds the LATEST per-leg recommendedStart and carries the cliff band', () => {
+    // An option leg with a quarterly→monthly cliff, plus a plain leg that only
+    // provides raw start. The recommendation folds to the latest recommendation
+    // (the option leg's monthly floor), clamped into the overlap; the >1-segment
+    // band is carried for the slider to shade.
+    const segments = [
+      { start: '2010-06-07', end: '2016-04-30', cadence: 'quarterly' },
+      { start: '2016-05-01', end: '2026-07-27', cadence: 'monthly' },
+    ];
+    const out = overlapRangeOf([
+      { start: '2005-01-01', end: '2026-12-31' }, // plain leg, no cadence
+      { start: '2010-06-07', end: '2026-07-27', recommendedStart: '2016-05-01', segments },
+    ]);
+    expect(out.start).toBe('2010-06-07'); // raw overlap floor (latest raw start)
+    expect(out.end).toBe('2026-07-27');
+    expect(out.recommendedStart).toBe('2016-05-01'); // monthly-era default
+    expect(out.segments).toEqual(segments); // band carried for shading
+  });
+
+  it('clamps a recommendation later than the overlap end back to the end', () => {
+    const out = overlapRangeOf([
+      { start: '2010-01-01', end: '2015-01-01', recommendedStart: '2020-01-01', segments: [] },
+    ]);
+    expect(out.recommendedStart).toBe('2015-01-01');
   });
 });
 

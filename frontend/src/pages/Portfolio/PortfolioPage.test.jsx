@@ -143,6 +143,53 @@ afterEach(() => {
   vi.mocked(usePortfolio).mockReset();
 });
 
+describe('<PortfolioPage> cadence overlap warning', () => {
+  // overlapRange with a quarterly→monthly cliff (recommendedStart > raw start).
+  const cliffRange = {
+    start: '2010-06-07',
+    end: '2026-07-27',
+    recommendedStart: '2016-05-01',
+    segments: [
+      { start: '2010-06-07', end: '2016-04-30', cadence: 'quarterly' },
+      { start: '2016-05-01', end: '2026-07-27', cadence: 'monthly' },
+    ],
+  };
+
+  it('shows NO warning at the default window (start seeds at recommendedStart)', () => {
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({ legs: [{ id: 1, label: 'OPT', weight: 100 }], startDate: '', overlapRange: cliffRange }),
+    );
+    render(<PortfolioPage />);
+    expect(screen.queryByText(/lower-cadence span/i)).toBeNull();
+  });
+
+  it('shows a non-blocking warning when the selected start reaches into the quarterly era', () => {
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({
+        legs: [{ id: 1, label: 'OPT', weight: 100 }],
+        startDate: '2012-01-01', // dragged BEFORE recommendedStart (2016)
+        overlapRange: cliffRange,
+      }),
+    );
+    render(<PortfolioPage />);
+    const note = screen.getByRole('note');
+    expect(note.textContent).toMatch(/lower-cadence span/i);
+    expect(note.textContent).toMatch(/2016-05-01/);
+  });
+
+  it('shows NO warning when there is no cliff (recommendedStart === start)', () => {
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({
+        legs: [{ id: 1, label: 'OPT', weight: 100 }],
+        startDate: '2010-01-01',
+        overlapRange: { start: '2005-12-01', end: '2025-06-30', recommendedStart: '2005-12-01', segments: [] },
+      }),
+    );
+    render(<PortfolioPage />);
+    expect(screen.queryByRole('note')).toBeNull();
+  });
+});
+
 describe('<PortfolioPage> Statistics integration', () => {
   it('does NOT render Statistics when there are no results', () => {
     vi.mocked(usePortfolio).mockReturnValue(baseHook({ results: null }));

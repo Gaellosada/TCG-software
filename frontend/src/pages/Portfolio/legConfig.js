@@ -22,9 +22,18 @@
  * caller). Shared by the add flow (which then stamps a label + default weight)
  * and the edit flow (which merges these fields into the existing leg).
  */
+// Per-instrument market-data source, translated from the modal's snake_case
+// ``data_source`` onto the leg's camelCase ``dataSource``. Emit-only-when-v2:
+// a v1/absent source adds NO key, so a v1 leg stays byte-identical to before
+// (same idiom as storage.js + the compute builder). Spread onto every leg type.
+function legSourceFields(instrument) {
+  return instrument && instrument.data_source === 'v2' ? { dataSource: 'v2' } : {};
+}
+
 export function instrumentToLegConfig(instrument) {
   if (instrument.type === 'option_stream') {
     return {
+      ...legSourceFields(instrument),
       type: 'option_stream',
       collection: instrument.collection,
       option_type: instrument.option_type,
@@ -50,10 +59,16 @@ export function instrumentToLegConfig(instrument) {
           futures_reference: instrument.futures_reference || 'nearest_on_or_after',
         }
         : {}),
+      // DELTA-HEDGE overlay (F2) — forwarded only when the user enabled it, so a
+      // plain option leg serialises byte-identically (backend default = no hedge).
+      ...(instrument.delta_hedge && instrument.delta_hedge.enabled
+        ? { delta_hedge: instrument.delta_hedge }
+        : {}),
     };
   }
   if (instrument.type === 'continuous') {
     return {
+      ...legSourceFields(instrument),
       type: 'continuous',
       collection: instrument.collection,
       strategy: instrument.strategy,
@@ -68,8 +83,27 @@ export function instrumentToLegConfig(instrument) {
         : {}),
     };
   }
+  if (instrument.type === 'cash_rate') {
+    // Rate leg: the picker's "Rate" tab emits a cash_rate descriptor referencing
+    // a v2 RATE series (collection + instrument_id). Rates are a v2-ONLY object,
+    // so the leg ALWAYS carries dataSource 'v2' (independent of the modal's
+    // source toggle — the descriptor bakes data_source:'v2' in). The reference is
+    // stored under snake_case ``cash_rate`` (the backend CashRateSpec shape):
+    // percent (÷100), 252-day compounded.
+    return {
+      type: 'cash_rate',
+      dataSource: 'v2',
+      cash_rate: {
+        collection: instrument.collection || 'RATE',
+        symbol: instrument.instrument_id,
+        unit: 'percent',
+        compound: true,
+      },
+    };
+  }
   // spot -> instrument leg: rename instrument_id -> symbol, type spot -> instrument.
   return {
+    ...legSourceFields(instrument),
     type: 'instrument',
     collection: instrument.collection,
     symbol: instrument.instrument_id,
@@ -100,6 +134,9 @@ export function legToInitialConfig(leg) {
       // (undefined on a premium-notional leg → the form's default takes over).
       sizing_mode: leg.sizing_mode,
       futures_reference: leg.futures_reference,
+      // Restore the delta-hedge overlay so editing pre-fills its controls
+      // (undefined on an unhedged leg → the checkbox stays off).
+      delta_hedge: leg.delta_hedge,
     };
   }
   if (leg.type === 'continuous') {

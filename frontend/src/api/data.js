@@ -41,14 +41,21 @@ async function fetchClassified(path, options = {}) {
   }
 }
 
-export async function listCollections(assetClass = null, { signal } = {}) {
-  const params = assetClass ? `?asset_class=${assetClass}` : '';
+// ``source`` picks the data warehouse the catalog is drawn from. It is emitted
+// on the wire (``data_source=v2``) ONLY for v2 — a v1/omitted source keeps the
+// URL byte-identical to the pre-feature request, so v1 callers are unaffected.
+export async function listCollections(assetClass = null, { signal, source } = {}) {
+  const parts = [];
+  if (assetClass) parts.push(`asset_class=${assetClass}`);
+  if (source === 'v2') parts.push('data_source=v2');
+  const params = parts.length ? `?${parts.join('&')}` : '';
   const res = await fetchClassified(`/data/collections${params}`, { signal });
   return res.collections || [];
 }
 
-export async function listInstruments(collection, { skip = 0, limit = 50, signal } = {}) {
-  const res = await fetchClassified(`/data/${collection}?skip=${skip}&limit=${limit}`, { signal });
+export async function listInstruments(collection, { skip = 0, limit = 50, signal, source } = {}) {
+  const sourceParam = source === 'v2' ? '&data_source=v2' : '';
+  const res = await fetchClassified(`/data/${collection}?skip=${skip}&limit=${limit}${sourceParam}`, { signal });
   return res; // { items, total, skip, limit }
 }
 
@@ -78,8 +85,10 @@ export async function getContinuousSeries(collection, { strategy = 'front_month'
   return res;
 }
 
-export async function getAvailableCycles(collection) {
-  const res = await fetchClassified(`/data/continuous/${encodeURIComponent(collection)}/cycles`);
+export async function getAvailableCycles(collection, { source } = {}) {
+  // ``data_source=v2`` emitted only for v2 (v1/omitted → byte-identical URL).
+  const sourceParam = source === 'v2' ? '?data_source=v2' : '';
+  const res = await fetchClassified(`/data/continuous/${encodeURIComponent(collection)}/cycles${sourceParam}`);
   return res.cycles || [];
 }
 

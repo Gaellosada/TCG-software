@@ -385,3 +385,108 @@ def test_suite_returns_correct_type_and_metadata():
     assert isinstance(suite, StatisticsSuite)
     assert suite.risk_free_rate_used == 0.04
     assert suite.num_observations == n - 1
+
+
+# ── Legacy InformationRatio reconciliation ─────────────────────────────
+#
+# Pins the DEFINITIONAL relationship between TCG's displayed Sharpe and the
+# legacy Java headline reward/risk (StatisticsUtils.getInformationRatio):
+#
+#     legacy IR = 260 * mean(dailyPerf) / (sqrt(260) * std(ddof=1))
+#               = sqrt(260) * mean / std(ddof=1)      (NO risk-free term)
+#
+# At rf=0, compute_statistics's Sharpe is sqrt(252) * mean / std(ddof=1) on
+# the SAME per-bar returns. Therefore, on any identical return series, the
+# ONLY difference is the annualization constant:
+#
+#     TCG_sharpe / legacy_IR  ==  sqrt(252 / 260)  ==  0.984495…
+#
+# There is NO residual formula-level gap at rf=0 beyond this constant. These
+# tests are regression guards: if someone changes ddof, the annualization
+# factor, or injects a risk-free term at rf=0, the identity breaks loudly.
+
+_LEGACY_DAYS = 260
+_TCG_DAYS = 252
+_EXPECTED_TCG_OVER_LEGACY = math.sqrt(_TCG_DAYS / _LEGACY_DAYS)  # 0.984495…
+
+
+def _legacy_information_ratio(daily_returns: np.ndarray) -> float:
+    """Legacy IR reimplemented in Python, rf=0, per StatisticsUtils.java."""
+    mean = float(np.mean(daily_returns))
+    std = float(np.std(daily_returns, ddof=1))
+    ann_vol = math.sqrt(_LEGACY_DAYS) * std
+    if ann_vol == 0.0:
+        return 0.0
+    return _LEGACY_DAYS * mean / ann_vol
+
+
+def _equity_from_returns(daily_returns: np.ndarray, start: float = 100.0) -> np.ndarray:
+    equity = np.empty(len(daily_returns) + 1, dtype=np.float64)
+    equity[0] = start
+    equity[1:] = start * np.cumprod(1.0 + daily_returns)
+    return equity
+
+
+class TestLegacyInformationRatioReconciliation:
+    def test_legacy_ir_reproduced_from_known_series(self):
+        # Hand-computable two-value series: mean = 0.005 exactly.
+        dr = np.array([0.02, -0.01] * 130, dtype=np.float64)  # 260 returns
+        mean = float(np.mean(dr))
+        assert mean == pytest.approx(0.005, abs=1e-12)
+        std = float(np.std(dr, ddof=1))
+        expected_ir = math.sqrt(_LEGACY_DAYS) * mean / std
+        assert _legacy_information_ratio(dr) == pytest.approx(expected_ir, rel=1e-12)
+
+    def test_tcg_sharpe_at_rf0_equals_0p9845_times_legacy(self):
+        # The crux: at rf=0 the residual vs legacy is EXACTLY sqrt(252/260),
+        # no more. Checked on a realistic pseudo-random return series.
+        rng = np.random.default_rng(7)
+        dr = rng.normal(loc=0.0006, scale=0.011, size=252 * 5)
+        dates = _yyyymmdd_range(2015, 1, len(dr) + 1)
+        suite = compute_statistics(
+            dates, _equity_from_returns(dr), risk_free_rate=0.0
+        )
+        legacy = _legacy_information_ratio(dr)
+        ratio = suite.risk_adjusted.sharpe_ratio / legacy
+        assert ratio == pytest.approx(_EXPECTED_TCG_OVER_LEGACY, rel=1e-9)
+
+    def test_tcg_sharpe_at_rf0_is_textbook_sqrt252(self):
+        # compute_statistics at rf=0 must equal sqrt(252)*mean/std(ddof=1).
+        rng = np.random.default_rng(11)
+        dr = rng.normal(loc=0.0004, scale=0.009, size=400)
+        dates = _yyyymmdd_range(2016, 1, len(dr) + 1)
+        suite = compute_statistics(
+            dates, _equity_from_returns(dr), risk_free_rate=0.0
+        )
+        mean = float(np.mean(dr))
+        std = float(np.std(dr, ddof=1))
+        textbook = math.sqrt(_TCG_DAYS) * mean / std
+        assert suite.risk_adjusted.sharpe_ratio == pytest.approx(textbook, rel=1e-9)
+
+    def test_ratio_holds_independent_of_date_cadence(self):
+        # Sharpe reads ONLY the return series and a FIXED annualization constant
+        # (252) — never the date axis nor the gaps between bars. So the SAME
+        # equity presented on a genuinely irregular / sparse date axis must yield
+        # an IDENTICAL Sharpe. (A gap-derived annualization would instead drift
+        # with cadence — this test would catch that regression.)
+        rng = np.random.default_rng(3)
+        dr = rng.normal(loc=0.0005, scale=0.010, size=300)
+        equity = _equity_from_returns(dr)
+        m = len(equity)
+        dense = _yyyymmdd_range(2018, 1, m)  # consecutive calendar days
+        # Genuinely sparse axis: SAME number of points, but spread with irregular
+        # 1..4-day gaps (an uneven, weekly-like cadence) picked out of a big pool —
+        # NOT an identity clone of ``dense``.
+        pool = _yyyymmdd_range(2018, 1, 5 * m)
+        steps = rng.integers(1, 5, size=m - 1)  # irregular gaps in [1, 4]
+        idx = np.concatenate(([0], np.cumsum(steps)))
+        sparse = pool[idx]
+        # Guard the guard: the sparse axis is really different and strictly
+        # increasing (so this can never silently degrade to the identity no-op).
+        assert not np.array_equal(sparse, dense)
+        assert np.all(np.diff(sparse) > 0)
+        s_dense = compute_statistics(dense, equity, risk_free_rate=0.0)
+        s_sparse = compute_statistics(sparse, equity, risk_free_rate=0.0)
+        assert s_dense.risk_adjusted.sharpe_ratio == pytest.approx(
+            s_sparse.risk_adjusted.sharpe_ratio, rel=1e-12
+        )

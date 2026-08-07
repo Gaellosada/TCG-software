@@ -79,9 +79,9 @@ def compute_spy(monkeypatch):
     real = portfolio._compute_portfolio_uncached
     calls = {"n": 0}
 
-    async def _spy(body, svc, classify, repo):
+    async def _spy(body, svc, classify, repo, **kwargs):
         calls["n"] += 1
-        return await real(body, svc, classify, repo)
+        return await real(body, svc, classify, repo, **kwargs)
 
     monkeypatch.setattr(portfolio, "_compute_portfolio_uncached", _spy)
     return calls

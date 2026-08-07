@@ -276,6 +276,98 @@ def test_futures_offroll_reentry_resizes_and_books_pnl() -> None:
     assert np.all(np.isfinite(ratio))
 
 
+# ── P-OFFROLL-SIZING: an off-roll FIRST open, never held at a roll ───────────
+def test_offroll_first_open_sized_via_daily_future_ref() -> None:
+    """A ``futures_notional`` hold leg whose signal entry FIRST latches on a
+    NON-roll bar — and that was NOT held at any prior roll — must be sized off the
+    per-date reference-future price (``daily_future_ref``) and book non-zero,
+    correctly-sized P&L on the held window.
+
+    Regression for P-OFFROLL-SIZING: ``roll_future_ref`` is finite ONLY at roll
+    bars, and ``seg_fref`` starts NaN, so a leg that opens off-roll before any
+    roll-while-held read NaN, failed ``_futures_denom_ok``, and silently booked
+    ZERO across the whole hold (this is what dropped the §5.5 Aug-2024 spike gain).
+    The daily front-future reference rescues ONLY that previously-unsized case.
+    """
+    # Single option segment (roll at idx 0), but the leg is FLAT at the roll and
+    # first latches at idx 2 (off-roll).  Held [2,3,4,5]; long (sign=+1) call whose
+    # premium RISES through the window (mirrors a VIX call in a spike).
+    premium = np.array([10.0, 10.0, 10.0, 12.0, 15.0, 20.0])
+    is_roll = np.array([True, False, False, False, False, False])
+    roll_premium = np.array([10.0, np.nan, np.nan, np.nan, np.nan, np.nan])
+    roll_fref = np.array([4500.0, np.nan, np.nan, np.nan, np.nan, np.nan])
+    # Leg NOT active at the idx-0 roll → seg_fref is never initialised.
+    pos_active = np.array([False, False, True, True, True, True])
+    # Per-date reference-future price, finite on every bar (the rescue source).
+    daily_fref = np.array([4400.0, 4500.0, 4600.0, 4600.0, 4600.0, 4600.0])
+    spec = _HoldPnLSpec(
+        ref_id="opt",
+        sign=1.0,
+        nav_times=1.0,
+        premium=premium,
+        is_roll=is_roll,
+        roll_premium=roll_premium,
+        pos_active=pos_active,
+        sizing_mode="futures_notional",
+        roll_future_ref=roll_fref,
+        mult_fut=50.0,
+        mult_opt=50.0,
+        daily_future_ref=daily_fref,
+    )
+    ratio, _scale, contrib = _compound_with_hold(np.zeros(5, dtype=np.float64), [spec])
+
+    # Flat window (steps 0,1) books exactly 0.
+    assert contrib["opt"][0] == 0.0
+    assert contrib["opt"][1] == 0.0
+    # First HELD step (bar 2→3): sized off daily_future_ref[2]=4600 (open bar), NOT
+    # the idx-0 roll_future_ref (leg was flat there).  seg_er==ratio[2] so the
+    # equity coupling cancels to 1; dprem = premium[3]-premium[2] = 12-10 = 2.
+    expected = 1.0 * 1.0 * (2.0 * 50.0) / (4600.0 * 50.0)
+    assert contrib["opt"][2] != 0.0, "off-roll first open still booked ZERO"
+    assert abs(contrib["opt"][2] - expected) < 1e-12
+    # Subsequent held steps also accrue (the leg is sized for the whole window).
+    assert contrib["opt"][3] != 0.0
+    assert contrib["opt"][4] != 0.0
+    # A rising long-call premium sized long ⇒ the equity curve rises and is finite.
+    assert ratio[-1] > ratio[2]
+    assert np.all(np.isfinite(ratio))
+
+
+# ── P-OFFROLL-SIZING byte-identity: roll_future_ref WINS over daily ─────────
+def test_daily_future_ref_ignored_when_roll_ref_present() -> None:
+    """When the leg IS held at a roll (``roll_future_ref`` finite) the daily
+    reference is NEVER consulted — the result is byte-identical to ``daily=None``.
+
+    This is the byte-identity gate: the rescue may ONLY size the previously-NaN
+    case; a roll-aligned leg (the common case, e.g. §5.6's 02-03 roll and every
+    always-on option leg) must be UNCHANGED even if a (deliberately wrong) daily
+    reference is supplied.
+    """
+    premium = np.array([30.0, 28.0, 26.0, 24.0, 20.0, 19.0])
+    is_roll = np.array([True, False, False, True, False, False])
+    roll_premium = np.array([30.0, np.nan, np.nan, 18.0, np.nan, np.nan])
+    roll_fref = np.array([4500.0, np.nan, np.nan, 4520.0, np.nan, np.nan])
+    common = dict(
+        ref_id="opt",
+        sign=-1.0,
+        nav_times=1.0,
+        premium=premium,
+        is_roll=is_roll,
+        roll_premium=roll_premium,
+        pos_active=np.ones(6, dtype=np.bool_),
+        sizing_mode="futures_notional",
+        roll_future_ref=roll_fref,
+        mult_fut=50.0,
+        mult_opt=50.0,
+    )
+    ratio_none = _run(_HoldPnLSpec(**common), 6)
+    # A deliberately WRONG daily reference on every bar — must be ignored because
+    # roll_future_ref / seg_fref are finite on every sizing point.
+    wrong_daily = np.full(6, 1.0, dtype=np.float64)
+    ratio_daily = _run(_HoldPnLSpec(**common, daily_future_ref=wrong_daily), 6)
+    np.testing.assert_array_equal(ratio_none, ratio_daily)
+
+
 # ── premium_notional unchanged when the new fields default ──────────────────
 def test_premium_notional_byte_identical_default() -> None:
     from _hold_pnl_oracle import (

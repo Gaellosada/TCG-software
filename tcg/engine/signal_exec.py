@@ -83,6 +83,7 @@ from tcg.types.signal import (
     Condition,
     ConstantOperand,
     CrossCondition,
+    HysteresisCondition,
     IndicatorOperand,
     InRangeCondition,
     Input,
@@ -97,6 +98,7 @@ from tcg.types.signal import (
     Signal,
     Trade,
 )
+from tcg.types.multipliers import collapse_index_point
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +395,10 @@ def _block_operands(block: Block) -> list[Operand]:
             out.append(cond.max)
         elif isinstance(cond, RollingCondition):
             out.append(cond.operand)
+        elif isinstance(cond, HysteresisCondition):
+            out.append(cond.operand)
+            out.append(cond.enter)
+            out.append(cond.exit)
         else:
             raise SignalValidationError(
                 f"unknown condition type: {type(cond).__name__}"
@@ -619,7 +625,29 @@ def _eval_condition(
         with np.errstate(invalid="ignore"):
             truth = _COMPARE_OPS[cond.op](a, b)
         truth = truth & ~nan_at_t
+        n = int(getattr(cond, "consecutive_days", 1) or 1)
+        if n > 1:
+            # N-consecutive-days (SPEC §5.5): fire only where the comparison
+            # has held for the trailing ``n`` bars (run-length >= n). A NaN bar
+            # is already False above, so a data gap breaks the streak. The
+            # default ``n == 1`` is routed AROUND this call so the historical
+            # single-bar compare stays byte-identical.
+            truth = _consecutive_true(truth.astype(np.bool_, copy=False), n)
         return truth.astype(np.bool_, copy=False), nan_at_t
+
+    if isinstance(cond, HysteresisCondition):
+        # Two-threshold "episode completion" pulse (SPEC §4.1). Scalar arm/fire
+        # state in a sequential per-bar loop (vectorised CANNOT express the
+        # latch). A NaN on any of the three operands holds the arm state and
+        # suppresses a fire on that bar (a data gap is not an episode edge).
+        x = values_by_key[k(cond.operand)]
+        en = values_by_key[k(cond.enter)]
+        ex = values_by_key[k(cond.exit)]
+        nan_at_t = np.isnan(x) | np.isnan(en) | np.isnan(ex)
+        out = _hysteresis_episode(x, en, ex, cond.direction)
+        # A fire bar can never be a NaN bar (the loop skips NaN bars), so
+        # ``out`` and ``nan_at_t`` never both hold at ``t``.
+        return out.astype(np.bool_, copy=False), nan_at_t
 
     if isinstance(cond, CrossCondition):
         a = values_by_key[k(cond.lhs)]
@@ -742,6 +770,80 @@ def _cross_since_reset(
             if seen >= n:
                 out[t] = True
                 seen = 0
+    return out
+
+
+def _consecutive_true(
+    truth: npt.NDArray[np.bool_],
+    n: int,
+) -> npt.NDArray[np.bool_]:
+    """True at bar ``t`` iff ``truth`` held for the trailing ``n`` bars.
+
+    Run-length test (SPEC §5.5 "two consecutive days"): ``out[t]`` is True iff
+    ``truth[t-n+1 .. t]`` are ALL True. Bars before ``t = n-1`` can never have a
+    full trailing window, so they are False. ``n <= 1`` returns ``truth``
+    unchanged (byte-identical to the single-bar comparison). Vectorised O(T)
+    trailing-sum over the boolean run; a False (incl. NaN-masked) bar zeroes the
+    window and so breaks the streak.
+    """
+    n = int(n)
+    T = truth.size
+    if n <= 1 or T == 0:
+        return truth
+    b = truth.astype(np.int64)
+    prefix = np.concatenate(([0], np.cumsum(b)))  # len T+1
+    idx = np.arange(T)
+    lo = idx - n + 1
+    windowsum = prefix[idx + 1] - prefix[np.maximum(lo, 0)]
+    out = (lo >= 0) & (windowsum == n)
+    return out.astype(np.bool_, copy=False)
+
+
+def _hysteresis_episode(
+    operand: npt.NDArray[np.float64],
+    enter: npt.NDArray[np.float64],
+    exit_: npt.NDArray[np.float64],
+    direction: str,
+) -> npt.NDArray[np.bool_]:
+    """Impulse on each COMPLETED two-threshold episode (SPEC §4.1).
+
+    Scalar per-bar state; semantics per bar, in order:
+
+      * ``direction == "up"``:   if (armed AND ``operand < exit``) FIRE + disarm;
+        else if ``operand > enter`` ARM. Models "hits ``enter`` then descends to
+        ``exit``".
+      * ``direction == "down"``: if (armed AND ``operand > exit``) FIRE + disarm;
+        else if ``operand < enter`` ARM. Models "hits ``enter`` then rises to
+        ``exit``".
+
+    A NaN on ANY of the three operands SKIPS the bar: the arm state is held and
+    no fire is emitted (a data gap is not read as an episode edge). After a fire
+    the latch re-arms on the next entry-threshold crossing, so every completed
+    episode emits its own impulse; an episode that never reaches ``exit`` never
+    fires. O(T), O(1) state.
+    """
+    T = operand.size
+    out = np.zeros(T, dtype=np.bool_)
+    up = direction == "up"
+    armed = False
+    for t in range(T):
+        x = operand[t]
+        e = enter[t]
+        xt = exit_[t]
+        if np.isnan(x) or np.isnan(e) or np.isnan(xt):
+            continue
+        if up:
+            if armed and x < xt:
+                out[t] = True
+                armed = False
+            elif x > e:
+                armed = True
+        else:
+            if armed and x > xt:
+                out[t] = True
+                armed = False
+            elif x < e:
+                armed = True
     return out
 
 
@@ -1135,6 +1237,67 @@ def _eval_block_activity(
     return active, any_nan
 
 
+def _block_chain_stages(
+    block: Block,
+    indicators: dict[str, IndicatorSpecInput],
+    inputs: dict[str, Input],
+    values_by_key: dict[tuple, npt.NDArray[np.float64]],
+    T: int,
+    cond_reset: npt.NDArray[np.bool_] | None = None,
+) -> (
+    tuple[
+        list[npt.NDArray[np.bool_]],
+        list[npt.NDArray[np.bool_]],
+        list[int],
+        npt.NDArray[np.bool_],
+    ]
+    | None
+):
+    """Build the per-GROUP (stage) ``(stage_truth, stage_nan, windows, any_nan)``
+    for a THEN-chain block WITHOUT running the single-candidate automaton, or
+    return ``None`` for a non-chain (zero-link / single-group) block.
+
+    This is EXACTLY the stage-preparation half of :func:`_eval_block_activity`'s
+    temporal branch, factored out so the automaton can be driven INSIDE the
+    sequential latch loop for a ``Block.reset_on_actual_exit`` entry — where the
+    ``chain_reset`` abort must be gated by live position (latch) state rather
+    than the raw exit-condition array. The non-``reset_on_actual_exit`` path
+    still calls :func:`_eval_block_activity` and is byte-identical.
+
+    ``cond_reset`` is threaded to each condition's :func:`_eval_condition` and is
+    consumed ONLY by a ``since_reset`` cross counter. It is the block's OWN bound
+    reset firing (``_reset_fire_for``) — deliberately NOT OR-ed with the exit
+    ``chain_reset`` (that raw-exit contamination is the very thing the flag
+    removes), so a ``reset_on_actual_exit`` block's counters are unaffected by
+    the exit condition.
+    """
+    groups_windows = _link_groups(block)
+    if groups_windows is None:
+        return None
+    groups, windows = groups_windows
+    cond_truth: list[npt.NDArray[np.bool_]] = []
+    cond_nan: list[npt.NDArray[np.bool_]] = []
+    any_nan = np.zeros(T, dtype=np.bool_)
+    for cond in block.conditions:
+        c_truth, c_nan = _eval_condition(
+            cond, indicators, inputs, values_by_key, T, cond_reset
+        )
+        cond_truth.append(c_truth)
+        cond_nan.append(c_nan)
+        any_nan |= c_nan
+    stage_truth: list[npt.NDArray[np.bool_]] = []
+    stage_nan: list[npt.NDArray[np.bool_]] = []
+    for grp in groups:
+        gt = np.ones(T, dtype=np.bool_)
+        gn = np.zeros(T, dtype=np.bool_)
+        for i in grp:
+            gt = gt & cond_truth[i]
+            gn = gn | cond_nan[i]
+        stage_truth.append(gt)
+        stage_nan.append(gn)
+    return stage_truth, stage_nan, windows, any_nan
+
+
 def _compound_clamped(
     net_step: npt.NDArray[np.float64],
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
@@ -1177,6 +1340,10 @@ def _compound_clamped(
             # account loses exactly its remaining equity (factor → 0). When
             # ``net_step[s] == 0`` the factor can only be ``<= 0`` via a
             # non-finite value; treat that as a full wipe (scale 0).
+            # CONTRACT: this literal 0.0 is the absorbing DEAD-leg marker that
+            # ``metrics._compute_periodic_rebalance`` keys on (== 0.0) so a wiped
+            # signal leg is not re-funded at a rebalance boundary. Keep it
+            # exactly 0.0 — clamping to an epsilon would silently break that.
             ratio[s + 1] = 0.0
             step_scale[s] = (-1.0 / net_step[s]) if net_step[s] != 0.0 else 0.0
             wiped = True
@@ -1371,8 +1538,10 @@ async def evaluate_signal(
     # lacks the capability is a wiring error (loud, not silent — the $-P&L path
     # cannot be run without the roll structure).
     # Each entry: (is_roll_aligned, roll_premium_aligned, roll_future_ref_aligned,
-    # mult_fut, mult_opt).  ``roll_future_ref_aligned`` is None + the multipliers are
-    # NaN for a premium_notional leg (they are read only in futures_notional mode).
+    # mult_fut, mult_opt, daily_future_ref_aligned).  ``roll_future_ref_aligned`` /
+    # ``daily_future_ref_aligned`` are None + the multipliers are NaN for a
+    # premium_notional leg (read only in futures_notional mode).  The last entry
+    # (P-OFFROLL-SIZING) is the per-date front-future reference for off-roll opens.
     hold_roll_info: dict[
         str,
         tuple[
@@ -1381,6 +1550,7 @@ async def evaluate_signal(
             "npt.NDArray[np.float64] | None",
             float,
             float,
+            "npt.NDArray[np.float64] | None",
         ],
     ] = {}
     if T > 0:
@@ -1399,11 +1569,15 @@ async def evaluate_signal(
                     f"fetcher to provide 'fetch_hold_roll_info' (fixed-contract "
                     f"dollar-P&L roll structure); none available"
                 )
-            # 3→4-tuple ripple (Guardrail Sign 4): the production fetcher returns
-            # ``(dates, is_roll, roll_premium, roll_future_ref)``; a legacy 3-tuple
-            # double (premium_notional only) still works — roll_future_ref → None.
+            # Tuple-arity ripple (Guardrail Sign 4): the production fetcher returns
+            # ``(dates, is_roll, roll_premium, roll_future_ref, daily_future_ref)``
+            # (P-OFFROLL-SIZING added the 5th).  Legacy 4-tuple (no daily) and 3-tuple
+            # (premium_notional only) still work — the missing arrays → None.
             _rres = await _roll_fetch(inp.instrument)
-            if len(_rres) == 4:
+            r_daily_fref: "npt.NDArray[np.float64] | None" = None
+            if len(_rres) == 5:
+                r_dates, r_is_roll, r_roll_premium, r_roll_fref, r_daily_fref = _rres
+            elif len(_rres) == 4:
                 r_dates, r_is_roll, r_roll_premium, r_roll_fref = _rres
             else:
                 r_dates, r_is_roll, r_roll_premium = _rres
@@ -1416,6 +1590,7 @@ async def evaluate_signal(
             )
             fut_mode = inp.instrument.sizing_mode == "futures_notional"
             roll_fref_aligned: "npt.NDArray[np.float64] | None" = None
+            daily_fref_aligned: "npt.NDArray[np.float64] | None" = None
             mult_fut = float("nan")
             mult_opt = float("nan")
             if fut_mode:
@@ -1426,17 +1601,140 @@ async def evaluate_signal(
                         index,
                         fill=np.nan,
                     )
+                # P-OFFROLL-SIZING: align the per-date front-future reference the same
+                # way; the engine uses it ONLY to size an off-roll open whose roll /
+                # segment reference is NaN (roll-aligned legs never read it).
+                if r_daily_fref is not None:
+                    daily_fref_aligned = _align_series_to_index(
+                        r_dates,
+                        np.asarray(r_daily_fref, dtype=np.float64),
+                        index,
+                        fill=np.nan,
+                    )
                 # Multipliers come from the fetcher side-channel (live-first /
                 # config fallback resolved in the core layer — the engine never
                 # reads dwh).  A NaN pair triggers the engine's tail carry-forward.
                 if _mult_fetch is not None:
                     mult_fut, mult_opt = await _mult_fetch(inp.instrument)
+                # GAP C: per-index-point sizing (m_opt := m_fut) when the leg opts
+                # out of the contract multiplier — legacy VIX option sizing.  No-op
+                # (byte-identical) when apply_contract_multiplier is True/None or
+                # when m_fut == m_opt (SPX/NDX).
+                mult_fut, mult_opt = collapse_index_point(
+                    mult_fut, mult_opt, inp.instrument.apply_contract_multiplier
+                )
             hold_roll_info[ref_id] = (
                 is_roll_aligned,
                 roll_premium_aligned,
                 roll_fref_aligned,
                 float(mult_fut),
                 float(mult_opt),
+                daily_fref_aligned,
+            )
+
+    # ── 3c. Delta-hedge overlay side-channel (F2, SPEC §5.5/§5.6) ──
+    #
+    # The SIGNAL analog of the portfolio path's ``_build_delta_hedge_arrays``.  A
+    # hold-mode option input carrying a ``delta_hedge`` config gets a VX1 futures
+    # HEDGE sized off its net delta, gated (VVIX>150), rebalanced daily, accrued
+    # into the SAME leg equity.  The core-layer fetcher exposes the RAW delta / VX1 /
+    # gate series + config via ``fetch_delta_hedge_series`` (the engine never reads
+    # dwh); we re-index each onto ``index`` EXACTLY as ``hold_roll_info`` does, apply
+    # ``gate_op`` vs ``gate_threshold`` (reusing ``_COMPARE_OPS``) and AND with
+    # ``~is_roll`` (SPEC §5.5 hedge-exit (3) "the call rolls"), then hand
+    # (factor, delta, VX1, active) to the hold spec in 6a.  No config ⇒ this loop
+    # skips the input entirely ⇒ the hold spec's hedge fields stay None ⇒ the F2
+    # accrual path is fully guarded (byte-identical to a non-hedged signal leg).
+    # Each entry: (factor, hedge_delta_aligned, hedge_price_aligned, hedge_active).
+    hold_hedge_info: dict[
+        str,
+        tuple[
+            float,
+            npt.NDArray[np.float64],
+            npt.NDArray[np.float64],
+            npt.NDArray[np.bool_],
+        ],
+    ] = {}
+    if T > 0:
+        _hedge_fetch = getattr(fetcher, "fetch_delta_hedge_series", None)
+        for ref_id in referenced_ids:
+            inp = inputs[ref_id]
+            if not (
+                isinstance(inp.instrument, InstrumentOptionStream)
+                and inp.instrument.hold_between_rolls
+                and inp.instrument.delta_hedge is not None
+            ):
+                continue
+            # GAP B: the hedge is sized off the option leg's OWN quantity in EITHER
+            # notional basis (the engine sizes the futures-notional case off
+            # seg_fref·mult_fut·mult_opt), so a futures_notional hedged leg is
+            # accepted — no longer rejected here.
+            if ref_id not in hold_roll_info:
+                # A hedged hold input MUST have its roll structure (the gate ANDs
+                # with ~is_roll); its absence is the same loud wiring error the
+                # roll-info path raises above.
+                raise SignalDataError(
+                    f"input {ref_id!r}: delta_hedge requires the hold-mode roll "
+                    f"structure (is_roll) which is unavailable"
+                )
+            if _hedge_fetch is None:
+                raise SignalDataError(
+                    f"input {ref_id!r}: delta_hedge option requires the fetcher to "
+                    f"provide 'fetch_delta_hedge_series' (delta/VX1/gate arrays); "
+                    f"none available"
+                )
+            (
+                (dh_dates, dh_vals),
+                (vx_dates, vx_vals),
+                (gate_dates, gate_vals),
+                hedge_factor,
+                gate_threshold,
+                gate_op,
+            ) = await _hedge_fetch(inp.instrument)
+            hedge_delta = _align_series_to_index(
+                np.asarray(dh_dates, dtype=np.int64),
+                np.asarray(dh_vals, dtype=np.float64),
+                index,
+                fill=np.nan,
+            )
+            if not np.any(np.isfinite(hedge_delta)):
+                raise SignalDataError(
+                    f"input {ref_id!r}: delta-hedge got an all-NaN option delta "
+                    f"series (no stored delta on the held contract) — the hedge "
+                    f"cannot be sized"
+                )
+            hedge_price = _align_series_to_index(
+                np.asarray(vx_dates, dtype=np.int64),
+                np.asarray(vx_vals, dtype=np.float64),
+                index,
+                fill=np.nan,
+            )
+            gate_level = _align_series_to_index(
+                np.asarray(gate_dates, dtype=np.int64),
+                np.asarray(gate_vals, dtype=np.float64),
+                index,
+                fill=np.nan,
+            )
+            if gate_op not in _COMPARE_OPS:
+                raise SignalDataError(
+                    f"input {ref_id!r}: delta-hedge unknown gate_op {gate_op!r}"
+                )
+            with np.errstate(invalid="ignore"):
+                gate_on = _COMPARE_OPS[gate_op](gate_level, float(gate_threshold))
+            gate_on = gate_on & np.isfinite(gate_level)
+            # ``hold_roll_info[ref_id][0]`` is ``is_roll_aligned`` (float 0/1 on the
+            # union axis).  ``pause_on_roll`` (default True) turns the hedge OFF on a
+            # roll bar (SPEC §5.5 exit (3)); False hedges THROUGH the roll.
+            is_roll_aligned = hold_roll_info[ref_id][0]
+            if inp.instrument.delta_hedge.pause_on_roll:
+                hedge_active = gate_on & (is_roll_aligned <= 0.5)
+            else:
+                hedge_active = gate_on
+            hold_hedge_info[ref_id] = (
+                float(hedge_factor),
+                hedge_delta,
+                hedge_price,
+                hedge_active.astype(np.bool_),
             )
 
     if T == 0:
@@ -1519,9 +1817,43 @@ async def evaluate_signal(
                     acc = fire if acc is None else (acc | fire)
         entry_chain_reset[entry.id] = acc
 
+    # Entries opting into legacy §4.2 "since last ACTUAL exit" reset semantics
+    # (``Block.reset_on_actual_exit``): a THEN-chain entry that IS targeted by an
+    # exit runs its temporal automaton INSIDE the sequential latch loop, so the
+    # ``chain_reset`` abort can be gated by live position (latch) state instead
+    # of the raw exit-condition array. Such blocks are EXCLUDED from the
+    # vectorised ``entry_truth`` precompute here (their fire is computed per-bar
+    # in step (b.5) below). ``_block_chain_stages`` returns None for a non-chain
+    # block, so ``reset_on_actual_exit`` on a plain CNF entry is a no-op (it
+    # falls through to the historical path). ``entry_chain_reset[id] is not
+    # None`` == "at least one exit targets this entry".
+    seq_gated_stages: dict[
+        str,
+        tuple[
+            list[npt.NDArray[np.bool_]],
+            list[npt.NDArray[np.bool_]],
+            list[int],
+            npt.NDArray[np.bool_],
+        ],
+    ] = {}
+    for blk in entry_blocks:
+        if blk.reset_on_actual_exit and entry_chain_reset[blk.id] is not None:
+            stages = _block_chain_stages(
+                blk, indicators, inputs, values_by_key, T, _reset_fire_for(blk)
+            )
+            if stages is not None:
+                seq_gated_stages[blk.id] = stages
+
     entry_truth: dict[str, npt.NDArray[np.bool_]] = {}
     entry_nan: dict[str, npt.NDArray[np.bool_]] = {}
     for blk in entry_blocks:
+        if blk.id in seq_gated_stages:
+            # In-loop automaton is authoritative for the fire; the precomputed
+            # ``entry_truth`` is never read for this block (steps (a)/(c) guard
+            # on membership). Still expose its NaN mask for ``nan_poison``.
+            entry_truth[blk.id] = np.zeros(T, dtype=np.bool_)
+            entry_nan[blk.id] = seq_gated_stages[blk.id][3]
+            continue
         active, blk_nan = _eval_block_activity(
             blk,
             indicators,
@@ -1622,9 +1954,20 @@ async def evaluate_signal(
     trade_opens: dict[str, list[int]] = {b.id: [] for b in entry_blocks}
     trade_closes: dict[str, list[tuple[int, str]]] = {b.id: [] for b in entry_blocks}
 
+    # In-loop single-candidate automaton state for ``reset_on_actual_exit``
+    # THEN-chain entries: ``(stage, tau)`` per block, identical semantics to
+    # :func:`_sequence_active` but the abort (step 2b) is driven by the ACTUAL
+    # position-close set (``closed_this_bar``), not the raw exit condition.
+    seq_stage: dict[str, int] = {bid: -1 for bid in seq_gated_stages}
+    seq_tau: dict[str, int] = {bid: -1 for bid in seq_gated_stages}
+
     for t in range(T):
         # --- (a) record fired-indices ---
         for b in entry_blocks:
+            # ``reset_on_actual_exit`` entries fire from the in-loop automaton
+            # (step (b.5)); their ``entry_fired`` is recorded there.
+            if b.id in seq_gated_stages:
+                continue
             if bool(entry_truth[b.id][t]):
                 entry_fired[b.id].append(t)
         for b in exit_blocks:
@@ -1637,6 +1980,10 @@ async def evaluate_signal(
                 reset_fired[b.id].append(t)
 
         # --- (b) clear pass: exits clear every targeted entry latch ---
+        # ``closed_this_bar`` collects every entry whose OPEN position was
+        # actually closed by an exit at this bar — the real "since last exit"
+        # event that gates a ``reset_on_actual_exit`` entry's arm abort (b.5).
+        closed_this_bar: set[str] = set()
         for b in exit_blocks:
             if not bool(exit_truth[b.id][t]):
                 continue
@@ -1659,6 +2006,7 @@ async def evaluate_signal(
                 if target_entry and latched.get(target_entry.id, False):
                     latched[target_entry.id] = False
                     trade_closes[target_entry.id].append((t, b.id))
+                    closed_this_bar.add(target_entry.id)
                     cleared_any = True
             if cleared_any:
                 # Effective exit at t (cleared ≥1 latch). Record once.
@@ -1673,11 +2021,57 @@ async def evaluate_signal(
                     block_arm[b.id] = False
                     arm_countdown[b.id] = bound_count[b.id]
 
+        # --- (b.5) in-loop automaton for ``reset_on_actual_exit`` THEN-chain
+        # entries. Runs AFTER the clear pass (so the abort sees this bar's
+        # ACTUAL closes) and BEFORE the entry pass (so the fire it produces
+        # drives the latch). Per-bar order mirrors :func:`_sequence_active`
+        # EXACTLY (expire → NaN-abort → abort → advance/fire → arm); the only
+        # difference is that step 2b's abort is the real position-close
+        # (``closed_this_bar``), not the raw exit condition.
+        seq_fire_now: dict[str, bool] = {}
+        for bid, (stg_truth, stg_nan, stg_win, _stg_nanmask) in seq_gated_stages.items():
+            m = len(stg_truth)
+            st = seq_stage[bid]
+            ta = seq_tau[bid]
+            fired = False
+            # 1. expire: window to the next stage elapsed.
+            if 0 <= st < m - 1 and (t - ta) > stg_win[st]:
+                st, ta = -1, -1
+            # 2. NaN-abort: NaN on the awaited next stage's operands.
+            if 0 <= st < m - 1 and bool(stg_nan[st + 1][t]):
+                st, ta = -1, -1
+            # 2b. actual-exit abort: ONLY when an exit actually closed this
+            # entry's OPEN position at t (legacy "since last exit"), NOT on
+            # every bar the exit condition merely holds.
+            if bid in closed_this_bar:
+                st, ta = -1, -1
+            # 3. advance against the PRE-ARM tau (strictly-after >= 1 bar).
+            if 0 <= st < m - 1:
+                nxt = st + 1
+                if bool(stg_truth[nxt][t]) and 1 <= (t - ta) <= stg_win[st]:
+                    st, ta = nxt, t
+                    if st == m - 1:
+                        fired = True
+                        st, ta = -1, -1  # impulse: consume, ready to re-detect.
+            # 4. arm head (latest-start) — AFTER advance.
+            if bool(stg_truth[0][t]):
+                st, ta = 0, t
+            seq_stage[bid] = st
+            seq_tau[bid] = ta
+            seq_fire_now[bid] = fired
+            if fired:
+                entry_fired[bid].append(t)
+
         # --- (c) entry pass: declaration order; leverage allowed ---
         # Bound entries gated by their own per-block arm. Unbound entries
         # short-circuit via membership (unconditional firing, no gate).
         for b in entry_blocks:
-            if not bool(entry_truth[b.id][t]):
+            # ``reset_on_actual_exit`` entries take their fire from the in-loop
+            # automaton (b.5); all others read the precomputed ``entry_truth``.
+            if b.id in seq_gated_stages:
+                if not seq_fire_now[b.id]:
+                    continue
+            elif not bool(entry_truth[b.id][t]):
                 continue
             if b.id in block_arm and not block_arm[b.id]:
                 continue
@@ -1782,6 +2176,21 @@ async def evaluate_signal(
         if cap is not None:
             lo_cap, hi_cap = float(cap[0]), float(cap[1])
             pos = np.clip(pos, lo_cap, hi_cap)
+        # Feature — OPTIONAL per-input SIGNAL LAG (legacy real-time D-1 timing,
+        # ``minusBusinessDays(1)``). Shift the RESOLVED net position (post-cap)
+        # FORWARD by ``signal_lag_days`` bars so the exposure HELD on bar t is
+        # the regime/signal state resolved from bar ``t - lag`` ("act on
+        # yesterday's signal"). The leading ``lag`` bars have no prior state →
+        # FLAT (0.0); ``lag >= T`` yields an all-flat leg (no out-of-range
+        # index). Applied BEFORE the no-quote NaN mask so a gap bar still zeroes
+        # its OWN bar. ``signal_lag_days == 0`` (the default) skips the shift
+        # entirely → BYTE-IDENTICAL to the historical same-bar path.
+        lag = int(getattr(inp, "signal_lag_days", 0) or 0)
+        if lag > 0:
+            shifted = np.zeros_like(pos)
+            if lag < pos.shape[0]:
+                shifted[lag:] = pos[:-lag]
+            pos = shifted
         pos = np.where(nan_poison[ref_id], 0.0, pos)
 
         price_label: str | None = None
@@ -1832,6 +2241,7 @@ async def evaluate_signal(
                 roll_fref_arr,
                 mult_fut,
                 mult_opt,
+                daily_fref_arr,
             ) = hold_roll_info[ref_id]
             # Direction is the SIGN of the net latched position; ``nav_times`` is
             # the SIZE (a separate field, may exceed the |weight| the sign carries).
@@ -1846,6 +2256,11 @@ async def evaluate_signal(
             # governs (same as the price path's net position).
             nonzero = pos_sign[pos_sign != 0.0]
             leg_sign = float(nonzero[0]) if nonzero.size else 1.0
+            # Delta-hedge overlay (F2): attach the resolved (factor, delta, VX1,
+            # active) arrays built in 3c so the VX1 hedge accrues into THIS leg's
+            # equity.  Absent config ⇒ all None ⇒ the F2 accrual path in
+            # ``_compound_with_hold`` is fully guarded (byte-identical).
+            _hedge = hold_hedge_info.get(ref_id)
             hold_spec = _HoldPnLSpec(
                 ref_id=ref_id,
                 sign=leg_sign,
@@ -1856,8 +2271,25 @@ async def evaluate_signal(
                 pos_active=pos != 0.0,
                 sizing_mode=inp.instrument.sizing_mode,
                 roll_future_ref=roll_fref_arr,
+                daily_future_ref=daily_fref_arr,
                 mult_fut=mult_fut,
                 mult_opt=mult_opt,
+                hedge_factor=(_hedge[0] if _hedge is not None else None),
+                hedge_delta=(_hedge[1] if _hedge is not None else None),
+                hedge_price=(_hedge[2] if _hedge is not None else None),
+                hedge_active=(_hedge[3] if _hedge is not None else None),
+                # rebalance/cap are read off the (non-None-when-hedged) config spec;
+                # the byte-identical defaults apply on the unhedged path.
+                rebalance_interval_days=(
+                    inp.instrument.delta_hedge.rebalance_interval_days
+                    if _hedge is not None
+                    else 1
+                ),
+                qty_cap_mult=(
+                    inp.instrument.delta_hedge.qty_cap_mult
+                    if _hedge is not None
+                    else 10.0
+                ),
             )
         elif price_values is not None and T >= 2:
             prev_price = price_values[:-1]

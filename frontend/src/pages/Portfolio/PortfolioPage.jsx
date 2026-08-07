@@ -158,6 +158,11 @@ function PortfolioPage({ mode = 'pure' }) {
     // SELECT-AND-HOLD (fixed-contract dollar-P&L) — option_stream legs only.
     hold_between_rolls: l.hold_between_rolls ?? false,
     nav_times: l.nav_times ?? 1.0,
+    // Per-instrument market-data source — PERSISTED (part of the saved spec).
+    // Emitted ONLY when 'v2' so a leg untouched on this feature stays
+    // byte-identical to a legacy doc (the autosave dirty-diff snapshots the raw
+    // stored legs); absent reads back as v1 via coerceDataSource.
+    ...(l.dataSource === 'v2' ? { dataSource: 'v2' } : {}),
     // Option hold-mode SIZING pass-through. These were dropped here, so a
     // portfolio option leg ALWAYS fell back to the backend default
     // ``premium_notional`` — which wipes out a low-premium (e.g. 10Δ) leg
@@ -174,6 +179,10 @@ function PortfolioPage({ mode = 'pure' }) {
     ...(l.type === 'portfolio'
       ? { portfolioId: l.portfolioId || null, portfolioName: l.portfolioName || null }
       : {}),
+    // Cash-rate leg (F4): persist its rate source under ``cash_rate`` (snake_case
+    // CashRateSpec shape). Emitted ONLY for cash legs so every other leg's wire
+    // shape stays byte-identical (autosave dirty-diff parity).
+    ...(l.type === 'cash_rate' ? { cash_rate: l.cash_rate || null } : {}),
   })), []);
 
   // Save current portfolio state to backend in the selected category.
@@ -471,6 +480,27 @@ function PortfolioPage({ mode = 'pure' }) {
     queryClient.invalidateQueries({
       queryKey: queryKeys.persistence.portfolios.detail(portfolio.persistedId),
     });
+    // AND patch the LIST cache entry for this doc with the just-saved payload.
+    // The working list (``portfolios`` state, synced from this query) is what
+    // ``handleSelectPersisted`` → ``loadFromPersisted`` reads when the user
+    // re-opens a portfolio (their "navigate away and back"). Without this the
+    // list retained the PRE-EDIT doc, so re-opening silently reverted the saved
+    // change — including a leg's ``dataSource:'v2'`` — even though the backend
+    // held the new version (the reported bug). ``setQueryData`` is a PURE cache
+    // update (no refetch → no flicker), so unlike a list invalidation it is safe
+    // on every save, manual AND debounced. Keys off ``body.category`` (the
+    // category the doc was just saved under) so the correct category list is
+    // patched; the timestamps/type/locked fields are preserved from the prior
+    // entry (only editable content changed here).
+    const savedBody = JSON.parse(payloadStr);
+    queryClient.setQueryData(
+      queryKeys.persistence.portfolios.list(savedBody.category || portfolio.persistedCategory),
+      (prev) => (Array.isArray(prev)
+        ? prev.map((p) => (p.id === portfolio.persistedId
+          ? { ...p, ...savedBody, id: portfolio.persistedId }
+          : p))
+        : prev),
+    );
   }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked, portfolio.markSaved, queryClient]);
 
   const {
@@ -762,6 +792,9 @@ function PortfolioPage({ mode = 'pure' }) {
 
         {/* ── Configuration bar ── */}
         <div className={`${styles.section} ${styles.configBar}`}>
+          {/* Market-data source is chosen per instrument at add time (in the Add
+              Holding picker) and shown read-only in the Holdings table — there is
+              no page-level default and no run-level source. */}
           <div className={styles.configRow}>
             {/* Rebalance frequency — part of the saved portfolio definition,
                 so it is disabled (via the native fieldset) when locked.
@@ -770,7 +803,7 @@ function PortfolioPage({ mode = 'pure' }) {
             <fieldset
               className={`${styles.configItem} ${styles.editorFieldset}`}
               disabled={portfolio.persistedLocked}
-              title="Periodically reset allocations to target weights. Without rebalancing, positions drift as prices move."
+              title="Periodically reset allocations to target weights. Without rebalancing, positions drift as prices move. If a holding falls to zero and cannot recover (a worthless option, a wiped signal, a bankrupt instrument) it is held at zero and its weight is spread across the surviving holdings, concentrating them. Daily rebalancing is not supported when a hold-mode option leg is present."
             >
               <label className={styles.configLabel} htmlFor="rebalance-select">
                 Rebalance
@@ -807,16 +840,21 @@ function PortfolioPage({ mode = 'pure' }) {
             {/* Compute button — a single fresh POST to /portfolio/compute; the
                 backend serves from its own cache transparently. Reads
                 "Recompute" while the active config is already cached. */}
+            {/* Disabled while ranges resolve so Compute can never fire with a
+                STALE window: switching source (v1↔v2) re-resolves coverage
+                asynchronously, and v2's option floor (~2011) differs from v1's
+                (~2005) — computing mid-resolve would send the old start and trip
+                the v2 E7 floor error for a run the settled window would serve. */}
             <button
               className={styles.computeBtn}
               type="button"
               onClick={portfolio.handleCalculate}
-              disabled={portfolio.legs.length === 0 || portfolio.loading}
+              disabled={portfolio.legs.length === 0 || portfolio.loading || portfolio.rangesLoading}
               data-testid="portfolio-compute-btn"
             >
               {portfolio.loading
                 ? 'Computing...'
-                : (showRecomputeLabel ? 'Recompute' : 'Compute')}
+                : (portfolio.rangesLoading ? 'Loading range…' : (showRecomputeLabel ? 'Recompute' : 'Compute'))}
             </button>
           </div>
 
@@ -827,12 +865,32 @@ function PortfolioPage({ mode = 'pure' }) {
               maxDate={portfolio.overlapRange?.end || null}
               startDate={portfolio.startDate}
               endDate={portfolio.endDate}
+              recommendedStart={portfolio.overlapRange?.recommendedStart || null}
+              bands={portfolio.overlapRange?.segments || []}
               disabled={portfolio.loading || portfolio.rangesLoading}
               onChange={({ startDate, endDate }) => {
                 portfolio.setStartDate(startDate);
                 portfolio.setEndDate(endDate);
               }}
             />
+            {(() => {
+              // Non-blocking cadence warning: the default seeds at
+              // recommendedStart, so this only fires when the user deliberately
+              // drags the window START into the pre-cliff lower-cadence era.
+              const rec = portfolio.overlapRange?.recommendedStart;
+              const rawStart = portfolio.overlapRange?.start;
+              const effSelStart = portfolio.startDate || rec;
+              const inLowerCadence =
+                rec && rawStart && rec > rawStart && effSelStart && effSelStart < rec;
+              if (!inLowerCadence) return null;
+              return (
+                <div className={styles.cadenceWarning} role="note">
+                  Window includes a lower-cadence span (~4 rolls/yr) before{' '}
+                  {rec} — the selected cycle did not list its full monthly
+                  cadence that early.
+                </div>
+              );
+            })()}
           </div>
         </div>
 

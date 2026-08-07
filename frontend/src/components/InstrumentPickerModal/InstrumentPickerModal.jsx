@@ -3,7 +3,13 @@ import { listCollections, listInstruments, getAvailableCycles } from '../../api/
 import { getOptionRoots } from '../../api/options';
 import { createBasket } from '../../api/persistence';
 import { useBasketsList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
-import OptionStreamForm, { buildDefaultOptionStream, validateOptionStream } from '../OptionStreamForm';
+import OptionStreamForm, {
+  buildDefaultOptionStream,
+  validateOptionStream,
+  deriveCycleOptions,
+  pickDefaultCycle,
+} from '../OptionStreamForm';
+import DataSourceSelector from '../DataSourceSelector';
 import styles from './InstrumentPickerModal.module.css';
 
 /**
@@ -19,8 +25,15 @@ const CATEGORY_CONFIG = [
   { key: 'assets', label: 'Assets', color: 'var(--cat-assets)', collections: ['ETF', 'FOREX', 'FUND'] },
   { key: 'futures', label: 'Futures', color: 'var(--cat-futures)', dynamicFutures: true },
   { key: 'options', label: 'Options', color: 'var(--cat-options)', dynamicOptions: true },
+  { key: 'rate', label: 'Rate', color: 'var(--cat-rate, #14b8a6)', dynamicRate: true },
   { key: 'baskets', label: 'Baskets', color: 'var(--cat-baskets, #8b5cf6)', dynamicBaskets: true },
 ];
+
+// The v2 rate collection surfaced by the "Rate" tab. Rates are a v2-ONLY object
+// (the AssetClass enum has no RATE member), so the tab hardcodes the collection
+// and always loads its instruments from v2 regardless of the modal's catalog
+// source. Selecting one emits a ``cash_rate`` descriptor (see handleSelectRate).
+const RATE_COLLECTION = 'RATE';
 
 const BASKET_ASSET_CLASSES = [
   { key: 'future', label: 'Future' },
@@ -102,6 +115,11 @@ export default function InstrumentPickerModal({
   title,
   hiddenCategories = [],
   allowBaskets = false,
+  // Opt-in for the "Rate" category (default-deny, like Baskets). Only the
+  // Portfolio Add-Holding picker passes true — a ``cash_rate`` leg is a
+  // portfolio-only concept. Selecting a rate instrument emits a ``cash_rate``
+  // descriptor (v2-only) that legConfig maps to a cash_rate leg.
+  allowRate = false,
   // Restrict the option-stream picker (the direct Options drill-down) to a
   // subset of streams.  The Portfolio add-holding flow passes ['mid'] so an
   // option leg is the option PRICE only — iv/greeks/volume are SIGNAL-level
@@ -120,6 +138,10 @@ export default function InstrumentPickerModal({
   // requires it). Forwarded to OptionStreamForm as ``holdRequired``. Never passed
   // to the basket-leg sub-picker (basket held books are unsupported).
   optionHoldRequired = false,
+  // PORTFOLIO option price legs: surface the delta-hedge overlay controls (F2).
+  // Forwarded to OptionStreamForm as ``showDeltaHedge``. Default false so every
+  // other picker surface (basket legs, Data page) never shows the hedge block.
+  showOptionDeltaHedge = false,
   // Optional reference date (YYYY-MM-DD string or Date) forwarded to
   // OptionStreamForm as ``referenceDate`` — the date at which the implied-
   // leverage readout probes the representative (strike, premium). Falls back to
@@ -140,6 +162,21 @@ export default function InstrumentPickerModal({
   // Literal[front_month, end_of_month] with no ``rank``), so they leave this
   // false and never surface nth_nearest (offering it there would 422 at run).
   allowNthNearest = false,
+  // PER-INSTRUMENT data source (opt-in). When true, a compact market-data source
+  // selector renders at the top of the modal so a source can be chosen AT
+  // creation instead of defaulting to v1 until the row is edited. It seeds from
+  // ``defaultSource`` and stamps ``data_source: 'v2'`` onto the emitted
+  // descriptor when v2 (never for v1 — byte-identity is preserved exactly as the
+  // per-row selectors do). Default false so every existing caller (Data /
+  // Signals inputs / Indicators series, which already carry their own per-row
+  // selector) is byte-unchanged. NEVER attached to a ``basket`` descriptor: a
+  // basket carries source PER LEG, so a single modal-level source is meaningless
+  // there and the selector is hidden inside the composer.
+  showDataSourceSelector = false,
+  // The value the source selector seeds to on open ('v1' | 'v2'). Callers pass
+  // their page-level default (or, when editing, the entity's own source) so the
+  // modal opens reflecting the effective source rather than a hard v1.
+  defaultSource = 'v1',
 }) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -176,6 +213,25 @@ export default function InstrumentPickerModal({
   // Basket composer state — see Composer state machine below.
   const [inBasketComposer, setInBasketComposer] = useState(false);
 
+  // Rate tab state — the v2 RATE series list (loaded from v2 on open when the
+  // Rate tab is visible; see the loader effect below).
+  const [rateInstruments, setRateInstruments] = useState([]);
+  const [rateLoading, setRateLoading] = useState(false);
+
+  // Per-instrument data source chosen in this modal (opt-in; see the
+  // ``showDataSourceSelector`` prop). 'v1' | 'v2'. Seeded from ``defaultSource``
+  // on each open by the effect below.
+  const [source, setSource] = useState(defaultSource === 'v2' ? 'v2' : 'v1');
+
+  // The warehouse the catalog (collections / instruments / cycles / option
+  // roots) is loaded from. Gated on ``showDataSourceSelector`` so a page that
+  // does NOT opt into the selector always loads the v1 catalog — byte-identical
+  // to before, regardless of ``source`` state. When the selector IS shown, the
+  // offered catalog tracks the user's chosen source (v1 ⇄ v2), so v2 surfaces
+  // only what v2 actually serves (no VIX/forex/gold) and auto-corrects if v2
+  // coverage later widens.
+  const catalogSource = showDataSourceSelector ? source : 'v1';
+
   const overlayRef = useRef(null);
 
   const invalidate = useInvalidatePersistence();
@@ -188,9 +244,15 @@ export default function InstrumentPickerModal({
       // level pickers leave it false so the composer is not surfaced
       // in contexts where a basket descriptor is not a valid selection.
       if (c.key === 'baskets' && !allowBaskets) return false;
+      // Default-deny: the rate category needs explicit opt-in (Portfolio only).
+      if (c.key === 'rate' && !allowRate) return false;
       return true;
     }),
-    [hiddenCategories, allowBaskets],
+    [hiddenCategories, allowBaskets, allowRate],
+  );
+  const rateVisible = useMemo(
+    () => visibleCategories.some((c) => c.key === 'rate'),
+    [visibleCategories],
   );
   const optionsVisible = useMemo(
     () => visibleCategories.some((c) => c.key === 'options'),
@@ -239,19 +301,19 @@ export default function InstrumentPickerModal({
 
     (async () => {
       try {
-        const collections = await listCollections();
+        const collections = await listCollections(null, { source: catalogSource });
         if (cancelled) return;
         setAllCollections(collections);
 
         setInstrumentsLoading(true);
         const nonFut = CATEGORY_CONFIG
-          .filter((c) => !c.dynamicFutures && !c.dynamicOptions && !c.dynamicBaskets)
+          .filter((c) => !c.dynamicFutures && !c.dynamicOptions && !c.dynamicBaskets && !c.dynamicRate)
           .flatMap((c) => c.collections)
           .filter((c) => collections.includes(c));
 
         const results = await Promise.all(
           nonFut.map(async (coll) => {
-            const res = await listInstruments(coll, { skip: 0, limit: 500 });
+            const res = await listInstruments(coll, { skip: 0, limit: 500, source: catalogSource });
             return [coll, res.items || []];
           }),
         );
@@ -274,7 +336,9 @@ export default function InstrumentPickerModal({
     })();
 
     return () => { cancelled = true; };
-  }, [isOpen]);
+    // ``catalogSource`` is a dep so a v1⇄v2 toggle (when the selector is shown)
+    // RELOADS the collections + instruments for the newly-chosen warehouse.
+  }, [isOpen, catalogSource]);
 
   /* ── Load option roots when modal opens ──
    *
@@ -288,7 +352,7 @@ export default function InstrumentPickerModal({
     let cancelled = false;
     setOptionRootsLoading(true);
     setOptionRootsError(null);
-    getOptionRoots()
+    getOptionRoots({ source: catalogSource })
       .then((resp) => {
         if (cancelled) return;
         setOptionRoots(resp.roots || []);
@@ -301,7 +365,73 @@ export default function InstrumentPickerModal({
         setOptionRootsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [isOpen, optionsVisible, basketsVisible]);
+    // ``catalogSource`` dep: a source toggle reloads the Options tab's roots so
+    // v2 offers only its real option series.
+  }, [isOpen, optionsVisible, basketsVisible, catalogSource]);
+
+  /* ── Load the RATE series list when the Rate tab is visible ──
+   *
+   * Rates are a v2-ONLY object, so this ALWAYS loads from v2 regardless of the
+   * modal's ``catalogSource`` (the v1 catalog does not serve RATE). Gated on the
+   * Rate tab being visible (portfolio opt-in) so no other picker surface pays
+   * for this fetch. */
+  useEffect(() => {
+    if (!isOpen || !rateVisible) return undefined;
+    let cancelled = false;
+    setRateLoading(true);
+    listInstruments(RATE_COLLECTION, { skip: 0, limit: 100, source: 'v2' })
+      .then((res) => {
+        if (cancelled) return;
+        setRateInstruments(res.items || []);
+        setRateLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRateInstruments([]);
+        setRateLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isOpen, rateVisible]);
+
+  /* ── Self-heal the option-stream root when roots load / change ──
+   *
+   * ROOT-CAUSE FIX for the "Pick a root." bug. ``handleEnterOptionsDrillDown``
+   * builds the default option stream ONCE from whatever ``optionRoots`` holds at
+   * click time. If roots hadn't loaded yet (cold open) or were mid-reload after a
+   * v1⇄v2 source toggle, that default is built with an EMPTY roots list →
+   * ``collection: ''``, and nothing repaired it when roots later arrived →
+   * ``validateOptionStream`` returns NO_ROOT ("Pick a root.") forever. Worse, with
+   * a SINGLE root (v2's OPT_SP_500) the native <select> visually shows that sole
+   * root while React state stays '' (the browser auto-shows the only option), and
+   * re-picking the already-displayed option fires no change event — so the user
+   * cannot repair it by hand.
+   *
+   * This effect makes the default self-heal: whenever the loaded roots change
+   * (incl. after a source toggle) while the options drill-down is open, if the
+   * current value's collection is empty or no longer valid for the loaded roots,
+   * snap it to the first available root — preserving every other user setting and
+   * re-deriving a cycle valid for the new root. Idempotent: once the collection is
+   * valid it returns the previous value unchanged (referential no-op → no loop). */
+  useEffect(() => {
+    if (!inOptionsDrillDown) return;
+    if (optionRootsLoading) return;
+    if (!optionRoots || optionRoots.length === 0) return;
+    setOptionStreamValue((prev) => {
+      // No value yet → build a full default against the now-loaded roots.
+      if (!prev) return buildDefaultOptionStream({ availableRoots: optionRoots });
+      const collectionValid = optionRoots.some((r) => r.collection === prev.collection);
+      if (collectionValid) return prev; // valid → leave the user's choice intact.
+      // Empty or stale collection (cold-open race / post-source-toggle): snap to
+      // the first available root, keep every other field, and re-derive a cycle
+      // that the new root actually offers (keep the current cycle if still valid).
+      const nextRoot = optionRoots[0];
+      const opts = deriveCycleOptions(nextRoot.cycles, null);
+      const validCycleValues = opts.map((o) => o.value);
+      const curCycle = prev.cycle ?? null;
+      const nextCycle = validCycleValues.includes(curCycle) ? curCycle : pickDefaultCycle(opts);
+      return { ...prev, collection: nextRoot.collection, cycle: nextCycle };
+    });
+  }, [inOptionsDrillDown, optionRoots, optionRootsLoading]);
 
   /* (Saved baskets are loaded by the useBasketsList queries declared above.) */
 
@@ -312,11 +442,22 @@ export default function InstrumentPickerModal({
       return;
     }
     let cancelled = false;
-    getAvailableCycles(selectedFutCollection)
+    getAvailableCycles(selectedFutCollection, { source: catalogSource })
       .then((cycles) => { if (!cancelled) setAvailableCycles(cycles); })
       .catch(() => { if (!cancelled) setAvailableCycles([]); });
     return () => { cancelled = true; };
-  }, [selectedFutCollection]);
+  }, [selectedFutCollection, catalogSource]);
+
+  /* ── Seed the per-instrument source from ``defaultSource`` on OPEN ──
+   *
+   * Keyed on ``[isOpen]`` alone (NOT defaultSource) so a parent re-render that
+   * hands a fresh ``defaultSource`` mid-session does not clobber a choice the
+   * user just made in the modal — we seed exactly once per open, mirroring the
+   * ``initialConfig`` seed effect below. */
+  useEffect(() => {
+    if (isOpen) setSource(defaultSource === 'v2' ? 'v2' : 'v1');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   /* ── ESC to close ── */
   useEffect(() => {
@@ -339,6 +480,7 @@ export default function InstrumentPickerModal({
       setInOptionsDrillDown(false);
       setOptionStreamValue(null);
       setInBasketComposer(false);
+      setRateInstruments([]);
     }
   }, [isOpen]);
 
@@ -389,6 +531,33 @@ export default function InstrumentPickerModal({
     [onClose],
   );
 
+  /* ── Source toggle (v1 ⇄ v2) ──
+   *
+   * Fired ONLY by the DataSourceSelector's user interaction — never by the
+   * open-seed effect (that calls setSource directly), so there is no race with
+   * the initialConfig/open seeding. Beyond flipping the source (which the
+   * catalog effects observe via ``catalogSource`` and reload), it unwinds the
+   * FUTURES drill-down to the category list: a futures drill-down target valid
+   * in one warehouse (e.g. FUT_VIX under v1) may not exist in the other, so a
+   * stale futures drill-down must not linger across a switch. Resets the same
+   * continuous defaults the "Back" handlers do.
+   *
+   * The OPTIONS drill-down is deliberately KEPT in place across a toggle (the
+   * source selector lives inside it, so bouncing the user back to the grid on
+   * every switch is jarring). The self-heal effect above re-snaps
+   * ``optionStreamValue.collection`` to a root valid for the newly-chosen source
+   * once its roots reload — preserving option_type / selection / stream — so
+   * staying in the drill-down is safe. */
+  const handleSourceChange = useCallback((next) => {
+    setSource(next);
+    setSelectedFutCollection(null);
+    setAdjustment('none');
+    setCycle('');
+    setRollOffset(2);
+    setStrategy('front_month');
+    setRank(3);
+  }, []);
+
   // In readOnly (view-only) the modal must NEVER emit. The config-step confirm
   // CTAs are hidden, but drill-down "Back" stays enabled (re-pick is preserved
   // for EDITABLE edit mode per Decision D1), so a readOnly modal could navigate
@@ -397,12 +566,37 @@ export default function InstrumentPickerModal({
   // readOnly ⇒ onSelect never fires; create/editable flows are unaffected.
   const emitSelect = useCallback((descriptor) => {
     if (readOnly) return;
-    onSelect(descriptor);
-  }, [readOnly, onSelect]);
+    // Stamp the per-instrument source onto the emitted ref ONLY when the source
+    // selector is enabled AND v2, and NEVER onto a basket (baskets carry source
+    // per leg). A v1 selection adds no key, so a v1 emit is byte-identical to a
+    // pre-feature emit — same emit-only-when-v2 idiom as the per-row selectors.
+    const withSource = (showDataSourceSelector && source === 'v2'
+      && descriptor && descriptor.type !== 'basket')
+      ? { ...descriptor, data_source: 'v2' }
+      : descriptor;
+    onSelect(withSource);
+  }, [readOnly, onSelect, showDataSourceSelector, source]);
 
   const handleSelectInstrument = useCallback(
     (symbol, collection) => {
       emitSelect({ type: 'spot', collection, instrument_id: symbol });
+      onClose();
+    },
+    [emitSelect, onClose],
+  );
+
+  const handleSelectRate = useCallback(
+    (symbol) => {
+      // A rate leg is v2-ONLY: bake ``data_source: 'v2'`` into the descriptor so
+      // it is stamped regardless of the modal's source toggle (emitSelect leaves
+      // an already-v2 descriptor intact). legConfig maps this ``cash_rate``
+      // descriptor to a cash_rate leg with the nested RATE reference.
+      emitSelect({
+        type: 'cash_rate',
+        collection: RATE_COLLECTION,
+        instrument_id: symbol,
+        data_source: 'v2',
+      });
       onClose();
     },
     [emitSelect, onClose],
@@ -525,6 +719,25 @@ export default function InstrumentPickerModal({
 
         {/* Body */}
         <div className={styles.body}>
+          {/* Per-instrument source (opt-in) — lets the source be chosen AT
+              creation. Shown across the spot / futures / options steps (it sits
+              above them all), hidden inside the basket composer where source is
+              a per-leg concern. Uses a distinct testId base so it never collides
+              with a page-level DataSourceSelector mounted behind the modal. */}
+          {showDataSourceSelector && !inBasketComposer && (
+            <div className={styles.dataSourceBar}>
+              <DataSourceSelector
+                id="picker-data-source-select"
+                testId="picker-data-source"
+                label="Source"
+                showNotes={false}
+                title="Market-data source for the instrument you are adding (v1 = tcg_instruments, v2 = new star schema). You can also change it per row after adding."
+                value={source}
+                onChange={handleSourceChange}
+                disabled={readOnly}
+              />
+            </div>
+          )}
           {collectionsLoading && (
             <div className={styles.state}>Loading...</div>
           )}
@@ -546,6 +759,7 @@ export default function InstrumentPickerModal({
                     disabled={readOnly}
                     showHoldControls={showOptionHoldControls}
                     holdRequired={optionHoldRequired}
+                    showDeltaHedge={showOptionDeltaHedge}
                     // Edit mode is DERIVED as initialConfig != null (same as the
                     // seed effect + JSDoc): suppresses the CREATE-only cycle
                     // nudge so an edited leg's saved cycle is preserved.
@@ -634,7 +848,7 @@ export default function InstrumentPickerModal({
           ) : (
             /* ── Main view: toggleable categories ── */
             <>
-              {visibleCategories.filter((c) => !c.dynamicFutures && !c.dynamicOptions && !c.dynamicBaskets).map((cat) => {
+              {visibleCategories.filter((c) => !c.dynamicFutures && !c.dynamicOptions && !c.dynamicBaskets && !c.dynamicRate).map((cat) => {
                 const instruments = cat.collections.flatMap(
                   (coll) => (instrumentsByCollection[coll] || []).map((inst) => ({ ...inst, collection: coll })),
                 );
@@ -729,6 +943,48 @@ export default function InstrumentPickerModal({
                     </span>
                     <span className={styles.chevron}>&#8250;</span>
                   </button>
+                </div>
+              )}
+
+              {/* Rate — v2 RATE series (cash_rate leg source) */}
+              {rateVisible && (
+                <div className={styles.group}>
+                  <button
+                    className={styles.groupToggle}
+                    type="button"
+                    onClick={() => toggleCategory('rate')}
+                    data-testid="picker-rate-toggle"
+                  >
+                    <span className={styles.groupDot} style={{ background: 'var(--cat-rate, #14b8a6)' }} />
+                    <span className={styles.groupLabel}>Rate</span>
+                    <span className={styles.groupCount}>
+                      {rateLoading ? '...' : rateInstruments.length}
+                    </span>
+                    <span className={styles.chevron}>{expanded.rate ? '▾' : '▸'}</span>
+                  </button>
+                  {expanded.rate && (
+                    rateLoading ? (
+                      <div className={styles.state}>Loading...</div>
+                    ) : (
+                      <ul className={styles.instrumentList}>
+                        {rateInstruments.map((inst) => (
+                          <li
+                            key={`RATE-${inst.symbol}`}
+                            className={styles.instrumentItem}
+                            role="button"
+                            tabIndex={0}
+                            data-testid={`rate-instrument-${inst.symbol}`}
+                            onClick={() => handleSelectRate(inst.symbol)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') handleSelectRate(inst.symbol);
+                            }}
+                          >
+                            <span className={styles.instrumentSymbol}>{inst.symbol}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )
+                  )}
                 </div>
               )}
 

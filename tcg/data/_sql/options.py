@@ -1440,6 +1440,62 @@ class SqlOptionsDataReader:
                 f"SQL error listing per-date expirations on '{root}': {exc}"
             ) from exc
 
+    async def cycle_trade_date_span(
+        self,
+        root: str,
+        start: date,
+        end: date,
+        cycle: str | Sequence[str] | None = None,
+    ) -> tuple[date | None, date | None]:
+        """``(first, last)`` listed ``trade_date`` for ONE ``cycle`` in a window.
+
+        The bounded ``min/max`` counterpart of :meth:`list_expirations_by_date`:
+        SAME instrument routing (``source_collection`` / ``asset_class`` /
+        ``expiration >= start`` / cycle) and the SAME constant
+        ``trade_date BETWEEN`` partition-pruning join, but a two-value aggregate
+        instead of the full per-date DISTINCT map — so a cycle-scoped coverage
+        read no longer scans (then discards) every settlement bar of the cycle.
+        min/max is identical to ``min(keys)``/``max(keys)`` of that map for the
+        same arguments. Returns ``(None, None)`` when the cycle lists no bar in
+        ``[start, end]`` (aggregate yields a single ``NULL, NULL`` row).
+        """
+        try:
+            dim_where = [
+                "source_collection = %s",
+                "asset_class = 'option'",
+                "expiration IS NOT NULL",
+                "expiration >= %s",
+            ]
+            params: list[Any] = [root, start]
+            _cycle_frag, _cycle_val = _cycle_predicate(cycle)
+            if _cycle_frag is not None:
+                dim_where.append(_cycle_frag)
+                params.append(_cycle_val)
+            sql = f"""
+                WITH ids AS (
+                    SELECT instrument_id
+                    FROM {SCHEMA}.dim_instrument
+                    WHERE {" AND ".join(dim_where)}
+                )
+                SELECT min(p.trade_date) AS lo, max(p.trade_date) AS hi
+                FROM ids i
+                JOIN {SCHEMA}.fact_price_eod p
+                       ON p.instrument_id = i.instrument_id
+                      AND p.trade_date BETWEEN %s AND %s
+            """
+            params.extend([start, end])
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    row = await cur.fetchone()
+            if row is None:
+                return None, None
+            return row["lo"], row["hi"]
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error reading cycle trade-date span on '{root}': {exc}"
+            ) from exc
+
     # ------------------------------------------------------------------
     # Internal: DTO builders
     # ------------------------------------------------------------------

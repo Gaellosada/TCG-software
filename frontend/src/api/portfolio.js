@@ -28,6 +28,9 @@ export async function computePortfolio({
       // Settings toggle is OFF this is false → the backend recomputes fresh.
       use_cache: useCache,
       ...costFields,
+      // NOTE: no top-level ``data_source`` — the per-instrument source rides
+      // each leg in ``legs`` (present only for v2), so a v1 body is
+      // byte-identical to a pre-feature payload (backend defaults absent → v1).
     }),
     signal,
   });
@@ -96,6 +99,8 @@ export async function getPortfolioCachedResult({
       start: start || undefined,
       end: end || undefined,
       ...costFields,
+      // No top-level ``data_source`` — the per-instrument source rides each leg
+      // in ``legs``, so this cache-get keys to the SAME entry the Compute stored.
     }),
     ...(signal ? { signal } : {}),
   });

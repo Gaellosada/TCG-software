@@ -104,6 +104,42 @@ def test_position_cap_malformed_rejected(bad):
 
 
 # --------------------------------------------------------------------------- #
+# Feature — signal_lag_days wire parsing (legacy D-1 timing)
+# --------------------------------------------------------------------------- #
+
+
+def test_signal_lag_days_valid_threads_to_input():
+    sig = parse_signal(_spec_with_input({**SPX_INPUT, "signal_lag_days": 1}))
+    assert sig.inputs[0].signal_lag_days == 1
+
+
+def test_signal_lag_days_omitted_defaults_to_zero():
+    sig = parse_signal(_spec_with_input(dict(SPX_INPUT)))
+    assert sig.inputs[0].signal_lag_days == 0
+
+
+def test_signal_lag_days_explicit_zero():
+    sig = parse_signal(_spec_with_input({**SPX_INPUT, "signal_lag_days": 0}))
+    assert sig.inputs[0].signal_lag_days == 0
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        -1,  # negative
+        True,  # bool (subclasses int)
+        1.5,  # non-integer float
+        1.0,  # even an integral float is rejected (must be int bars)
+        "1",  # string
+        [1],  # list
+    ],
+)
+def test_signal_lag_days_malformed_rejected(bad):
+    with pytest.raises(SignalValidationError):
+        parse_signal(_spec_with_input({**SPX_INPUT, "signal_lag_days": bad}))
+
+
+# --------------------------------------------------------------------------- #
 # Feature 2 — count_mode wire parsing
 # --------------------------------------------------------------------------- #
 

@@ -86,6 +86,14 @@
   min-height: 0;
 }
 
+/* Per-instrument source selector bar (opt-in) — sits above the picker steps,
+   separated by a hairline so it reads as a modal-wide setting. */
+.dataSourceBar {
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border-primary);
+}
+
 .state {
   color: var(--text-muted);
   font-size: 0.85rem;

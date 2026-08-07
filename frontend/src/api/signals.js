@@ -64,6 +64,9 @@ export async function computeSignal(
       spec,
       indicators: indicators || [],
       ...costFields,
+      // NOTE: no top-level ``data_source`` — the per-instrument source rides
+      // each input's instrument ref inside ``spec`` (present only for v2), so a
+      // v1 run stays byte-identical to a pre-feature payload.
     }),
     signal,
   });

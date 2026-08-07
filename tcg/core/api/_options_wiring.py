@@ -33,6 +33,7 @@ from tcg.core.api._options_chain_cache import (
     ChainBulkCache,
     get_chain_bulk_cache,
     make_chain_bulk_key,
+    reader_source_id,
 )
 from tcg.data._utils import date_to_int
 from tcg.data.options.protocol import OptionsDataReader
@@ -162,6 +163,11 @@ class CachedBulkChainReader:
     ) -> None:
         self._inner = inner
         self._cache = cache
+        # The cache is LOOP-global, shared by every market-data service on this
+        # loop, while the v1 and v2 readers take the SAME query_chain_bulk args
+        # and return different rows. Scope every key to the reader's identity so
+        # a v1 and a v2 resolve can never serve each other's rows.
+        self._source = reader_source_id(inner)
         # Mirror the inner reader's fast-path capabilities so the engine's
         # feature-detection (and ``resolve_option_stream``'s ``_choose_path``
         # inputs) see through this proxy to the real reader.
@@ -199,6 +205,7 @@ class CachedBulkChainReader:
             )
 
         key = make_chain_bulk_key(
+            source=self._source,
             root=root,
             dates=dates,
             type=type,

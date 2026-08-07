@@ -51,6 +51,11 @@ class InstrumentSpot:
     collection: str
     instrument_id: str
     kind: Literal["spot"] = "spot"
+    # Per-instrument warehouse selector carried from the ref: ``"v1"``/``"v2"`` for
+    # an explicit override, ``None`` to inherit the enclosing body's source. The
+    # fetcher resolves ``svc_for(data_source)`` per instrument; the engine never
+    # reads this (it stays source-agnostic — svc is injected per fetch).
+    data_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,8 @@ class InstrumentContinuous:
     # regardless of expiry; default ``front_month`` keeps existing specs valid.
     strategy: Literal["front_month", "end_of_month"] = "front_month"
     kind: Literal["continuous"] = "continuous"
+    # Per-instrument warehouse selector (see :class:`InstrumentSpot`).
+    data_source: str | None = None
 
 
 # Streams readable off a single option contract row.  Mirrors the engine
@@ -159,7 +166,147 @@ class InstrumentOptionStream:
     futures_reference: Literal[
         "nearest_on_or_after", "continuous_front", "nearest_abs"
     ] = "nearest_on_or_after"
+    # PER-INDEX-POINT sizing (GAP C, SPEC §6 multiplier note).  Meaningful ONLY in
+    # ``futures_notional`` mode.  ``True`` (DEFAULT, byte-identical): the daily $-P&L
+    # carries the real ``m_opt/m_fut`` ratio.  ``False``: size PER INDEX POINT — the
+    # contract multiplier is NOT applied (``m_opt := m_fut`` so the ratio is exactly
+    # 1.0), reproducing the LEGACY VIX option sizing (whose ~10x-low magnitude under
+    # the multiplier path — VIX m_opt/m_fut = 0.1 — is the whole reason this exists).
+    # The collapse is applied at spec construction (:func:`tcg.types.multipliers.
+    # collapse_index_point`); the SPX/NDX case (m_fut==m_opt) is a no-op either way.
+    apply_contract_multiplier: bool = True
+    # DELTA-HEDGE overlay (feature F2, SPEC §5.5/§5.6): a VX1 futures hedge sized
+    # off THIS option leg's net delta, rebalanced daily, gated (VVIX>150) and
+    # accrued into the SAME leg equity ("call + VX1 hedge" is ONE leg).  Only
+    # meaningful on a hold-mode (``hold_between_rolls=True``) ``premium_notional``
+    # leg; the core-layer fetcher resolves the runtime delta/VX1/gate arrays and
+    # ``signal_exec`` feeds them to ``_HoldPnLSpec``.  ``None`` (default) = NO
+    # hedge → the new path is fully skipped (byte-identical).  This is the SIGNAL
+    # analog of the portfolio path's ``LegSpec.delta_hedge``.
+    delta_hedge: "DeltaHedgeSpec | None" = None
     kind: Literal["option_stream"] = "option_stream"
+    # Per-instrument warehouse selector (see :class:`InstrumentSpot`).
+    data_source: str | None = None
+
+
+@dataclass(frozen=True)
+class DeltaHedgeSpec:
+    """Configurable delta-hedge OVERLAY attachable to a hold-mode option leg
+    (feature F2, SPEC §5.5/§5.6).
+
+    Models a futures HEDGE sized off the option leg's net delta, rebalanced
+    DAILY: ``qty_hedge = -factor·Σ(option_qty·option_delta)`` (a future's
+    per-unit delta is 1).  The hedge's daily P&L (``qty_hedge·ΔF_hedge``) is
+    accrued into the SAME leg equity, so "call + VX1 hedge" is ONE leg whose
+    equity already includes the hedge.
+
+    Engine-agnostic CONFIG (the runtime delta / hedge-price / gate arrays are
+    resolved by the core layer and fed to :class:`tcg.engine.hold_pnl._HoldPnLSpec`).
+    Frozen + primitive-only so it lives in ``tcg.types`` (no deps).
+
+    * ``factor`` — the fraction of the option delta to hedge (SPEC default 1/3).
+    * ``hedge_collection`` — the hedge future's collection (VX1 = ``FUT_VIX``).
+    * ``hedge_roll_strategy`` — the continuous-roll strategy stitching the hedge
+      future (front-month nearest for VX1).
+    * ``gate_collection`` / ``gate_symbol`` — the index whose level gates the
+      hedge (SPEC: VVIX = ``INDEX`` / ``IND_VVIX``).
+    * ``gate_threshold`` / ``gate_op`` — the hedge is ACTIVE on a day only when
+      ``gate_series <op> gate_threshold`` holds (SPEC: ``VVIX > 150``).  The
+      lifecycle EXIT refinements (VIX<MA5 two consecutive days, VX1<VX2) reuse
+      the signals layer's conditions and are layered on top of this gate by the
+      caller; a plain overlay with only this gate is a valid general config.
+    """
+
+    factor: float = 1.0 / 3.0
+    hedge_collection: str = "FUT_VIX"
+    hedge_roll_strategy: str = "front_month"
+    gate_collection: str = "INDEX"
+    gate_symbol: str = "IND_VVIX"
+    gate_threshold: float = 150.0
+    gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
+    # ── P2 parametrization (all defaults are byte-identical to the shipped VX1
+    #    path — daily rebalance, an inert 10× cap, and roll-pause ON) ──────────
+    # ``rebalance_interval_days`` — re-size the hedge quantity off today's delta
+    #   only on rebalance bars (axis-step ``s % N == 0``); freeze the delta sizing
+    #   between them.  ``N = 1`` (default, ``N <= 1`` is treated as 1) rebalances
+    #   every bar ⇒ EXACTLY the shipped daily behaviour.
+    rebalance_interval_days: int = 1
+    # ``qty_cap_mult`` — the symmetric per-step quantity cap
+    #   (``|qty_hedge| ≤ qty_cap_mult·|option_qty|``).  The 10× default never binds
+    #   for the VX1/future regime ⇒ byte-identical.
+    qty_cap_mult: float = 10.0
+    # ``pause_on_roll`` — when True (default) the hedge books 0 on the hedged
+    #   option's roll bar (``hedge_active = gate ∧ ~is_roll`` — the VX1 default);
+    #   False hedges THROUGH the roll (``hedge_active = gate``).
+    pause_on_roll: bool = True
+
+
+@dataclass(frozen=True)
+class HedgeSpec:
+    """Modular delta-hedge OVERLAY — the UNIFIED successor to :class:`DeltaHedgeSpec`.
+
+    Any option leg can carry this overlay to hedge ``factor`` of its net delta with
+    a **spot or continuous-future** instrument (per-unit delta ``δ≈1``).  It
+    generalises the VX1-shaped :class:`DeltaHedgeSpec` along three axes Gael asked
+    for:
+
+    * ``hedge_instrument`` — the hedge is now a first-class instrument reference
+      (:class:`InstrumentSpot` or :class:`InstrumentContinuous`) rather than a
+      ``FUT_VIX``/``front_month`` string pair, so a VIX call can be hedged with any
+      future or a spot.  (Option-as-hedge is explicitly OUT of scope — δ stays 1.)
+    * ``rebalance_interval_days`` — freeze the hedge quantity between rebalance bars;
+      re-size off today's delta only on rebalance bars.  ``N = 1`` (default) is the
+      current daily-rebalance behaviour EXACTLY.
+    * ``pause_on_roll`` — when ``True`` (default) the hedge books 0 on the hedged
+      option's roll bar (``hedge_active = activation ∧ in_position ∧ ~is_roll`` — the
+      VX1 default, byte-identical); ``False`` hedges through the roll.
+
+    Activation is a degenerate signals-layer Condition (``series <op> threshold``):
+    ``gate_collection``/``gate_symbol`` name the series, ``gate_op``/``gate_threshold``
+    the comparison (SPEC: ``VVIX > 150``).  ``gate_collection is None`` ⇒ always-on
+    activation (still ANDed with in-position and the roll-pause flag).
+
+    Frozen + primitive/types-only (``hedge_instrument`` is a ``tcg.types`` ref), so it
+    lives in ``tcg.types`` with no new cross-layer dependency.  :class:`DeltaHedgeSpec`
+    is kept as a back-compat loader; :func:`delta_hedge_to_hedge_spec` migrates it.
+    """
+
+    hedge_instrument: "InstrumentSpot | InstrumentContinuous"
+    factor: float = 1.0 / 3.0
+    rebalance_interval_days: int = 1
+    qty_cap_mult: float = 10.0
+    pause_on_roll: bool = True
+    gate_collection: str | None = "INDEX"
+    gate_symbol: str | None = "IND_VVIX"
+    gate_threshold: float = 150.0
+    gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
+
+
+def delta_hedge_to_hedge_spec(dh: DeltaHedgeSpec) -> HedgeSpec:
+    """Migrate a legacy :class:`DeltaHedgeSpec` to the unified :class:`HedgeSpec`.
+
+    The VX1 hedge future (``hedge_collection`` / ``hedge_roll_strategy``) becomes an
+    :class:`InstrumentContinuous` with ``adjustment='difference'`` — the SAME
+    front-month, difference-adjusted continuous the legacy resolver hard-wired, so
+    the resulting fetch (and hence legs 11/12) is byte-identical.  The gate fields
+    and factor carry across unchanged; the new knobs take their byte-identical
+    defaults (``rebalance_interval_days=1``, ``qty_cap_mult=10``, ``pause_on_roll=True``).
+    """
+    return HedgeSpec(
+        hedge_instrument=InstrumentContinuous(
+            collection=dh.hedge_collection,
+            adjustment="difference",
+            strategy=dh.hedge_roll_strategy,  # type: ignore[arg-type]
+        ),
+        factor=dh.factor,
+        rebalance_interval_days=dh.rebalance_interval_days,
+        qty_cap_mult=dh.qty_cap_mult,
+        pause_on_roll=dh.pause_on_roll,
+        gate_collection=dh.gate_collection,
+        gate_symbol=dh.gate_symbol,
+        gate_threshold=dh.gate_threshold,
+        gate_op=dh.gate_op,
+    )
 
 
 # A single leg of an :class:`InstrumentBasket`.  Each leg pairs one of
@@ -242,11 +389,25 @@ class Input:
     BYTE-IDENTICAL to before. ``low`` may be negative (short-or-flat, e.g.
     ``(-1.0, 0.0)``) and the range is inclusive; ``low <= high`` is required
     (validated at the API layer, HTTP 400).
+
+    ``signal_lag_days`` OPTIONALLY shifts this input's RESOLVED NET position
+    series FORWARD by that many bars, so the position HELD on day D is the
+    signal/regime state RESOLVED from bar ``D - signal_lag_days`` ("act on
+    yesterday's signal" — the legacy real-time D-1 timing;
+    ``HistoricalVolService`` / ``PutArbitrageService`` ``minusBusinessDays(1)``).
+    The leading ``signal_lag_days`` bars have no prior state → FLAT (0.0). The
+    shift is applied to the net latched position AFTER ``position_cap`` and
+    BEFORE the no-quote NaN mask, so ``contrib_step`` / ``realized_pnl`` / the
+    equity curve all see the LAGGED exposure. ``0`` (the default) applies NO
+    shift — the historical same-bar behaviour, BYTE-IDENTICAL to before. Must
+    be a non-negative integer number of trading bars (validated at the API
+    layer, HTTP 400); a value ``>=`` the series length yields an all-flat leg.
     """
 
     id: str
     instrument: InputInstrument
     position_cap: tuple[float, float] | None = None
+    signal_lag_days: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -304,11 +465,21 @@ Operand = IndicatorOperand | InstrumentOperand | ConstantOperand
 
 @dataclass(frozen=True)
 class CompareCondition:
-    """Binary comparison: ``lhs <op> rhs`` for ``gt|lt|ge|le|eq``."""
+    """Binary comparison: ``lhs <op> rhs`` for ``gt|lt|ge|le|eq``.
+
+    ``consecutive_days`` extends the primitive to "the comparison has held
+    for the last ``consecutive_days`` bars" (run-length >= N). The default
+    ``consecutive_days=1`` reproduces today's single-bar comparison
+    BYTE-IDENTICALLY: the engine routes the default to the unchanged compare
+    path and only runs the trailing run-length test when ``consecutive_days
+    > 1``. A NaN bar (either operand missing) is a False bar, so it breaks a
+    streak, matching "VIX < MA5(VIX) for two consecutive days" (SPEC §5.5).
+    """
 
     op: Literal["gt", "lt", "ge", "le", "eq"]
     lhs: Operand
     rhs: Operand
+    consecutive_days: int = 1
 
 
 @dataclass(frozen=True)
@@ -367,7 +538,49 @@ class RollingCondition:
     lookback: int
 
 
-Condition = CompareCondition | CrossCondition | InRangeCondition | RollingCondition
+@dataclass(frozen=True)
+class HysteresisCondition:
+    """Two-threshold regime "episode completion" pulse (SPEC §4.1).
+
+    Fires a SINGLE-BAR pulse on the bar where a two-threshold episode
+    COMPLETES — the general form of the strategies' "hits X% then descends to
+    Y%" (UP) and "hits X% then rises to Y%" (DOWN) rules.
+
+    Semantics (scalar per-bar state — a vectorised evaluation cannot express
+    the arm/fire latch):
+
+      * ``direction="up"``:   ARM when ``operand > enter``; FIRE on the first
+        bar where (armed AND ``operand < exit``), then DISARM.
+      * ``direction="down"``: ARM when ``operand < enter``; FIRE on the first
+        bar where (armed AND ``operand > exit``), then DISARM.
+
+    After a fire the latch disarms and RE-ARMS on the next entry-threshold
+    crossing, so successive episodes each emit their own pulse. Typical usage:
+    ``operand`` is the moving series (e.g. raw ``DSTAT``), ``enter`` the entry
+    percentile line (e.g. ``DSTAT_95``) and ``exit`` the completion line (e.g.
+    ``DSTAT_75``). A NaN on any of the three operands holds the arm state and
+    suppresses a fire on that bar (a data gap is never read as an episode edge).
+
+    NOTE (scope, per SPEC §4.1): only the two-threshold episode latch is
+    implemented — the full UP/NORMAL/DOWN tri-state table is NOT needed by any
+    §5 leg (every usage is a single "hits enter then reaches exit" episode), so
+    it is deliberately left out for simplicity.
+    """
+
+    op: Literal["hysteresis"]
+    operand: Operand
+    enter: Operand
+    exit: Operand
+    direction: Literal["up", "down"]
+
+
+Condition = (
+    CompareCondition
+    | CrossCondition
+    | InRangeCondition
+    | RollingCondition
+    | HysteresisCondition
+)
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +682,23 @@ class Block:
     #     silently drop a real fire). "Pulse by default for NEW blocks" is a
     #     FRONTEND UX default; the backend never defaults to pulse.
     fire_mode: Literal["pulse", "sustained"] = "sustained"
+    # Exit-driven reset semantics for a TEMPORAL (THEN-chain) entry that is
+    # TARGETED by an exit (entries only; inert on exits/resets and on non-chain
+    # blocks).
+    #   * ``False`` (default) — HISTORICAL semantics: the exit's ``chain_reset``
+    #     is the RAW OR of the exit condition's firing bars, and it aborts any
+    #     in-flight temporal candidate on EVERY bar the exit CONDITION is true
+    #     (even while the entry holds no open position). Byte-identical to the
+    #     pre-flag engine; stored signals lacking the field hydrate to ``False``.
+    #   * ``True`` — LEGACY §4.2 "since last ACTUAL exit" semantics: the abort
+    #     of the in-flight arm fires ONLY on a bar an exit ACTUALLY closes an
+    #     OPEN position of THIS entry (position-state gated), NOT on every bar
+    #     the exit condition merely evaluates true. This keeps an armed-but-
+    #     unfired candidate alive across a window where the exit condition holds
+    #     while the entry is flat (the HVOL OFF_READY case, SPEC §5.2/§4.2).
+    #     Only meaningful on a THEN-chain entry (``links`` set) with a targeting
+    #     exit; a no-op otherwise.
+    reset_on_actual_exit: bool = False
 
 
 @dataclass(frozen=True)
@@ -549,6 +779,7 @@ __all__ = [
     "Condition",
     "ConstantOperand",
     "CrossCondition",
+    "HysteresisCondition",
     "IndicatorOperand",
     "Input",
     "InputInstrument",

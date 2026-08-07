@@ -11,35 +11,57 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, ClassVar, Literal
 
 import numpy as np
 import numpy.typing as npt
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from pydantic import ValidationError as PydanticValidationError
 
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
+    DeltaHedgeConfig,
     OptionStreamLabel,
     OptionStreamRef,
+    _PerInstrumentSourceMixin,
     _validate_nav_times,
 )
 from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
 from tcg.core.api._options_materialise import materialise_option_streams
 from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
 from tcg.core.cache import DiskResultCache, canonical_hash
-from tcg.core.api.common import get_market_data
+from tcg.core.api.common import (
+    DataSource,
+    effective_data_source,
+    get_market_data,
+    get_market_data_for,
+)
+from tcg.core.api._v2_preconditions import (
+    check_v2_option_coverage_floor,
+    check_v2_preconditions,
+    collect_v2_option_roots,
+)
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.signals import (
     IndicatorSpecIn,
     SignalIn,
     _resolve_basket_inputs,
+    check_v2_basket_option_legs,
     compute_input_overlap,
     make_signal_fetcher,
     parse_signal,
+    resolve_delta_hedge_raw,
 )
 from tcg.data._utils import date_to_int, int_to_iso
+from tcg.data._v2_compat._mapping import V2_RATE_1M_SYMBOL, V2_RATE_COLLECTION
 from tcg.data.protocols import MarketDataService
 from tcg.persistence import WriteRepository
 from tcg.engine import (
@@ -47,6 +69,7 @@ from tcg.engine import (
     compute_metrics,
     compute_weighted_portfolio,
 )
+from tcg.engine.cash_rate import accrue_cash_equity, reindex_rate_series
 from tcg.engine.costs import CostConfig
 from tcg.engine.hold_pnl import _HoldPnLSpec, _compound_with_hold
 from tcg.engine.signal_exec import (
@@ -66,9 +89,14 @@ from tcg.types.market import (
     InstrumentId,
     RollStrategy,
 )
-from tcg.types.multipliers import resolve_multipliers, root_from_collection
+from tcg.types.multipliers import (
+    collapse_index_point,
+    resolve_multipliers,
+    root_from_collection,
+)
 from tcg.types.portfolio import RebalanceFreq
 from tcg.types.signal import (
+    DeltaHedgeSpec,
     InstrumentContinuous,
     InstrumentOptionStream,
     InstrumentSpot,
@@ -563,7 +591,60 @@ class SignalLegSpec(BaseModel):
     indicators: list[IndicatorSpecIn] = Field(default_factory=list)
 
 
-class LegSpec(BaseModel):
+class CashRateSpec(BaseModel):
+    """Rate source for a ``cash_rate`` leg (SPEC §5.7, feature F4).
+
+    A cash-rate leg reads a real annualized short-rate SERIES from the dwh and
+    accrues it day by day. The canonical source is the US 1-Month Treasury CMT
+    yield (``RATE``/``RATE_US_CMT_1M``, FRED DGS1MO, ``data_source='v2'``); the
+    values are quoted in PERCENT and the wiring layer divides by 100. Bars before
+    the series' first observation accrue at 0 (the DGS1MO history starts 2001-07,
+    so the §5.7 window is fully covered and this edge is never hit).
+
+    The former always-available ``flat`` constant source was REMOVED: a cash leg
+    is now a series source only (the series supplies its own trading calendar, so
+    a rate-only portfolio needs no companion instrument).
+    """
+
+    # Series source: read ``(collection, symbol)`` from the dwh and interpret its
+    # values per ``unit`` as an annual rate. Both are REQUIRED.
+    collection: str | None = None
+    symbol: str | None = None
+    # How the fetched series values are quoted: "percent" (4.5 == 4.5 %/yr,
+    # divided by 100) or "fraction" (0.045 == 4.5 %/yr, used as-is).
+    unit: Literal["percent", "fraction"] = "percent"
+    # Compound the annual rate one trading-day at a time ((1+r)^(1/252)-1);
+    # False = simple interest (r/252). Compound is the default / more correct.
+    compound: bool = True
+
+    @model_validator(mode="after")
+    def _series_requires_ref(self) -> CashRateSpec:
+        if not self.collection or not self.symbol:
+            raise ValueError(
+                "cash_rate source requires 'collection' and 'symbol' "
+                "(e.g. collection='RATE', symbol='RATE_US_CMT_1M')"
+            )
+        return self
+
+
+class LegSpec(_PerInstrumentSourceMixin):
+    # Per-instrument warehouse selector ``data_source`` (``"v1"``/``"v2"``, or
+    # inherit the run default) comes from ``_PerInstrumentSourceMixin`` and is
+    # OMITTED from the JSON dump when unset/``"v1"`` — so an all-v1 portfolio
+    # body's ``_portfolio_cache_key`` stays byte-identical to before the feature
+    # (no COMPUTE_VERSION bump). ``_strip_use_cache`` must NEVER touch it.
+    #
+    # The strategy-repro branch's OPTIONAL overlays ``cash_rate`` (F4) and
+    # ``delta_hedge`` (F2) follow the SAME conditional-omit discipline via the
+    # mixin's ``_omit_when_none``: a leg that does not use them dumps NEITHER key,
+    # so a plain instrument/continuous leg's dump — and thus the result-cache key —
+    # is byte-identical to the pre-feature payload; a leg that sets one still
+    # serialises it and changes the key.
+    _omit_when_none: ClassVar[tuple[str, ...]] = (
+        "cash_rate",
+        "delta_hedge",
+        "apply_contract_multiplier",
+    )
     type: str  # "instrument", "continuous", "signal", or "option_stream"
     collection: str | None = (
         None  # Required for "instrument"/"continuous"/"option_stream"
@@ -613,6 +694,12 @@ class LegSpec(BaseModel):
     futures_reference: Literal[
         "nearest_on_or_after", "continuous_front", "nearest_abs"
     ] = "nearest_on_or_after"
+    # PER-INDEX-POINT sizing (GAP C).  Meaningful ONLY in ``futures_notional`` mode.
+    # ``None`` (unset, DEFAULT) / ``True`` = apply the real ``m_opt/m_fut`` ratio
+    # (byte-identical); ``False`` = size PER INDEX POINT (``m_opt := m_fut``), legacy
+    # VIX sizing (SPEC §6).  OMITTED from the dump when None (see ``_omit_when_none``)
+    # so a plain option leg's result-cache key is unperturbed.
+    apply_contract_multiplier: bool | None = None
     # COMPOSED-PORTFOLIO fields (required when type == "portfolio").  A portfolio
     # leg references a saved PURE portfolio reused as a building block: the
     # frontend RESOLVES the reference and INLINES the child's current saved spec
@@ -623,6 +710,15 @@ class LegSpec(BaseModel):
     # a child that itself contains a ``portfolio`` leg is rejected at evaluation.
     portfolio_id: str | None = None
     portfolio: PortfolioRequest | None = None
+    # CASH-RATE fields (used when type == "cash_rate").  A cash leg earns a
+    # short rate on cash collateral (SPEC §5.7 / feature F4).  Absent config
+    # defaults to a flat 1 %/yr source (see ``validate_cash_rate_has_spec``).
+    cash_rate: CashRateSpec | None = None
+    # DELTA-HEDGE overlay (feature F2, SPEC §5.5/§5.6): a VX1 futures hedge sized
+    # off THIS option leg's net delta, rebalanced daily, accrued into the leg
+    # equity.  Valid only on a hold-mode premium_notional option_stream leg;
+    # ignored / rejected otherwise.  None = no hedge (byte-identical).
+    delta_hedge: DeltaHedgeConfig | None = None
 
     @field_validator("nav_times")
     @classmethod
@@ -640,12 +736,38 @@ class LegSpec(BaseModel):
             "signal",
             "option_stream",
             "portfolio",
+            "cash_rate",
         ):
             raise ValueError(
                 f"leg type must be 'instrument', 'continuous', 'signal', "
-                f"'option_stream', or 'portfolio', got {v!r}"
+                f"'option_stream', 'portfolio', or 'cash_rate', got {v!r}"
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_cash_rate_has_spec(self) -> LegSpec:
+        """A cash_rate leg without an explicit source defaults to the canonical
+        US 1-Month CMT rate series (``RATE``/``RATE_US_CMT_1M``, ``v2``).
+
+        Rates are a v2-only object, so the default ALSO stamps ``data_source``
+        ``"v2"`` — otherwise the specless default would resolve against v1 and
+        fail the fetch. (The frontend always sends both explicitly; this is the
+        safety net.)
+        """
+        if self.type == "cash_rate":
+            if self.cash_rate is None:
+                self.cash_rate = CashRateSpec(
+                    collection=V2_RATE_COLLECTION,
+                    symbol=V2_RATE_1M_SYMBOL,
+                )
+            # Rates are a v2-only object, so EVERY cash_rate leg resolves against
+            # v2 — regardless of whether the spec was defaulted or supplied
+            # explicitly. Without this, a hand-built payload with an explicit
+            # ``cash_rate`` but no ``data_source`` would default to v1 and fail
+            # the fetch. (The frontend always sends both; this is the safety net.)
+            if self.data_source != "v2":
+                self.data_source = "v2"
+        return self
 
     @model_validator(mode="after")
     def validate_signal_has_spec(self) -> LegSpec:
@@ -726,6 +848,37 @@ class PortfolioRequest(BaseModel):
     # WHETHER to use the cache, not WHICH entry, so a later ``use_cache=True``
     # compute of the same body still hits an entry a prior cached compute wrote.
     use_cache: bool = True
+    # Non-normalizing (leveraged) portfolio combine. Default True = OFF =
+    # byte-identical: weights are normalized by Σ|w| so the book is always
+    # exactly 100% gross. When False the raw SIGNED weights are used as notional
+    # multiples of NAV (legacy shared-capital semantics): gross may exceed 100%
+    # and negative weights are shorts, so leverage is preserved through the
+    # combine. It IS part of the cache key (via ``model_dump``) because it
+    # changes the computed equity — unlike ``use_cache``, which is stripped.
+    normalize_weights: bool = True
+    # Which warehouse this run reads. "v1" (DEFAULT) = tcg_instruments, the
+    # frozen reference; "v2" = tcg_instruments_v2 through the compat adapter.
+    # UNLIKE ``use_cache`` this is compute-affecting, so it is DELIBERATELY part
+    # of the cache key (``_portfolio_cache_key`` hashes the whole body and
+    # ``_strip_use_cache`` must never learn about it) — two runs differing only
+    # in source are two different results.
+    data_source: DataSource = "v1"
+
+    @model_serializer(mode="wrap")
+    def _omit_default_normalize_weights(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> Any:
+        # ``normalize_weights=True`` is the pre-feature behaviour (always
+        # normalise by Σ|w|), so it is OMITTED from the dump when True — an
+        # ordinary normalised body stays byte-identical to a pre-feature payload
+        # and its ``_portfolio_cache_key`` is unperturbed.  ``False`` is a real,
+        # compute-affecting choice and is KEPT (it changes the key).  Mirrors the
+        # per-instrument ``data_source`` / ``cash_rate`` / ``delta_hedge`` omit
+        # rule so no default-off feature knob ever bloats the v1 cache key.
+        data = handler(self)
+        if isinstance(data, dict) and data.get("normalize_weights") is True:
+            data.pop("normalize_weights", None)
+        return data
 
 
 # ``LegSpec.portfolio`` is typed ``PortfolioRequest`` (a composed leg inlines a
@@ -747,13 +900,13 @@ def _parse_legs(
 ) -> dict[str, InstrumentId | ContinuousLegSpec]:
     """Convert request leg specs to service-layer types with validation.
 
-    Only processes instrument/continuous legs; signal, option_stream and
-    portfolio legs are skipped (handled separately).
+    Only processes instrument/continuous legs; signal, option_stream,
+    portfolio and cash_rate legs are skipped (handled separately).
     """
     legs_spec: dict[str, InstrumentId | ContinuousLegSpec] = {}
 
     for label, leg in legs.items():
-        if leg.type in ("signal", "option_stream", "portfolio"):
+        if leg.type in ("signal", "option_stream", "portfolio", "cash_rate"):
             continue
 
         if leg.type == "instrument":
@@ -847,6 +1000,9 @@ async def _evaluate_signal_leg(
     end_date: date | None,
     repo: WriteRepository,
     cost_config: CostConfig | None = None,
+    *,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
+    default_source: DataSource = "v1",
 ) -> _SignalLegEvalResult:
     """Evaluate a signal leg and bubble up everything the portfolio path needs.
 
@@ -883,6 +1039,12 @@ async def _evaluate_signal_leg(
     except SignalValidationError as exc:
         raise ValidationError(f"Leg '{label}': signal validation error: {exc}") from exc
 
+    # Pure v2 preconditions for BASKET-nested option legs on this signal leg —
+    # invisible to the wire-JSON walk in ``_check_v2_option_legs`` (a saved basket
+    # is only an id). Gated on each leg's own effective source (default = this
+    # signal leg's effective source); raises a labelled ValidationError → 400.
+    check_v2_basket_option_legs(resolved_inputs, default_source=default_source)
+
     if len(signal.inputs) == 0:
         raise ValidationError(f"Leg '{label}': signal has no inputs")
 
@@ -904,6 +1066,17 @@ async def _evaluate_signal_leg(
             },
         )
 
+    # Per-instrument v1/v2 selection: each of this signal leg's INPUTS carries its
+    # own ``data_source`` and inherits ``default_source`` (the leg's effective
+    # source) when omitted. ``inst_svc_for`` maps a ref source → service; when the
+    # route did not supply ``svc_for`` every input resolves to the single ``svc``
+    # (byte-identical to before).
+    inst_svc_for = None
+    if svc_for is not None:
+        inst_svc_for = lambda own: svc_for(  # noqa: E731
+            effective_data_source(own, default_source)
+        )
+
     # 3. Compute input overlap dates
     try:
         overlap_start, overlap_end = await compute_input_overlap(
@@ -911,12 +1084,15 @@ async def _evaluate_signal_leg(
             signal,
             start_date,
             end_date,
+            svc_for=inst_svc_for,
         )
     except SignalDataError as exc:
         raise ValidationError(f"Leg '{label}': signal data error: {exc}") from exc
 
     # 4. Create fetcher and evaluate
-    fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
+    fetcher = make_signal_fetcher(
+        svc, overlap_start, overlap_end, svc_for=inst_svc_for
+    )
     try:
         # Thread the run's transaction-cost config so the signal leg's INTERNAL
         # entries/exits/rolls fold into its synthetic equity — exactly mirroring
@@ -1155,6 +1331,107 @@ def _is_hold_mode_price_leg(leg: LegSpec) -> bool:
     )
 
 
+def _align_to_axis(
+    axis: npt.NDArray[np.int64],
+    src_dates: npt.NDArray[np.int64],
+    src_values: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """Project ``(src_dates, src_values)`` onto ``axis`` (YYYYMMDD ints).
+
+    Returns a length-``len(axis)`` float array; an axis date with no source
+    observation is ``NaN`` (never silently forward-filled — a missing bar makes
+    the delta-hedge book 0 that step, exactly like a missing premium)."""
+    lut = {int(d): float(v) for d, v in zip(src_dates.tolist(), src_values.tolist())}
+    out = np.full(axis.shape[0], np.nan, dtype=np.float64)
+    for i, d in enumerate(axis.tolist()):
+        v = lut.get(int(d))
+        if v is not None:
+            out[i] = v
+    return out
+
+
+async def _build_delta_hedge_arrays(
+    *,
+    label: str,
+    hedge: DeltaHedgeSpec,
+    instrument: "InstrumentOptionStream",
+    fetcher: object,
+    svc: MarketDataService,
+    dates_arr: npt.NDArray[np.int64],
+    is_roll_mask: npt.NDArray[np.bool_],
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[
+    npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.bool_]
+]:
+    """Resolve the runtime (delta, hedge_price, hedge_active) arrays for a
+    delta-hedge overlay, aligned to the leg's date axis ``dates_arr`` (F2).
+
+    * DELTA — the HELD option contract's per-day delta.  Sourced by resolving the
+      SAME option instrument a SECOND time with ``stream="delta"`` (hold ON), so
+      the held-contract SELECTION is identical and the delta lands on the same
+      axis.  ``delta_stored`` missing on a day ⇒ NaN ⇒ that step books 0.
+    * HEDGE_PRICE — the VX1 front-month continuous (DIFFERENCE-adjusted so daily
+      diffs are the true front-future daily P&L, roll gaps removed).
+    * HEDGE_ACTIVE — gate ``VVIX <op> threshold`` AND NOT an option roll bar
+      (SPEC §5.5 hedge-exit (3) "the call rolls").
+
+    The DATA FETCH (delta second-resolve / VX1 continuous / gate) is the SHARED
+    :func:`resolve_delta_hedge_raw` — the SAME helper the signal-leg side-channel
+    uses (P-F2-1 dedup); only the alignment axis + gate/roll masking below is
+    per-site.
+    """
+    (
+        (d_dates, d_vals),
+        (vx_dates, vx_close),
+        (gate_dates, gate_close),
+    ) = await resolve_delta_hedge_raw(
+        label=label,
+        hedge=hedge,
+        instrument=instrument,
+        fetch_fn=fetcher,
+        svc=svc,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    # ── DELTA: align the held contract's delta onto the leg axis ──
+    hedge_delta = _align_to_axis(
+        dates_arr,
+        np.asarray(d_dates, dtype=np.int64),
+        np.asarray(d_vals, dtype=np.float64),
+    )
+    if not np.any(np.isfinite(hedge_delta)):
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge got an all-NaN option delta series "
+            f"(no stored delta on the held contract) — the hedge cannot be sized"
+        )
+
+    # ── HEDGE_PRICE: align the VX1 front-month continuous onto the leg axis ──
+    hedge_price = _align_to_axis(dates_arr, vx_dates, vx_close)
+
+    # ── HEDGE_ACTIVE: gate(VVIX) AND not-a-roll-bar ──
+    gate_level = _align_to_axis(dates_arr, gate_dates, gate_close)
+    thr = hedge.gate_threshold
+    with np.errstate(invalid="ignore"):
+        if hedge.gate_op == "gt":
+            gate_on = gate_level > thr
+        elif hedge.gate_op == "ge":
+            gate_on = gate_level >= thr
+        elif hedge.gate_op == "lt":
+            gate_on = gate_level < thr
+        else:  # "le"
+            gate_on = gate_level <= thr
+    gate_on = gate_on & np.isfinite(gate_level)
+    # ``pause_on_roll`` (default True) ANDs ``~is_roll`` so the hedge books 0 on the
+    # option's roll bar (SPEC §5.5 exit (3), the VX1 default); False hedges through.
+    if hedge.pause_on_roll:
+        hedge_active = gate_on & (~is_roll_mask)
+    else:
+        hedge_active = gate_on
+    return hedge_delta, hedge_price, hedge_active.astype(np.bool_)
+
+
 async def _evaluate_option_stream_leg(
     label: str,
     leg: LegSpec,
@@ -1255,6 +1532,11 @@ async def _evaluate_option_stream_leg(
             nav_times=leg.nav_times,
             sizing_mode=leg.sizing_mode,
             futures_reference=leg.futures_reference,
+            # GAP C / GAP A: thread the per-index-point flag and the delta-hedge
+            # overlay through the SAME ref → instrument converter the signal path
+            # uses, so ``instrument`` carries both (the collapse + the F2 hedge).
+            apply_contract_multiplier=leg.apply_contract_multiplier,
+            delta_hedge=leg.delta_hedge,
         )
     except PydanticValidationError as exc:
         raise ValidationError(f"Leg '{label}': {exc}") from exc
@@ -1281,8 +1563,15 @@ async def _evaluate_option_stream_leg(
             # roll_future_ref for futures-notional sizing; a legacy 3-tuple double
             # (premium_notional only) still works.
             _rres = await fetcher.fetch_hold_roll_info(instrument)
-            if len(_rres) == 4:
-                _d, is_roll_f, roll_premium, roll_fref = _rres
+            # Tuple-arity ripple: the production fetcher now returns a 5-tuple
+            # ``(dates, is_roll, roll_premium, roll_future_ref, daily_future_ref)``
+            # (P-OFFROLL-SIZING added the trailing per-date reference).  A portfolio
+            # option leg is ALWAYS-ON — held continuously and sized at its first
+            # roll-while-held — so it never hits the off-roll-first-open case and does
+            # not consume ``daily_future_ref``; take the first four (or three) and
+            # ignore any trailing element.  Legacy 4- and 3-tuples still work.
+            if len(_rres) >= 4:
+                _d, is_roll_f, roll_premium, roll_fref = _rres[:4]
             else:
                 _d, is_roll_f, roll_premium = _rres
                 roll_fref = None
@@ -1366,6 +1655,45 @@ async def _evaluate_option_stream_leg(
             _mult_fn = getattr(fetcher, "fetch_hold_multipliers", None)
             if _mult_fn is not None:
                 mult_fut, mult_opt = await _mult_fn(instrument)
+            # GAP C: per-index-point sizing (m_opt := m_fut) when the leg opts out of
+            # the contract multiplier (legacy VIX option sizing).  No-op when apply
+            # is True/None or m_fut == m_opt (SPX/NDX).
+            mult_fut, mult_opt = collapse_index_point(
+                mult_fut, mult_opt, instrument.apply_contract_multiplier
+            )
+        # ── Delta-hedge overlay (F2): resolve the runtime hedge arrays and
+        #    attach them to the spec so the VX1 hedge is accrued into THIS leg
+        #    equity.  Guarded: no config / disabled ⇒ the spec is byte-identical
+        #    to today.  Only valid on a premium_notional hold leg. ──
+        _hedge_factor: float | None = None
+        _hedge_delta: "npt.NDArray[np.float64] | None" = None
+        _hedge_price: "npt.NDArray[np.float64] | None" = None
+        _hedge_active: "npt.NDArray[np.bool_] | None" = None
+        _hedge_rebalance_interval_days: int = 1
+        _hedge_qty_cap_mult: float = 10.0
+        if leg.delta_hedge is not None and leg.delta_hedge.enabled:
+            # GAP B: the hedge sizes off the option leg's OWN quantity in either
+            # notional basis (the engine sizes the futures-notional case off
+            # seg_fref·mult_fut·mult_opt), so a futures_notional hedged leg is
+            # accepted — no longer rejected here.
+            _hspec = leg.delta_hedge.to_spec()
+            _hedge_factor = _hspec.factor
+            _hedge_rebalance_interval_days = _hspec.rebalance_interval_days
+            _hedge_qty_cap_mult = _hspec.qty_cap_mult
+            _roll_mask_axis = np.asarray(is_roll_f, dtype=np.float64) > 0.5
+            _hedge_delta, _hedge_price, _hedge_active = (
+                await _build_delta_hedge_arrays(
+                    label=label,
+                    hedge=_hspec,
+                    instrument=instrument,
+                    fetcher=fetcher,
+                    svc=svc,
+                    dates_arr=np.asarray(dates_arr, dtype=np.int64),
+                    is_roll_mask=_roll_mask_axis,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            )
         # DIRECTION is the leg weight SIGN (a portfolio leg is always held, so
         # ``pos_active`` is all True); ``nav_times`` is the premium-notional SIZE.
         # This is exactly the spec signal_exec builds for a hold-mode option
@@ -1382,6 +1710,12 @@ async def _evaluate_option_stream_leg(
             roll_future_ref=roll_fref_arr,
             mult_fut=float(mult_fut),
             mult_opt=float(mult_opt),
+            hedge_factor=_hedge_factor,
+            hedge_delta=_hedge_delta,
+            hedge_price=_hedge_price,
+            hedge_active=_hedge_active,
+            rebalance_interval_days=_hedge_rebalance_interval_days,
+            qty_cap_mult=_hedge_qty_cap_mult,
         )
         equity_ratio, _step_scale, _hold_contrib = _compound_with_hold(
             np.zeros(max(T - 1, 0), dtype=np.float64), [spec]
@@ -1517,7 +1851,30 @@ def _get_result_cache() -> DiskResultCache:
 # shared cache entry) instead of the parent's narrowed range. Composed entries
 # cached under the old re-anchor model are numerically different, so this bump
 # invalidates them (they can never be served with ``from_cache: true``).
-COMPUTE_VERSION = "0.1.12"
+#
+# 0.1.12 → 0.1.13: per-run ``data_source`` switch. Adding a defaulted field to
+# ``PortfolioRequest`` changes ``model_dump()`` and therefore EVERY key, so all
+# pre-existing durable entries are invalidated. That is deliberate and harmless:
+# the recomputed v1 output is byte-identical to what those entries held.
+#
+# 0.1.13 → 0.1.14: hold-mode option-stream gap-open fix. A ``hold_between_rolls``
+# leg whose maturity roll landed a new segment's OPEN on a globally-missing mark
+# day previously abandoned the WHOLE segment (NaN → frozen equity through the gap,
+# e.g. the COVID-crash freeze of "Short S&P 10 delta put 2M DB v2"). The resolver
+# now opens the segment on the first genuinely-quoted date and re-syncs to the real
+# marks. Any cached curve for a strategy that crossed such a gap is stale (frozen)
+# and MUST be invalidated; gap-free strategies recompute byte-identically.
+#
+# 0.1.14 → 0.1.15: periodic-rebalance wiped-leg fix. ``_compute_periodic_rebalance``
+# no longer re-funds a leg that hit an absorbing 0 (a wiped option OR a wiped
+# ``signal`` leg — both w>=0 synthetics) back to its target weight each boundary;
+# the dead leg stays 0 and its weight renormalizes onto the survivors. This changes
+# the equity for any periodic-rebalanced portfolio containing a leg that wipes to
+# exactly 0. Such a portfolio (notably a wiping signal leg + another leg under
+# weekly/monthly/quarterly/annual rebalance) was UNguarded before and could be
+# cached under the old drain logic — bump invalidates those stale WRONG curves;
+# no-wipe portfolios recompute byte-identically (golden master).
+COMPUTE_VERSION = "0.1.15"
 
 
 def _strip_use_cache(obj: object) -> object:
@@ -1560,7 +1917,9 @@ def _portfolio_cache_key(body: PortfolioRequest) -> str:
     return canonical_hash({"_cv": COMPUTE_VERSION, "body": payload})
 
 
-def _child_request(child: PortfolioRequest, use_cache: bool) -> PortfolioRequest:
+def _child_request(
+    child: PortfolioRequest, use_cache: bool
+) -> PortfolioRequest:
     """Build the compute sub-request for a composed leg's child (fund-of-funds).
 
     The child is computed over its OWN resolved range — ``child.start`` /
@@ -1578,10 +1937,18 @@ def _child_request(child: PortfolioRequest, use_cache: bool) -> PortfolioRequest
     """
     # model_copy preserves EVERY current and future PortfolioRequest field
     # verbatim (so a schema addition can never silently diverge the composed
-    # child key from a standalone compute), overriding ONLY ``use_cache``. That
-    # is the sole intentional override — it propagates the parent's cache
-    # preference (a use_cache=False compute recomputes every child fresh) and is
-    # stripped from the key anyway, so it never breaks unified reuse (SC2).
+    # child key from a standalone compute), overriding ONLY ``use_cache``:
+    #
+    # * ``use_cache`` propagates the parent's cache preference (a
+    #   use_cache=False compute recomputes every child fresh) and is stripped
+    #   from the key anyway, so it never breaks unified reuse (SC2).
+    #
+    # The child's OWN ``data_source`` is KEPT (never forced to the parent's). The
+    # caller (_evaluate_portfolio_leg) binds the service that matches this child
+    # body's data_source via ``svc_for``, so body and reality stay in lock-step
+    # per-child — key-parity holds against a standalone compute of the child ON
+    # ITS OWN SOURCE. This is what lets a composed portfolio mix v1 and v2
+    # children (a special case of per-instrument selection).
     return child.model_copy(update={"use_cache": use_cache})
 
 
@@ -1592,6 +1959,8 @@ async def _evaluate_portfolio_leg(
     classify: Callable[[str], AssetClass | None],
     repo: WriteRepository,
     use_cache: bool,
+    data_source: DataSource,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
     """Evaluate a composed-portfolio leg to a synthetic equity price series.
 
@@ -1651,7 +2020,25 @@ async def _evaluate_portfolio_leg(
     # an already-computed child is served from the SAME on-disk cache entry
     # (unified reuse; the key-parity invariant, SC2). See ``_child_request``.
     child_body = _child_request(child, use_cache)
-    child_result = await compute_portfolio(child_body, svc, classify, repo)
+    # Bind the service that matches THIS child's own data_source (not the
+    # parent's). ``svc_for`` resolves a source→service; it is only supplied by the
+    # top-level route (which holds the ``Request``). When absent (any non-route
+    # caller) we fall back to the parent's ``svc`` — byte-identical to the
+    # previous behaviour. Rebinding the classifier from the child's service too
+    # keeps them from ever drifting (they are identical today, but this is free
+    # correctness).
+    if svc_for is not None:
+        child_svc = svc_for(child_body.data_source)
+        child_classify = child_svc.asset_class_for
+    else:
+        child_svc, child_classify = svc, classify
+    # Recurse into the CACHE WRAPPER, not the route function: the route's only
+    # extra job is binding ``svc`` from ``body.data_source``, which we have just
+    # done per-child. Going through the route would need a ``Request`` this layer
+    # does not have.
+    child_result = await _compute_portfolio_cached(
+        child_body, child_svc, child_classify, repo, svc_for=svc_for
+    )
 
     # Convert the child response back to the engine's YYYYMMDD-int date grid +
     # float64 equity array.  ``portfolio_equity`` was passed through
@@ -1673,11 +2060,60 @@ async def _evaluate_portfolio_leg(
 # ---------------------------------------------------------------------------
 
 
+async def _check_v2_option_legs(
+    body: PortfolioRequest,
+    svc_for: "Callable[[DataSource], MarketDataService]",
+    start_date: date | None,
+) -> None:
+    """Reject a v2 run this warehouse cannot serve, before the engine sees it.
+
+    Both checks exist HERE rather than in the options reader because the reader
+    is called per expiration group and never sees the run as a whole. Neither is
+    an engine change (Sign 3): the engine is handed a request it can serve, or
+    the request never reaches it.
+
+    **Missing cycle filter.** The v2 reader DOES raise on this, but the engine's
+    Phase-B year-chunk resolver catches every per-chunk exception and degrades to
+    the per-expiration path, which then yields an all-NaN stream. The user sees
+    "all option stream values are NaN … no_chain_for_date" — a 400, but one that
+    names neither the cause nor the fix. Checking at the boundary keeps the
+    actionable message (SC8). v1 returns monthlies AND weeklies for an unfiltered
+    leg while v2 can only return weeklies, so serving it would silently compare
+    two different strategies.
+
+    **Start before the v2 floor (spec E7).** Delegated to
+    :func:`check_v2_option_coverage_floor`, which the SIGNALS route calls too —
+    the rationale is written there. It used to be inline here, which left the
+    signals path with no floor check at all.
+
+    Per-instrument: each leg is gated on its OWN effective source, so this checks
+    ONLY the v2 legs. An all-v1 portfolio (no v2 node anywhere) no-ops entirely —
+    the v2 service is never resolved and never consulted (Sign 1) — as does a
+    portfolio with no v2 option legs; the floor check additionally no-ops for an
+    open-ended start.
+    """
+    payload = body.model_dump(mode="json")
+
+    # The PURE preconditions — collection, cycle, stream — for every v2 leg at
+    # every nesting depth (composed children, signal legs, basket legs). Gates
+    # per node on the effective source, inheriting ``body.data_source``.
+    check_v2_preconditions(payload, data_source=body.data_source)
+
+    # Roots come from the same walk as the preconditions rather than from
+    # ``body.legs`` alone, so an option nested inside a signal or basket leg
+    # gets the same floor as a top-level one. Only v2 option roots are returned,
+    # so the v2 service (``svc_for("v2")``) is resolved only when one exists.
+    roots = collect_v2_option_roots(payload, data_source=body.data_source)
+    if roots:
+        await check_v2_option_coverage_floor(roots, svc_for("v2"), start_date)
+
+
 async def _compute_portfolio_uncached(
     body: PortfolioRequest,
     svc: MarketDataService,
     classify: Callable[[str], AssetClass | None],
     repo: WriteRepository,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
 ) -> dict:
     """Compute a weighted portfolio with rebalancing and return full analytics.
 
@@ -1687,6 +2123,20 @@ async def _compute_portfolio_uncached(
     cache only decides whether this body runs. The returned dict is the fully
     sanitized result WITHOUT the ``from_cache``/``computed_ms`` response metadata
     (those are added by the wrapper, never stored)."""
+
+    # Per-instrument v1/v2 selection: ``svc_for`` maps a CONCRETE source to its
+    # service. Only the route supplies it (it holds the ``Request`` that reaches
+    # both services); every other caller passes None, so fall back to a resolver
+    # that returns the single ``svc`` for any source — byte-identical to the
+    # pre-per-instrument single-service behaviour. With the fallback in place the
+    # rest of this function can resolve per leg uniformly.
+    if svc_for is None:
+        svc_for = lambda _ds: svc  # noqa: E731
+
+    # Resolve the service a leg reads from, honouring the ref's own source and
+    # inheriting the body default (the frozen precedence, ``effective_data_source``).
+    def _leg_svc(leg: LegSpec) -> MarketDataService:
+        return svc_for(effective_data_source(leg.data_source, body.data_source))
 
     # ── 1. Validate inputs ──
 
@@ -1716,26 +2166,34 @@ async def _compute_portfolio_uncached(
         )
 
     # A hold-mode option PRICE leg's synthetic can hit an absorbing 0 (a wiped
-    # short) and then emit NaN returns.  Two SHARED, pre-existing engine behaviours
-    # silently corrupt such a leg, so reject the incompatible knobs at the boundary
-    # rather than emit a misleading curve:
-    #   * rebalance != 'none' re-funds a wiped (0-valued) leg back to its target
-    #     share at each boundary (``metrics._compute_periodic_rebalance``) →
-    #     idle capital drains the surviving legs;
+    # short) and then emit NaN returns.  Two SHARED engine paths used to corrupt
+    # such a leg; guard the ones still incompatible at the boundary rather than
+    # emit a misleading curve:
+    #   * 'daily' rebalance: the blended-return path keeps a wiped leg's target
+    #     weight allocated to a flat 0-return sleeve every bar instead of
+    #     reallocating it to the survivors — a different (hold-as-cash) policy
+    #     from the periodic path, so it is not yet supported here (unifying the
+    #     two is a pending semantic decision).  The PERIODIC paths
+    #     (weekly/monthly/quarterly/annually) are now sound: a wiped (w>=0) leg
+    #     stays 0 and its weight is renormalized onto the surviving legs
+    #     (capital-conserving — no cash sleeve, so the dead leg's share is
+    #     reallocated to the survivors; ``metrics._compute_periodic_rebalance``),
+    #     so they are allowed.
     #   * return_type='log' maps a finite→0 transition to ln(0) = -inf → the leg
     #     is held FLAT (``metrics._compute_buy_and_hold``) instead of going to 0,
     #     overstating equity.
-    # Both are correct for ordinary price legs; only a hold-mode option leg (meant
-    # to be held to expiry — its direction + nav_times live in the synthetic)
-    # breaks them.  Guard here (contained) rather than editing the shared engine.
+    # Both remaining rejections are correct for ordinary price legs too; only a
+    # hold-mode option leg (meant to be held to expiry — its direction + nav_times
+    # live in the synthetic) exercises them.
     has_hold_option_leg = any(
         _is_hold_mode_price_leg(leg) for leg in body.legs.values()
     )
-    if has_hold_option_leg and rebalance_freq != RebalanceFreq.NONE:
+    if has_hold_option_leg and rebalance_freq == RebalanceFreq.DAILY:
         raise ValidationError(
-            "hold-mode option price legs require rebalance='none'; a wiped leg "
-            "would be silently re-funded to its target weight at each rebalance "
-            "boundary, draining the surviving legs"
+            "hold-mode option price legs do not support rebalance='daily'; use a "
+            "periodic frequency (weekly/monthly/quarterly/annually) or 'none'. "
+            "Daily rebalancing would keep a wiped (expired) leg's weight in a flat "
+            "sleeve each bar instead of reallocating it to the surviving legs"
         )
     if has_hold_option_leg and body.return_type == "log":
         raise ValidationError(
@@ -1748,6 +2206,8 @@ async def _compute_portfolio_uncached(
         start_date, end_date = parse_iso_range(body.start, body.end)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
+
+    await _check_v2_option_legs(body, svc_for, start_date)
 
     # ── 2. Separate legs by type ──
 
@@ -1767,6 +2227,13 @@ async def _compute_portfolio_uncached(
     portfolio_legs = {
         label: leg for label, leg in body.legs.items() if leg.type == "portfolio"
     }
+    # CASH-RATE legs (F4 / SPEC §5.7): earn a real short-rate series on cash. In
+    # a MIXED portfolio they ADOPT the common trading calendar (evaluated after
+    # §5) and never constrain it; a CASH-ONLY portfolio takes its calendar from
+    # the rate series' own dwh dates (§4.7), so a cash leg can also stand alone.
+    cash_rate_legs = {
+        label: leg for label, leg in body.legs.items() if leg.type == "cash_rate"
+    }
 
     # ── 3. Fetch instrument prices (if any) ──
 
@@ -1785,10 +2252,56 @@ async def _compute_portfolio_uncached(
     if instrument_legs:
         legs_spec = _parse_legs(body.legs, classify)
 
-        # Fetch full overlapping date range for instrument legs.
-        full_common_dates, full_aligned_series = await svc.get_aligned_prices(
-            legs_spec,
-        )
+        # Per-instrument source split: partition the instrument+continuous legs by
+        # their EFFECTIVE ``data_source`` and issue ONE ``get_aligned_prices`` per
+        # source group, then intersect the returned date grids and merge the
+        # aligned series onto the common grid.  INVARIANT: a single-source
+        # portfolio (every leg on the same warehouse — the all-v1 default) issues
+        # EXACTLY ONE call, on that one service, with the WHOLE ``legs_spec`` — so
+        # its behaviour and performance are byte-identical to before the split.
+        legs_by_source: dict[DataSource, dict[str, object]] = {}
+        for label in instrument_legs:
+            ds = effective_data_source(body.legs[label].data_source, body.data_source)
+            legs_by_source.setdefault(ds, {})[label] = legs_spec[label]
+
+        if len(legs_by_source) == 1:
+            (only_source,) = legs_by_source
+            full_common_dates, full_aligned_series = await svc_for(
+                only_source
+            ).get_aligned_prices(legs_by_source[only_source])
+        else:
+            # Multi-source: fetch each group on its own service, intersect grids.
+            group_results: list[
+                tuple[npt.NDArray[np.int64], dict[str, object]]
+            ] = []
+            for ds, subset in legs_by_source.items():
+                grid, series_map = await svc_for(ds).get_aligned_prices(subset)
+                group_results.append((grid, series_map))
+            full_common_dates = group_results[0][0]
+            for grid, _series_map in group_results[1:]:
+                full_common_dates = np.intersect1d(
+                    full_common_dates, grid, assume_unique=False
+                )
+            if full_common_dates.size == 0:
+                raise ValidationError(
+                    "No overlapping dates across instrument legs from different "
+                    "data sources (v1 and v2 histories often start years apart)"
+                )
+            # Re-index each group's series onto the shared grid. Each group's grid
+            # is sorted-unique (get_aligned_prices contract) and a superset of the
+            # intersection, so ``grid ∈ common`` masks to exactly ``common`` order.
+            full_aligned_series = {}
+            for grid, series_map in group_results:
+                mask = np.isin(grid, full_common_dates, assume_unique=True)
+                for label, series in series_map.items():
+                    full_aligned_series[label] = type(series)(
+                        dates=series.dates[mask],
+                        open=series.open[mask],
+                        high=series.high[mask],
+                        low=series.low[mask],
+                        close=series.close[mask],
+                        volume=series.volume[mask],
+                    )
         instrument_full_dates = full_common_dates
 
         # Apply optional date filter
@@ -1844,11 +2357,13 @@ async def _compute_portfolio_uncached(
         leg_result = await _evaluate_signal_leg(
             label,
             leg,
-            svc,
+            _leg_svc(leg),
             start_date,
             end_date,
             repo,
             cost_config,
+            svc_for=svc_for,
+            default_source=effective_data_source(leg.data_source, body.data_source),
         )
         signal_dates_map[label] = leg_result.index
         signal_closes[label] = leg_result.synthetic
@@ -1904,7 +2419,7 @@ async def _compute_portfolio_uncached(
             label,
             leg,
             body.weights[label],
-            svc,
+            _leg_svc(leg),
             start_date,
             end_date,
         )
@@ -1957,10 +2472,63 @@ async def _compute_portfolio_uncached(
             classify,
             repo,
             body.use_cache,
+            body.data_source,
+            svc_for=svc_for,  # route-supplied source→service resolver (per-instrument)
         )
         portfolio_leg_dates_map[label] = pf_dates
         portfolio_leg_closes[label] = pf_equity
         all_date_grids.append(pf_dates)
+
+    # ── 4.7. Fetch cash-rate legs' rate series (if any) ──
+    #
+    # A cash_rate leg reads a real annualized short-rate series (e.g. the US 1M
+    # CMT yield, RATE/RATE_US_CMT_1M, data_source='v2') and its equity is built
+    # AFTER the common calendar is known (§5.5), so it simply accrues on whatever
+    # days the portfolio trades. In a MIXED portfolio a cash leg NEVER constrains
+    # the calendar: a short-rate series is piecewise-constant / sparsely quoted,
+    # so intersecting the portfolio grid with it would wrongly collapse the
+    # calendar to the rate's change dates. We fetch the values here (converted to
+    # FRACTION units) and reindex them (hold-last) onto common_dates in §5.5.
+    # A CASH-ONLY portfolio has no market legs, so below we seed the calendar
+    # from the rate series' OWN dates — a rate-only portfolio is valid (no dummy
+    # companion instrument needed).
+    #
+    # Rates are a v2-only object, so each leg is fetched through ITS OWN bound
+    # service (``_leg_svc``) — a data_source='v1' rate leg would (correctly) find
+    # nothing, since v1 has no rate warehouse.
+    cash_series_rates_frac: dict[str, npt.NDArray[np.float64]] = {}
+    cash_series_dates_map: dict[str, npt.NDArray[np.int64]] = {}
+    for label, leg in cash_rate_legs.items():
+        spec = leg.cash_rate
+        assert spec is not None  # guaranteed by validate_cash_rate_has_spec
+        # Read the annualized-rate instrument through the ordinary market path
+        # (READ-ONLY dwh). ``get_prices`` returns a PriceSeries (dates + close).
+        series = await _leg_svc(leg).get_prices(
+            spec.collection or "",
+            spec.symbol or "",
+            start=start_date,
+            end=end_date,
+        )
+        if series is None:
+            raise ValidationError(
+                f"Leg '{label}': cash-rate series "
+                f"{spec.collection}/{spec.symbol} returned no data"
+            )
+        src_dates = np.asarray(series.dates, dtype=np.int64)
+        src_vals = np.asarray(series.close, dtype=np.float64)
+        # Interpret the quoted values as an annual rate; percent -> fraction.
+        divisor = 100.0 if spec.unit == "percent" else 1.0
+        cash_series_rates_frac[label] = src_vals / divisor
+        cash_series_dates_map[label] = src_dates
+
+    # A CASH-ONLY portfolio (no market legs) takes its trading calendar from the
+    # rate series themselves — the series supplies real trade dates, so no
+    # companion instrument is required. In a MIXED portfolio we deliberately do
+    # NOT append these (a cash leg must never constrain the shared calendar; see
+    # above), so this seeding only fires when there is nothing else.
+    if cash_rate_legs and not all_date_grids:
+        for label in cash_rate_legs:
+            all_date_grids.append(cash_series_dates_map[label])
 
     # ── 5. Align all series to common dates ──
 
@@ -2034,6 +2602,29 @@ async def _compute_portfolio_uncached(
         )
         aligned_closes[label] = portfolio_leg_closes[label][pf_mask]
 
+    # ── 5.5. Build cash-rate leg equity on the common calendar ──
+    #
+    # A cash_rate leg accrues its short rate on EVERY bar the portfolio trades
+    # (``common_dates``), producing a base-100, near-zero-vol, all-positive-drift
+    # equity curve (SPEC §5.7). Its DIRECTION is the leg weight sign (NOT baked
+    # into the curve), so it is an ordinary +weight leg in the combine — never a
+    # hold_option_label. The fetched rate is reindexed (piecewise-constant hold)
+    # onto common_dates; bars BEFORE the series' first observation accrue at 0
+    # (``reindex_rate_series`` default fallback) — for the canonical US 1M CMT
+    # series (history from 2001-07) the §5.7 window is fully covered, so this
+    # edge is never hit.
+    for label, leg in cash_rate_legs.items():
+        spec = leg.cash_rate
+        assert spec is not None
+        rate_frac = reindex_rate_series(
+            cash_series_dates_map[label],
+            cash_series_rates_frac[label],
+            common_dates,
+        )
+        aligned_closes[label] = accrue_cash_equity(
+            rate_frac, compound=spec.compound
+        )
+
     # Align each hold-mode option leg's DISPLAY-ONLY side-channels to common_dates
     # (same os_mask as the synthetic close, computed once per label in the shared
     # ``_align_hold_series`` helper) so the trade-log roll rows are sized/priced off
@@ -2080,6 +2671,13 @@ async def _compute_portfolio_uncached(
         full_date_grids.append(option_stream_dates_map[label])
     for label in portfolio_leg_dates_map:
         full_date_grids.append(portfolio_leg_dates_map[label])
+    # In a MIXED portfolio a cash-rate leg adopts the common calendar and
+    # contributes no date grid of its own (see §4.7). But a CASH-ONLY portfolio
+    # has no market grids at all, so the rate series' own dates ARE the full
+    # range (mirrors the §4.7 calendar seeding).
+    if not full_date_grids and cash_rate_legs:
+        for label in cash_rate_legs:
+            full_date_grids.append(cash_series_dates_map[label])
 
     full_common_all = full_date_grids[0]
     for grid in full_date_grids[1:]:
@@ -2110,6 +2708,21 @@ async def _compute_portfolio_uncached(
         )
         for label in aligned_closes
     }
+    # Weights actually fed to the combine. ``body.weights`` are PERCENT
+    # allocations (frontend default 100 == 100%; see §10 trade-scaling).
+    #
+    # * NORMALIZED (default): the combine divides by Σ|w|, so the percent scale
+    #   cancels — dividing by 100 here would be a no-op. Keep the percent values
+    #   verbatim → byte-identical to the pre-F1 behaviour.
+    # * NON-NORMALIZING (leveraged): the raw weights ARE the notional multiples
+    #   of NAV, so they must be in FRACTION units — 200% → 2.0×, not 200×.
+    #   Convert percent→fraction (÷100). A hold-option leg keeps its |weight|
+    #   (sign already baked into the synthetic curve); under leverage the
+    #   MAGNITUDE must still scale, which ÷100 preserves.
+    if body.normalize_weights:
+        combine_weights = portfolio_weights
+    else:
+        combine_weights = {k: v / 100.0 for k, v in portfolio_weights.items()}
     # ── Transaction costs (OFF by default → byte-identical). Continuous-futures
     #    rolls are charged a round-trip on the leg's notional fraction at each
     #    interior roll bar, routed into the EQUITY computation here (the display
@@ -2119,7 +2732,19 @@ async def _compute_portfolio_uncached(
     #    rolls) and never touches signal legs → no double-count. ──
     roll_turnover: npt.NDArray[np.float64] | None = None
     if not cost_config.is_zero():
-        abs_total = sum(abs(w) for w in portfolio_weights.values()) or 1.0
+        # Roll-turnover denominator must match how the equity path scales the
+        # weights. In NORMALIZED mode the equity divides every weight by Σ|w|, so
+        # a leg's portfolio share is |w|/Σ|w| and its round-trip roll turns over
+        # that fraction of NAV. In NON-NORMALIZING mode the equity keeps the raw
+        # weights (a 2.0× leg IS 2× NAV of notional), so the denominator must be
+        # 1.0 — a round-trip on that leg turns over 2× NAV, scaling with gross
+        # notional exactly like the daily kernel's establish_turnover (which uses
+        # the raw positions). Using Σ|w| here would silently re-normalize the
+        # cost overlay while the equity path does not — the divergence F1 forbids.
+        if body.normalize_weights:
+            abs_total = sum(abs(w) for w in combine_weights.values()) or 1.0
+        else:
+            abs_total = 1.0
         date_to_idx = {int(d): i for i, d in enumerate(common_dates.tolist())}
         rt = np.zeros(len(common_dates), dtype=np.float64)
         for label, leg in body.legs.items():
@@ -2129,7 +2754,7 @@ async def _compute_portfolio_uncached(
             if not isinstance(spec, ContinuousLegSpec):
                 continue
             try:
-                cseries = await svc.get_continuous(
+                cseries = await _leg_svc(leg).get_continuous(
                     spec.collection, spec.roll_config, start=start_date, end=end_date
                 )
             except Exception as exc:  # noqa: BLE001 — cost overlay, never fail compute
@@ -2140,7 +2765,7 @@ async def _compute_portfolio_uncached(
                     exc,
                 )
                 continue
-            frac = abs(portfolio_weights[label]) / abs_total
+            frac = abs(combine_weights[label]) / abs_total
             for d in cseries.roll_dates:
                 idx = date_to_idx.get(int(d))
                 if idx is not None:
@@ -2151,7 +2776,7 @@ async def _compute_portfolio_uncached(
         for label in hold_option_labels:
             if label not in portfolio_weights:
                 continue
-            frac = abs(portfolio_weights[label]) / abs_total
+            frac = abs(combine_weights[label]) / abs_total
             for d in option_roll_dates_interior.get(label, []):
                 idx = date_to_idx.get(int(d))
                 if idx is not None:
@@ -2160,12 +2785,13 @@ async def _compute_portfolio_uncached(
 
     result = compute_weighted_portfolio(
         aligned_closes,
-        portfolio_weights,
+        combine_weights,
         rebalance_freq.value,
         body.return_type,
         common_dates,
         cost_config=cost_config,
         roll_turnover=roll_turnover,
+        normalize_weights=body.normalize_weights,
     )
 
     # ── 8. Compute metrics ──
@@ -2223,7 +2849,7 @@ async def _compute_portfolio_uncached(
         if not isinstance(spec, ContinuousLegSpec):
             continue
         try:
-            cseries = await svc.get_continuous(
+            cseries = await _leg_svc(leg).get_continuous(
                 spec.collection,
                 spec.roll_config,
                 start=start_date,
@@ -2579,11 +3205,51 @@ async def _compute_portfolio_uncached(
 @router.post("/compute")
 async def compute_portfolio(
     body: PortfolioRequest,
+    request: Request,
     svc: MarketDataService = Depends(get_market_data),
     classify: Callable[[str], AssetClass | None] = Depends(get_collection_classifier),
     repo: WriteRepository = Depends(get_write_repository),
 ) -> dict:
+    """Bind the run's data source, then compute (see ``_compute_portfolio_cached``).
+
+    This is the ONLY place a compute learns which warehouse it reads. Everything
+    below takes ``svc`` as a plain argument, so rebinding it here propagates to
+    the engine fetcher, the option-stream wiring and every nested leg without a
+    single further edit.
+
+    ``data_source="v1"`` (the default, and every request that omits the field)
+    keeps the exact object ``Depends(get_market_data)`` resolved, so the default
+    path is bit-for-bit what it was (Sign 1). The classifier is rebound from the
+    SAME service for v2 rather than shared, so the two can never drift even
+    though their ``asset_class_for`` implementations are currently identical.
+    """
+    if body.data_source != "v1":
+        svc = get_market_data_for(request, body.data_source)
+        classify = svc.asset_class_for
+    # Supply a source→service resolver so EACH leg (and each composed child) binds
+    # the warehouse matching its own ``data_source`` — the general per-instrument
+    # rule. Only this route holds the ``Request`` needed to reach both services on
+    # app.state, so the resolver is created here and threaded down; every other
+    # caller passes None and keeps the single-service behaviour.
+    def _svc_for(ds: DataSource) -> MarketDataService:
+        return get_market_data_for(request, ds)
+
+    return await _compute_portfolio_cached(body, svc, classify, repo, svc_for=_svc_for)
+
+
+async def _compute_portfolio_cached(
+    body: PortfolioRequest,
+    svc: MarketDataService,
+    classify: Callable[[str], AssetClass | None],
+    repo: WriteRepository,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
+) -> dict:
     """Compute a weighted portfolio, served from the on-disk result cache.
+
+    ``svc_for`` (source→service resolver, route-only) is threaded through so each
+    leg — and each composed child — is computed against its own ``data_source``
+    (per-instrument selection). Defaults to None → the parent ``svc`` is used
+    everywhere (byte-identical to before) for every non-route caller.
 
     The result is content-addressed on the request body (children already
     inlined), so:
@@ -2610,7 +3276,7 @@ async def compute_portfolio(
     # Cache opt-out: skip the cache on both ends — never read, never write.
     if not body.use_cache:
         started = time.perf_counter()
-        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        result = await _compute_portfolio_uncached(body, svc, classify, repo, svc_for=svc_for)
         computed_ms = int((time.perf_counter() - started) * 1000)
         return {**result, "from_cache": False, "computed_ms": computed_ms}
 
@@ -2625,7 +3291,7 @@ async def compute_portfolio(
 
     async def _compute() -> dict:
         compute_started = time.perf_counter()
-        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        result = await _compute_portfolio_uncached(body, svc, classify, repo, svc_for=svc_for)
         meta["computed_ms"] = int((time.perf_counter() - compute_started) * 1000)
         return result
 

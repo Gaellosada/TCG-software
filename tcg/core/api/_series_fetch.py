@@ -20,8 +20,9 @@ behaviour is unchanged; ``signals.py`` re-imports them.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import date
-from typing import Any
+from typing import Any, Callable, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -34,17 +35,27 @@ from tcg.core.api._models import (
 )
 from tcg.data.protocols import MarketDataService
 from tcg.engine.signal_exec import SignalDataError, SignalValidationError
-from tcg.types.errors import DataNotFoundError
+from tcg.types.errors import DataNotFoundError, ValidationError
 from tcg.types.options import expand_cycle
 from tcg.types.signal import (
+    DeltaHedgeSpec,
+    HedgeSpec,
     InputInstrument,
     InstrumentBasket,
     InstrumentContinuous,
     InstrumentOptionStream,
     InstrumentSpot,
+    delta_hedge_to_hedge_spec,
 )
 
 logger = logging.getLogger(__name__)
+
+# Per-instrument warehouse resolver: maps a leaf's OWN ``data_source``
+# (``"v1"`` / ``"v2"`` / ``None`` = inherit) to the matching ``MarketDataService``.
+# The inheritance default is baked into the closure by the caller, so the fetch
+# layer only ever asks "which service for THIS leaf's source" and stays ignorant
+# of the enclosing body's default.
+SvcResolver = Callable[[Optional[str]], MarketDataService]
 
 
 def _hold_cache_key(instrument: InstrumentOptionStream) -> Any:
@@ -71,6 +82,10 @@ def _hold_cache_key(instrument: InstrumentOptionStream) -> Any:
         (int(instrument.roll_offset.value), instrument.roll_offset.unit),
         instrument.sizing_mode,
         instrument.futures_reference,
+        # Per-instrument source: a v1 vs v2 fetch of otherwise-identical axes
+        # yields DIFFERENT roll info, so the two must not share this per-signal
+        # cache slot when one fetcher spans both warehouses.
+        instrument.data_source,
     )
 
 
@@ -88,6 +103,8 @@ def _continuous_cache_key(instrument: InstrumentContinuous) -> Any:
         instrument.cycle or "",
         int(instrument.roll_offset),
         instrument.strategy,
+        # Per-instrument source (see ``_hold_cache_key``): keep v1 and v2 apart.
+        instrument.data_source,
     )
 
 
@@ -119,6 +136,7 @@ def _materialise_leg_instrument(
         return InstrumentSpot(
             collection=instrument_ref.collection,
             instrument_id=instrument_ref.instrument_id,
+            data_source=instrument_ref.data_source,
         )
     if isinstance(instrument_ref, ContinuousInstrumentRef):
         if not instrument_ref.collection:
@@ -132,6 +150,7 @@ def _materialise_leg_instrument(
             cycle=instrument_ref.cycle,
             roll_offset=int(instrument_ref.rollOffset),
             strategy=instrument_ref.strategy,
+            data_source=instrument_ref.data_source,
         )
     if isinstance(instrument_ref, OptionStreamRef):
         if not instrument_ref.collection:
@@ -260,13 +279,20 @@ async def _date_array_for_leaf_instrument(
     start: date | None,
     end: date | None,
     err_prefix: str,
+    svc_for: "SvcResolver | None" = None,
 ) -> npt.NDArray[np.int64]:
     """Fetch the date array for a non-basket leaf instrument.
 
     Shared between the top-level :func:`compute_input_overlap` loop and
     its basket-leg recursion; mirrors exactly the per-type branches
     that already lived inside the loop.
+
+    ``svc_for`` (per-instrument v1/v2 selection): when supplied, the warehouse is
+    resolved from THIS leaf's ``data_source`` (``svc_for(inst.data_source)``);
+    when ``None``, the single ``svc`` is used verbatim — byte-identical to the
+    pre-per-instrument path.
     """
+    svc = svc_for(inst.data_source) if svc_for is not None else svc
     if isinstance(inst, InstrumentSpot):
         try:
             series = await svc.get_prices(
@@ -342,6 +368,7 @@ async def basket_leg_date_intersection(
     start: date | None,
     end: date | None,
     err_prefix: str,
+    svc_for: "SvcResolver | None" = None,
 ) -> npt.NDArray[np.int64]:
     """Intersect a basket's per-leg date arrays into one int-date axis.
 
@@ -359,6 +386,7 @@ async def basket_leg_date_intersection(
             start=start,
             end=end,
             err_prefix=f"{err_prefix} basket leg {leg_index}",
+            svc_for=svc_for,
         )
         if basket_dates is None:
             basket_dates = leg_dates
@@ -416,14 +444,172 @@ def _pick_field(series, field: str) -> npt.NDArray[np.float64]:
     )
 
 
+async def resolve_hedge_raw(
+    *,
+    label: str,
+    hedge: HedgeSpec,
+    instrument: InstrumentOptionStream,
+    fetch_fn: Any,
+    svc: MarketDataService,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]] | None,
+]:
+    """Fetch the RAW (unaligned) delta / hedge-price / gate series a hedge needs.
+
+    The UNIFIED data path for the modular hedge overlay — shared by BOTH
+    hedge-attach sites (``portfolio._build_delta_hedge_arrays`` and the signal-leg
+    ``fetch_delta_hedge_series``) so the fetch is defined once.  Each caller then
+    re-indexes the ``(dates, values)`` pairs onto ITS OWN date axis and computes
+    the gate + roll mask — the only per-site difference.
+
+    * DELTA — the HELD option contract's per-day delta.  Sourced by resolving the
+      SAME option instrument a SECOND time with ``stream="delta"`` (hold ON,
+      ``delta_hedge`` cleared so the resolve never recurses).
+    * HEDGE-PRICE — the hedge instrument's price series, dispatched on
+      ``hedge.hedge_instrument``: an :class:`InstrumentContinuous` resolves via
+      ``get_continuous`` (honouring its adjustment / cycle / roll-offset / strategy
+      — the VX1 default is front-month DIFFERENCE, byte-identical to the legacy
+      hard-wire); an :class:`InstrumentSpot` resolves via ``get_prices``.  The
+      hedge's per-unit delta is ``1`` (spot/future) so the engine's
+      ``hedge_unit_delta`` stays all-ones — resolved by the caller, not returned.
+    * GATE — the raw activation series LEVEL (SPEC: VVIX via ``INDEX``/``IND_VVIX``);
+      the caller applies ``gate_op``/``gate_threshold``.  ``None`` when
+      ``hedge.gate_collection is None`` (always-on activation) — the caller then
+      treats the gate as all-True.
+
+    Returns ``((d_dates, d_vals), (hp_dates, hp_close), gate_pair_or_None)``.
+    Raises :class:`ValidationError` on a resolve error / empty series; the signal
+    side-channel converts it to ``SignalDataError`` for uniform handling.
+    """
+    # ── DELTA: second hold resolve of the same contract, stream="delta" ──
+    delta_instrument = replace(instrument, stream="delta", delta_hedge=None)
+    try:
+        d_dates, d_vals = await fetch_fn(delta_instrument, "delta")
+    except (SignalDataError, SignalValidationError) as exc:
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge could not resolve the option delta "
+            f"series: {exc}"
+        ) from exc
+
+    # ── HEDGE-PRICE: dispatch on the hedge instrument type (spot/future, δ≡1) ──
+    hi = hedge.hedge_instrument
+    if isinstance(hi, InstrumentContinuous):
+        try:
+            roll_cfg = build_roll_config(
+                hi.adjustment, hi.cycle, hi.roll_offset, strategy=hi.strategy
+            )
+        except ValueError as exc:
+            raise ValidationError(
+                f"Leg '{label}': delta-hedge future roll config invalid: {exc}"
+            ) from exc
+        h_series = await svc.get_continuous(
+            hi.collection, roll_cfg, start=start_date, end=end_date
+        )
+        if h_series is None or len(h_series.prices) == 0:
+            raise ValidationError(
+                f"Leg '{label}': delta-hedge could not load the hedge future "
+                f"'{hi.collection}' (continuous is empty)"
+            )
+        hp_pair = (h_series.prices.dates, h_series.prices.close)
+    elif isinstance(hi, InstrumentSpot):
+        p_series = await svc.get_prices(
+            hi.collection, hi.instrument_id, start=start_date, end=end_date
+        )
+        if p_series is None or len(p_series) == 0:
+            raise ValidationError(
+                f"Leg '{label}': delta-hedge could not load the hedge spot "
+                f"'{hi.collection}/{hi.instrument_id}'"
+            )
+        hp_pair = (p_series.dates, p_series.close)
+    else:  # pragma: no cover - the union is closed to spot/future
+        raise ValidationError(
+            f"Leg '{label}': unsupported hedge instrument "
+            f"{type(hi).__name__!r} (only spot / continuous future)"
+        )
+
+    # ── GATE: raw activation series LEVEL (op/threshold applied by the caller) ──
+    gate_pair: tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]] | None = None
+    if hedge.gate_collection is not None and hedge.gate_symbol is not None:
+        gate_series = await svc.get_prices(
+            hedge.gate_collection, hedge.gate_symbol, start=start_date, end=end_date
+        )
+        if gate_series is None or len(gate_series) == 0:
+            raise ValidationError(
+                f"Leg '{label}': delta-hedge could not load the gate series "
+                f"'{hedge.gate_collection}/{hedge.gate_symbol}'"
+            )
+        gate_pair = (gate_series.dates, gate_series.close)
+
+    return (
+        (
+            np.asarray(d_dates, dtype=np.int64),
+            np.asarray(d_vals, dtype=np.float64),
+        ),
+        hp_pair,
+        gate_pair,
+    )
+
+
+async def resolve_delta_hedge_raw(
+    *,
+    label: str,
+    hedge: DeltaHedgeSpec,
+    instrument: InstrumentOptionStream,
+    fetch_fn: Any,
+    svc: MarketDataService,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+]:
+    """Back-compat shim: migrate a legacy :class:`DeltaHedgeSpec` and delegate to
+    :func:`resolve_hedge_raw`.
+
+    The legacy VX1 spec migrates to a front-month, difference-adjusted
+    :class:`InstrumentContinuous` (:func:`delta_hedge_to_hedge_spec`), so the
+    ``get_continuous`` call and the gate fetch are byte-identical to the prior
+    hard-wired path.  ``gate_collection`` is always set on a legacy spec ⇒ the gate
+    pair is never ``None`` here (the 3-pair legacy return shape is preserved).
+    """
+    d_pair, hp_pair, gate_pair = await resolve_hedge_raw(
+        label=label,
+        hedge=delta_hedge_to_hedge_spec(hedge),
+        instrument=instrument,
+        fetch_fn=fetch_fn,
+        svc=svc,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    assert gate_pair is not None  # legacy spec always carries a gate
+    return d_pair, hp_pair, gate_pair
+
+
 def make_signal_fetcher(
     svc: MarketDataService,
     start: date | None,
     end: date | None,
     *,
+    svc_for: "SvcResolver | None" = None,
     diag_sink: list[dict[str, Any]] | None = None,
     use_chain_cache: bool = True,
 ) -> Any:
+    # ``svc_for`` (per-instrument v1/v2 selection): when supplied, EACH instrument
+    # fetch resolves its warehouse from the instrument's own ``data_source``
+    # (``svc_for(instrument.data_source)``) instead of the single closed-over
+    # ``svc``.  ``None`` (the Data-page basket path and any non-source-aware
+    # caller) keeps the single ``svc`` — byte-identical to before.  The option
+    # wiring cache is keyed by the RESOLVED service so a mixed-source signal
+    # builds one wiring per warehouse, not one global slot.
+    def _resolve(instrument: InputInstrument) -> MarketDataService:
+        if svc_for is None:
+            return svc
+        return svc_for(getattr(instrument, "data_source", None))
     # ``diag_sink`` (opt-in): when a list is supplied, every option_stream fetch
     # appends a per-leg coverage record ``{descriptor, dates, error_codes}`` so a
     # caller (the Data-page basket path) can explain WHY points are missing rather
@@ -432,13 +618,13 @@ def make_signal_fetcher(
     # Lazy-init cache for option_stream wiring — built once on first
     # option_stream fetch, then reused for all subsequent option_stream
     # inputs within this signal evaluation.
-    _os_wiring_cache: dict[str, Any] = {}
+    _os_wiring_cache: dict[int, Any] = {}
     # Per-signal cache of hold-mode option roll info, keyed by the instrument
     # identity.  Populated during the normal ``fetch`` of a hold-mode option
     # input (which runs FIRST, via operand resolution) and read by
     # ``fetch_hold_roll_info`` (which ``signal_exec`` calls afterwards for the
     # fixed-contract dollar-P&L path) — so the resolver runs ONCE per hold input.
-    _hold_roll_info_cache: dict[Any, tuple[Any, Any, Any, Any]] = {}
+    _hold_roll_info_cache: dict[Any, tuple[Any, Any, Any, Any, Any]] = {}
     # Companion: the resolved (m_fut, m_opt) multipliers for a futures-notional
     # hold input, keyed the same way, populated during the same ``fetch``.  Read by
     # ``fetch_hold_multipliers`` (signal_exec / portfolio) — the engine never reads
@@ -478,8 +664,9 @@ def make_signal_fetcher(
         instrument: InputInstrument, field: str
     ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
         if isinstance(instrument, InstrumentSpot):
+            _svc = _resolve(instrument)
             try:
-                series = await svc.get_prices(
+                series = await _svc.get_prices(
                     instrument.collection,
                     instrument.instrument_id,
                     start=start,
@@ -499,6 +686,7 @@ def make_signal_fetcher(
             return series.dates, values
 
         if isinstance(instrument, InstrumentOptionStream):
+            _svc = _resolve(instrument)
             # Lazy imports — keeps the engine/options dependency
             # function-scoped (same pattern as _options_materialise).
             from tcg.core.api._options_wiring import build_stream_resolver_wiring
@@ -517,9 +705,10 @@ def make_signal_fetcher(
             # ranged fetch per distinct future, not per trade date — the Phase-C
             # N+1).  All option legs share this window, so the cache is reused
             # across legs; result-invariant.
-            if "wiring" not in _os_wiring_cache:
-                _os_wiring_cache["wiring"] = build_stream_resolver_wiring(
-                    svc,
+            _wkey = id(_svc)
+            if _wkey not in _os_wiring_cache:
+                _os_wiring_cache[_wkey] = build_stream_resolver_wiring(
+                    _svc,
                     underlying_prefetch_window=(trade_dates[0], trade_dates[-1]),
                     use_chain_cache=use_chain_cache,
                 )
@@ -529,7 +718,7 @@ def make_signal_fetcher(
                 ul_resolver,
                 bulk_reader,
                 root_ul_resolver,
-            ) = _os_wiring_cache["wiring"]
+            ) = _os_wiring_cache[_wkey]
 
             # Shared process-wide dwh-pool gate: a basket with several option
             # legs resolves them in turn HERE, but the Data page fires the
@@ -549,7 +738,7 @@ def make_signal_fetcher(
             # through unchanged.  The SAME expanded value feeds the expiration list
             # AND the chain fetch so the two never disagree.
             _cycle = expand_cycle(instrument.cycle)
-            all_expirations = await svc.list_option_expirations_filtered(
+            all_expirations = await _svc.list_option_expirations_filtered(
                 instrument.collection,
                 option_type=instrument.option_type,
                 cycle=_cycle,
@@ -567,7 +756,7 @@ def make_signal_fetcher(
             )
 
             available_by_date = await fetch_nearest_target_expirations_by_date(
-                svc=svc,
+                svc=_svc,
                 maturity=instrument.maturity,
                 collection=instrument.collection,
                 option_type=instrument.option_type,
@@ -599,7 +788,7 @@ def make_signal_fetcher(
                 )
 
                 futures_ref_resolver = build_futures_reference_resolver(
-                    svc,
+                    _svc,
                     option_collection=instrument.collection,
                     futures_reference=instrument.futures_reference,
                     prefetch_window=(trade_dates[0], trade_dates[-1]),
@@ -653,12 +842,17 @@ def make_signal_fetcher(
                 key = _hold_key(instrument)
                 # 3→4-tuple ripple (Guardrail Sign 4): carry roll_future_ref (NaN
                 # array in premium mode where the resolver populated nothing).
+                # 4→5-tuple ripple (P-OFFROLL-SIZING): also carry daily_future_ref
+                # (the per-date front-future price for off-roll opens; None/NaN when
+                # premium mode or the resolver omitted it → engine rescue never fires).
                 _roll_fref = roll_info_out.get("roll_future_ref")
+                _daily_fref = roll_info_out.get("daily_future_ref")
                 _hold_roll_info_cache[key] = (
                     dates_arr,
                     roll_info_out["is_roll"],
                     roll_info_out["roll_premium"],
                     _roll_fref,
+                    _daily_fref,
                 )
                 # Companion: stash the per-date diagnostics so the portfolio hold
                 # path can name the dominant cause on an all-NaN resolve.
@@ -773,6 +967,7 @@ def make_signal_fetcher(
             return weighted_dates, weighted_values
 
         # continuous
+        _svc = _resolve(instrument)
         try:
             roll_config = build_roll_config(
                 instrument.adjustment,
@@ -783,7 +978,7 @@ def make_signal_fetcher(
         except ValueError as exc:
             raise SignalValidationError(f"continuous input: {exc}") from exc
         try:
-            cseries = await svc.get_continuous(
+            cseries = await _svc.get_continuous(
                 instrument.collection,
                 roll_config,
                 start=start,
@@ -812,14 +1007,17 @@ def make_signal_fetcher(
         npt.NDArray[np.float64],
         npt.NDArray[np.float64],
         "npt.NDArray[np.float64] | None",
+        "npt.NDArray[np.float64] | None",
     ]:
         """Return the hold-mode roll structure for ``signal_exec``'s dollar-P&L path.
 
-        ``(dates, is_roll, roll_premium, roll_future_ref)`` — populated during the
-        normal ``fetch`` of this hold-mode option input (which runs first, so the
-        cache is warm).  ``roll_future_ref`` is a NaN array in premium_notional mode
-        (the resolver populates it only in futures_notional mode).  Falls back to a
-        fresh resolve if, defensively, the cache is cold.
+        ``(dates, is_roll, roll_premium, roll_future_ref, daily_future_ref)`` —
+        populated during the normal ``fetch`` of this hold-mode option input (which
+        runs first, so the cache is warm).  ``roll_future_ref`` is a NaN array in
+        premium_notional mode (the resolver populates it only in futures_notional
+        mode); ``daily_future_ref`` (P-OFFROLL-SIZING) is the per-date front-future
+        price used to size an off-roll open, ``None``/NaN when premium mode or the
+        resolver omitted it.  Falls back to a fresh resolve if the cache is cold.
         """
         key = _hold_key(instrument)
         cached = _hold_roll_info_cache.get(key)
@@ -906,9 +1104,62 @@ def make_signal_fetcher(
             return np.array([], dtype=np.int64)
         return np.asarray(cached, dtype=np.int64)
 
+    async def fetch_delta_hedge_series(
+        instrument: InstrumentOptionStream,
+    ) -> tuple[
+        tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+        tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+        tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+        float,
+        float,
+        str,
+    ]:
+        """Resolve the RAW delta-hedge series + config for a hold-mode option
+        input's :class:`DeltaHedgeSpec` (F2, SPEC §5.5/§5.6 — the SIGNAL-leg
+        analog of the portfolio path's ``_build_delta_hedge_arrays``).
+
+        Returns ``((d_dates, d_vals), (vx_dates, vx_close), (gate_dates,
+        gate_close), factor, gate_threshold, gate_op)``.  ``signal_exec`` re-indexes
+        the three series onto the signal's union axis, applies ``gate_op`` vs
+        ``gate_threshold`` and ANDs with ``~is_roll`` to form ``hedge_active``, then
+        feeds ``factor``/delta/VX1/active to ``_HoldPnLSpec``.  The DATA FETCH is the
+        shared :func:`resolve_delta_hedge_raw`; only the axis differs from the
+        portfolio path.  A missing/disabled ``delta_hedge`` never reaches here (the
+        engine guards on it) — this is only called for a hedged hold input."""
+        hedge = instrument.delta_hedge
+        if hedge is None:  # pragma: no cover (engine only calls this when set)
+            raise SignalDataError(
+                "fetch_delta_hedge_series called for an option input without a "
+                "delta_hedge config"
+            )
+        try:
+            (d_pair, vx_pair, gate_pair) = await resolve_delta_hedge_raw(
+                label=str(instrument.collection),
+                hedge=hedge,
+                instrument=instrument,
+                fetch_fn=fetch,
+                svc=svc,
+                start_date=start,
+                end_date=end,
+            )
+        except ValidationError as exc:
+            # Convert the portfolio-convention error to the engine's domain error so
+            # ``evaluate_signal`` handles it uniformly (same flow as a hold-roll
+            # data failure).
+            raise SignalDataError(str(exc)) from exc
+        return (
+            d_pair,
+            vx_pair,
+            gate_pair,
+            float(hedge.factor),
+            float(hedge.gate_threshold),
+            str(hedge.gate_op),
+        )
+
     fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
     fetch.fetch_continuous_roll_info = fetch_continuous_roll_info  # type: ignore[attr-defined]
     fetch.fetch_hold_diagnostics = fetch_hold_diagnostics  # type: ignore[attr-defined]
     fetch.fetch_hold_multipliers = fetch_hold_multipliers  # type: ignore[attr-defined]
     fetch.fetch_hold_close_fallback = fetch_hold_close_fallback  # type: ignore[attr-defined]
+    fetch.fetch_delta_hedge_series = fetch_delta_hedge_series  # type: ignore[attr-defined]
     return fetch

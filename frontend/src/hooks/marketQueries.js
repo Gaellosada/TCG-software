@@ -335,8 +335,10 @@ export function useV2FuturesCycles(objectId, options = {}) {
 /**
  * GET /data-v2/continuous/options/{id} — settlement-value continuous.
  * Disabled until an objectId AND a numeric target are present. The Delta
- * criterion is greyed in the UI, so ``criterion`` is only ever strike|moneyness
- * here (a delta request would be rejected by the backend anyway).
+ * criterion is now selectable too (v2 fact_greeks is populated), so
+ * ``criterion`` may be strike|moneyness|delta; each keys its own cache entry
+ * here. If the backend does not yet serve delta it answers 400 and the caller
+ * renders that message (graceful degradation, no frontend guess).
  */
 export function useContinuousOptionsV2(objectId, params = {}, options = {}) {
   const { criterion = 'strike', target, optionType = 'put', roll = 'at_expiry', start, end } = params;
