@@ -109,8 +109,9 @@ async def test_usd_1m_rate_persisted_entity(client):
         },
     ]
     # DURABLE, UI-visible entity `Reproduction_USD_1M_rate` (idempotent upsert,
-    # RESEARCH category, NOT soft-deleted). The stored doc is now a SINGLE cash
-    # leg (no companion) — a non-dev opens + runs it from the Portfolio page.
+    # DEV category via REPRO_VISIBLE_CATEGORY, NOT soft-deleted). The stored doc is
+    # now a SINGLE cash leg (no companion) — a non-dev opens + runs it from the
+    # Portfolio page.
     doc, result = await durable_persist_and_run_portfolio(
         client, saved_legs,
         portfolio_id=REPRO_ENTITY_USD_1M_RATE,
@@ -399,9 +400,9 @@ async def _run_eom_put_leg(client, *, target_delta, portfolio_id, name):
             "sizing_mode": "futures_notional", "weight": -100.0,
         }
     ]
-    # DURABLE, UI-visible entity `Reproduction_<leg>` (idempotent upsert, RESEARCH
-    # category, NOT soft-deleted) — the canonical §5.1 reproduction a non-dev
-    # opens + runs from the Portfolio page.
+    # DURABLE, UI-visible entity `Reproduction_<leg>` (idempotent upsert, DEV
+    # category via REPRO_VISIBLE_CATEGORY, NOT soft-deleted) — the canonical §5.1
+    # reproduction a non-dev opens + runs from the Portfolio page.
     doc, result = await durable_persist_and_run_portfolio(
         client, saved_legs, portfolio_id=portfolio_id, name=name,
         category=REPRO_VISIBLE_CATEGORY,
@@ -560,6 +561,12 @@ async def test_short_spx_10d_put_v2wk_proxy(client):
           f"ann_ret={cmp.repro_ann_ret_pct:.2f}% maxDD={cmp.repro_maxdd_pct:.2f}% "
           f"min_equity={cmp.repro_min_equity:.2f}")
     assert cmp.checksum_failures == []
+    # NOTE (thin margin, intentional): observed monthly_corr ~= 0.8019 sits just
+    # above the Wave-0 band floor 0.80 — the 10Δ leg is thin-tailed and this is a
+    # window-limited v2 proxy.  The gate is deliberately the band value (not a
+    # regression floor): if a future in-window v2 data correction pushes it below
+    # 0.80 the proxy genuinely no longer meets the band, and a FAIL is the correct
+    # signal to revisit — not a flake to paper over.
     assert cmp.monthly_corr >= 0.80, cmp.monthly_corr
     assert cmp.equity_log_corr >= 0.90, cmp.equity_log_corr
     assert cmp.repro_min_equity > DEFAULT_BAND.ruin_floor, cmp.repro_min_equity
