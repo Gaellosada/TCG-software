@@ -699,11 +699,6 @@ def saved_legs_to_compute_body(
                 spec["roll_offset"] = leg["roll_offset"]
         elif typ == "cash_rate":
             spec = {"type": "cash_rate", "cash_rate": leg.get("cash_rate")}
-            # A cash_rate leg reads a v2-only rate series, so its data_source
-            # ("v2") MUST survive into the compute body — otherwise the fetch
-            # routes to v1, which has no rate warehouse.
-            if leg.get("data_source"):
-                spec["data_source"] = leg["data_source"]
         elif typ == "continuous":
             spec = {
                 "type": "continuous",
@@ -727,6 +722,12 @@ def saved_legs_to_compute_body(
             }
         else:
             raise ValueError(f"unsupported persisted leg type {typ!r} for label {label!r}")
+        # Per-leaf data_source (v1/v2) must survive into the compute body for ANY
+        # leg type — the fetch layer routes each leaf to its warehouse via
+        # ``svc_for(data_source)``.  Previously only cash_rate propagated it, so a
+        # v2 option_stream leg silently ran on v1 (the principal v1->v2 rebase gap).
+        if leg.get("data_source"):
+            spec["data_source"] = leg["data_source"]
         legs[label] = spec
         weights[label] = float(leg.get("weight", 0.0))
 
@@ -751,7 +752,7 @@ async def persist_and_run_portfolio(
     *,
     portfolio_id: str,
     name: str,
-    category: str = "RESEARCH",
+    category: str = "DEV",
     rebalance: str = "none",
     kind: str = "pure",
     start: str | None = None,
@@ -840,9 +841,11 @@ REPRO_ENTITY_10D_PUT = "Reproduction_Short_SPX_10d_Put_2M"
 REPRO_ENTITY_USD_1M_RATE = "Reproduction_USD_1M_rate"
 
 # The single VISIBLE category the reproduction entities live under.  Explicitly
-# NOT 'DELETED' (the hidden soft-delete sentinel) and NOT 'ARCHIVE' — 'RESEARCH'
-# is a first-class visible ``Category`` so the entity shows on the Portfolio page.
-REPRO_VISIBLE_CATEGORY = "RESEARCH"
+# NOT 'DELETED' (the hidden soft-delete sentinel) and NOT 'ARCHIVE'.  'DEV' is a
+# first-class visible ``Category`` (the app's dev section) so the entity shows on
+# the Portfolio/Signals DEV tab.  The v1->v2 rebase consolidates ALL reproduction
+# entities here (was 'RESEARCH' in the prior wave — Gael 2026-08-07: use DEV).
+REPRO_VISIBLE_CATEGORY = "DEV"
 
 
 async def upsert_durable_portfolio(
