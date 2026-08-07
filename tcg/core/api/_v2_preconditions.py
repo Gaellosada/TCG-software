@@ -183,6 +183,25 @@ def check_v2_preconditions(payload: Mapping[str, Any], *, data_source: str) -> N
             raise ValidationError(f"{_label(path)}: {exc}") from exc
 
 
+def check_v2_option_node(node: Mapping[str, Any], *, label: str) -> None:
+    """Run the pure v2 option preconditions on a SINGLE resolved option node.
+
+    :func:`check_v2_preconditions` walks the request JSON, but a SAVED basket is
+    only an ``id`` on the wire — its option legs are materialised from the DB
+    AFTER that walk (:func:`signals._resolve_basket_inputs`), so a v2 option leg
+    nested in a basket (e.g. the model-default ``stream="mid"``, or a monthly/
+    quarterly ``cycle`` v2 cannot serve) would otherwise skip the collection/
+    cycle/stream gate and degrade to the unattributable all-NaN curve this module
+    exists to prevent. The route feeds each resolved v2 basket option leg through
+    HERE, reusing the exact same ``_check_option_node`` logic, and this re-raises
+    the typed error as a labelled ``ValidationError`` (uniform HTTP 400).
+    """
+    try:
+        _check_option_node(node)
+    except V2DataUnavailable as exc:
+        raise ValidationError(f"{label}: {exc}") from exc
+
+
 def collect_v2_option_roots(
     payload: Mapping[str, Any], *, data_source: str
 ) -> set[str]:

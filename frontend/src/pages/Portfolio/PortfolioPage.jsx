@@ -179,6 +179,10 @@ function PortfolioPage({ mode = 'pure' }) {
     ...(l.type === 'portfolio'
       ? { portfolioId: l.portfolioId || null, portfolioName: l.portfolioName || null }
       : {}),
+    // Cash-rate leg (F4): persist its rate source under ``cash_rate`` (snake_case
+    // CashRateSpec shape). Emitted ONLY for cash legs so every other leg's wire
+    // shape stays byte-identical (autosave dirty-diff parity).
+    ...(l.type === 'cash_rate' ? { cash_rate: l.cash_rate || null } : {}),
   })), []);
 
   // Save current portfolio state to backend in the selected category.

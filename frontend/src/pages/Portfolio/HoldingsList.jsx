@@ -3,6 +3,7 @@ import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import SourceBadge from '../../components/SourceBadge';
 import { formatInstrument } from './formatInstrument';
+import { DEFAULT_CASH_RATE_SOURCE } from './cashRateLeg';
 import styles from './HoldingsList.module.css';
 
 const COL_COUNT = 8;
@@ -146,7 +147,9 @@ export default function HoldingsList({
                                 ? 'Option'
                                 : leg.type === 'continuous'
                                   ? 'Continuous'
-                                  : 'Instrument'}
+                                  : leg.type === 'cash_rate'
+                                    ? 'Cash'
+                                    : 'Instrument'}
                         </span>
                       </td>
                       <td className={styles.monoCell}>
@@ -203,6 +206,22 @@ export default function HoldingsList({
                             <span className={styles.instrumentPrimary}>{leg.collection}</span>
                             <span className={styles.instrumentSecondary}>{leg.strategy || 'front_month'}</span>
                           </span>
+                        ) : leg.type === 'cash_rate' ? (
+                          // Cash-rate leg (F4): a real v2 RATE series (e.g.
+                          // RATE_US_CMT_1M), chosen via the Add-Holding "Rate"
+                          // tab. Display-only — the rate is read from the
+                          // warehouse, never typed by the user.
+                          (() => {
+                            const src = leg.cash_rate || DEFAULT_CASH_RATE_SOURCE;
+                            return (
+                              <span>
+                                <span className={styles.instrumentPrimary}>
+                                  {[src.collection, src.symbol].filter(Boolean).join('/') || '(unset)'}
+                                </span>
+                                <span className={styles.instrumentSecondary}>rate series</span>
+                              </span>
+                            );
+                          })()
                         ) : (
                           // Spot/index legs have no config step to seed, so they
                           // are NOT click-to-edit (plain, non-interactive).

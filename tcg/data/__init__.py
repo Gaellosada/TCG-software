@@ -9,7 +9,7 @@ Public exports:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TypedDict
 
 from tcg.data.protocols import MarketDataService, ResultStore, StrategyStore
 from tcg.data.service import DefaultMarketDataService
@@ -19,7 +19,20 @@ from tcg.data._v2_compat.adapter import V2MarketDataAdapter
 from tcg.data._v2_compat.options_reader import V2OptionsDataReader
 
 
-async def create_services(dwh_pool: DwhConnectionPool) -> dict[str, Any]:
+class MarketDataServices(TypedDict):
+    """Concrete shape returned by :func:`create_services`.
+
+    Each value has a DISTINCT type — the v2 explorer service does not satisfy
+    ``MarketDataService`` and is never a compute source (see the field docs on
+    the factory) — so this is a ``TypedDict`` rather than a homogeneous mapping.
+    """
+
+    market_data: DefaultMarketDataService
+    market_data_v2: DefaultMarketDataServiceV2
+    market_data_v2_compat: V2MarketDataAdapter
+
+
+async def create_services(dwh_pool: DwhConnectionPool) -> MarketDataServices:
     """Factory function. Builds market data services from the dwh pool.
 
     All services share the SAME read-only ``tcg_read`` pool — the v2 ones bind

@@ -162,13 +162,40 @@ async def test_get_prices_rejects_malformed_futures_symbol(adapter):
 
 
 async def test_list_collections(adapter):
-    assert await adapter.list_collections() == ["INDEX", "FUT_SP_500"]
+    assert await adapter.list_collections() == ["INDEX", "FUT_SP_500", "RATE"]
 
 
 async def test_list_collections_filtered_by_asset_class(adapter):
+    # RATE carries no AssetClass (asset_class_for -> None), so a class-filtered
+    # discovery never surfaces it — it is reachable only by explicit name.
     assert await adapter.list_collections(AssetClass.INDEX) == ["INDEX"]
     assert await adapter.list_collections(AssetClass.FUTURE) == ["FUT_SP_500"]
     assert await adapter.list_collections(AssetClass.EQUITY) == []
+
+
+async def test_list_instruments_rate_returns_cmt_symbols(adapter):
+    page = await adapter.list_instruments("RATE")
+    assert [i.symbol for i in page.items] == ["RATE_US_CMT_1M"]
+    assert page.items[0].collection == "RATE"
+
+
+async def test_get_prices_rate_reads_value_series(adapter, monkeypatch):
+    captured = {}
+
+    async def fake_read_rate_values(pool, symbol, *, start=None, end=None):
+        captured["symbol"] = symbol
+        return _series([20070601, 20120601, 20230601], [4.80, 0.03, 5.30])
+
+    monkeypatch.setattr(_sql_v2, "read_rate_values", fake_read_rate_values)
+    ps = await adapter.get_prices("RATE", "RATE_US_CMT_1M")
+    assert captured["symbol"] == "RATE_US_CMT_1M"
+    assert ps is not None
+    assert ps.close.tolist() == [4.80, 0.03, 5.30]  # PERCENT, verbatim
+
+
+async def test_get_prices_rate_rejects_unknown_symbol(adapter):
+    with pytest.raises(V2InstrumentUnavailable):
+        await adapter.get_prices("RATE", "RATE_US_CMT_99Y")
 
 
 async def test_list_collections_excludes_options(adapter):

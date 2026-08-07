@@ -26,6 +26,94 @@ def _fref_at(spec: "_HoldPnLSpec", idx: int) -> float:
     return float(arr[idx])
 
 
+def _daily_fref_at(spec: "_HoldPnLSpec", idx: int) -> float:
+    """The per-date reference-future price at output index ``idx`` (NaN if absent).
+
+    P-OFFROLL-SIZING rescue source: unlike :func:`_fref_at` (finite only at roll /
+    segment-open bars) this is the SAME reference future's close on EVERY trade
+    date, used ONLY to size an off-roll open whose roll/segment reference and
+    carried ``seg_fref`` are both NaN.  ``None`` (the default) returns NaN so the
+    rescue never fires and the shipped path stays byte-identical."""
+    arr = spec.daily_future_ref
+    if arr is None or idx < 0 or idx >= arr.size:
+        return np.nan
+    return float(arr[idx])
+
+
+def delta_hedge_qty(
+    factor: float,
+    option_qty: float,
+    option_delta: float,
+    hedge_unit_delta: float = 1.0,
+    cap_mult: float = 10.0,
+) -> float:
+    """Delta-hedge instrument quantity for a single option position (F2 core mechanic).
+
+    ``qty_hedge = -factor · (option_qty · option_delta) / hedge_unit_delta`` — the
+    hedge instrument's OWN per-unit delta divides, so ``factor`` of the option's
+    net delta is neutralised by that many delta-equivalents of the hedge
+    instrument.  A future/spot has ``hedge_unit_delta = 1`` (the DEFAULT), which
+    reduces to the pre-modularization ``-factor·option_qty·option_delta`` exactly
+    (``x / 1.0 == x`` in IEEE754).  For a LONG call (``option_qty·option_delta >
+    0``, ``hedge_unit_delta > 0``) the result is NEGATIVE ⇒ SHORT the hedge, the
+    sign the spec requires.
+
+    Two guards make the divide safe for a general (option-)hedge whose per-unit
+    delta drifts and can approach 0:
+
+    * **Degenerate delta** — ``|hedge_unit_delta| < 1e-6`` (or non-finite) ⇒ return
+      ``0.0`` (book NO hedge this step; never a silent inf/NaN fill).
+    * **Quantity cap** — ``|qty_hedge| ≤ cap_mult · |option_qty|`` (symmetric clip,
+      default ``cap_mult = 10.0``), applied in QUANTITY units (option-qty scale)
+      before the caller multiplies by ``ΔP_hedge``.  For the VX1/future path
+      (``|δ_opt| ≤ 1``, ``factor = 1/3``, ``hedge_unit_delta = 1``) ``|qty| ≤
+      0.33·|option_qty|`` never binds ⇒ byte-identical.
+
+    Pure scalar; used both by :func:`hedge_step_contrib` / :func:`_compound_with_hold`
+    (per-step) and directly by the unit oracle so the sizing law is verified in
+    isolation.
+    """
+    if not np.isfinite(hedge_unit_delta) or abs(hedge_unit_delta) < 1e-6:
+        return 0.0
+    q = -factor * option_qty * option_delta / hedge_unit_delta
+    bound = cap_mult * abs(option_qty)
+    return float(np.clip(q, -bound, bound))
+
+
+def hedge_step_contrib(
+    *,
+    factor: float,
+    option_qty_cur: float,
+    delta_opt_s: float,
+    hedge_unit_delta_s: float,
+    d_hedge_price: float,
+    cap_mult: float = 10.0,
+) -> float:
+    """One step's hedge $-P&L contribution, sized off the option's own quantity.
+
+    The SINGLE accrual primitive shared by BOTH notional bases of
+    :func:`_compound_with_hold` (previously two duplicated inline blocks): given
+    the option's roll-frozen ``option_qty_cur`` (the coefficient of ``dprem`` in
+    the option's own contrib), today's option delta ``delta_opt_s``, the hedge
+    instrument's per-unit delta ``hedge_unit_delta_s`` (``1.0`` for a spot/future),
+    and the hedge price move ``d_hedge_price = P_hedge[s+1] − P_hedge[s]``:
+
+        qty_hedge  = delta_hedge_qty(factor, option_qty_cur, delta_opt_s,
+                                     hedge_unit_delta_s, cap_mult)     (guarded/capped)
+        contrib_$  = qty_hedge · d_hedge_price
+
+    A non-finite ``delta_opt_s`` or ``d_hedge_price`` books ``0.0`` that step
+    (never a silent fill) — mirroring the pre-modularization guard exactly, so the
+    spot/future path stays byte-identical.
+    """
+    if not (np.isfinite(delta_opt_s) and np.isfinite(d_hedge_price)):
+        return 0.0
+    qty_hedge = delta_hedge_qty(
+        factor, option_qty_cur, delta_opt_s, hedge_unit_delta_s, cap_mult
+    )
+    return qty_hedge * d_hedge_price
+
+
 def _futures_denom_ok(spec: "_HoldPnLSpec", fref: float) -> bool:
     """True iff a futures-notional quantity can be sized at ``fref``.
 
@@ -96,6 +184,59 @@ class _HoldPnLSpec:
     # values (or NaN → tail carry-forward) — NEVER a silent 1.0 (Guardrail Sign 2).
     mult_fut: float = 1.0
     mult_opt: float = 1.0
+    # ── Off-roll open sizing (P-OFFROLL-SIZING; None = byte-identical) ──────────
+    # ``roll_future_ref`` is finite ONLY at the option's roll / segment-open bars.
+    # A SIGNAL leg whose entry latches on an arbitrary INTERIOR (off-roll) bar —
+    # before any roll-while-held has frozen ``seg_fref`` — therefore read NaN, could
+    # not be sized, and silently booked ZERO across the whole hold (this dropped the
+    # §5.5 Aug-2024 spike gain).  ``daily_future_ref`` (length ``T``) carries the
+    # SAME reference future's price on EVERY trade date, so an off-roll open can be
+    # sized off the current front-future price.  RESCUE ONLY: it is consulted
+    # exclusively when the roll/segment reference AND the carried ``seg_fref`` are
+    # both NaN on an OFF-ROLL bar — a roll-aligned leg never touches it, so the
+    # shipped (roll-held) path is byte-identical.  ``None`` disables it entirely.
+    daily_future_ref: "npt.NDArray[np.float64] | None" = None
+    # ── Delta-hedge overlay (F2; None = NO hedge → byte-identical, the new path is
+    #    fully guarded).  Models a futures HEDGE sized off THIS option's net delta
+    #    and accrued into the SAME leg equity (faithful to SPEC §5.5/§5.6:
+    #    "call + VX1 hedge" is ONE leg whose equity already includes the hedge). ──
+    # ``hedge_factor`` — the fraction of the option's delta to hedge (SPEC = 1/3);
+    #   None disables the overlay entirely.
+    # ``hedge_delta`` — the HELD option contract's per-bar delta (length ``T``);
+    #   NaN on a bar ⇒ that step's hedge books 0 (never a silent fill).
+    # ``hedge_price`` — the hedge future's (VX1) per-bar price (length ``T``); the
+    #   daily hedge P&L is ``qty_hedge·(hedge_price[s+1]−hedge_price[s])``.  NaN at
+    #   either end of a step ⇒ that step's hedge books 0.
+    # ``hedge_active`` — per-bar 0/1 gate (length ``T``): the hedge accrues on step
+    #   ``s`` only when ``hedge_active[s]`` (default None = always active while the
+    #   position is held).  The gate/exit LIFECYCLE (VVIX>150, VIX<MA5 …) is
+    #   precomputed by the caller and passed in — the engine only SIZES + rebalances.
+    # Supported in BOTH sizing modes (GAP B): the hedge sizes off the option's OWN
+    # quantity — ``nav_times·NAV_roll/premium_roll`` (premium_notional) or
+    # ``nav_times·NAV_roll·mult_opt/(F_ref·mult_fut)`` (futures_notional) — so it is
+    # well-defined regardless of the leg's notional basis.
+    hedge_factor: "float | None" = None
+    hedge_delta: "npt.NDArray[np.float64] | None" = None
+    hedge_price: "npt.NDArray[np.float64] | None" = None
+    hedge_active: "npt.NDArray[np.bool_] | None" = None
+    # ``hedge_unit_delta`` — the HEDGE instrument's OWN per-unit delta (length
+    #   ``T``).  The hedge quantity DIVIDES by it: ``qty_hedge =
+    #   -factor·option_qty·δ_opt / δ_hedge``.  For a spot/future (the only hedge
+    #   instruments in scope) ``δ_hedge ≡ 1`` — passed as an all-ones array, or left
+    #   ``None`` which the accrual treats as ``1.0`` per step (both byte-identical to
+    #   the pre-modularization ``·1`` behaviour).  A near-zero / non-finite entry
+    #   books 0 that step (guarded in :func:`delta_hedge_qty`).
+    hedge_unit_delta: "npt.NDArray[np.float64] | None" = None
+    # ``rebalance_interval_days`` — re-size the hedge off TODAY's delta only on
+    #   rebalance bars (axis-step index ``s`` with ``s % N == 0``); FREEZE the delta
+    #   sizing between them (delta drift ignored until the next rebalance).  ``N = 1``
+    #   (DEFAULT) rebalances every bar ⇒ EXACTLY the pre-parametrization daily
+    #   behaviour (byte-identical); ``N <= 1`` is treated as ``1``.
+    rebalance_interval_days: int = 1
+    # ``qty_cap_mult`` — the symmetric per-step quantity cap fed to
+    #   :func:`delta_hedge_qty` (``|qty_hedge| ≤ qty_cap_mult·|option_qty|``).  The
+    #   ``10.0`` default never binds for the VX1/future path ⇒ byte-identical.
+    qty_cap_mult: float = 10.0
 
 
 def _compound_with_hold(
@@ -165,6 +306,12 @@ def _compound_with_hold(
     # each roll/open point.  On a gapless segment this equals ``premium[s]`` on every
     # interior step, so the default (continuous-quote) path is byte-identical.
     last_finite: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
+    # Delta-hedge rebalance state: the option delta + hedge-unit delta CAPTURED at
+    # the most recent rebalance bar, reused on frozen (non-rebalance) bars.  NaN
+    # until the first rebalance capture.  At ``rebalance_interval_days == 1`` every
+    # bar recaptures ⇒ these carry no cross-step effect (byte-identical daily path).
+    hedge_frozen_delta: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
+    hedge_frozen_hud: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
 
     # Seed bar-0 sizing: the loop below sizes at bar s+1, so the initial open at
     # bar 0 (a leg latched at bar 0, whose first date is a segment open) must be
@@ -184,6 +331,13 @@ def _compound_with_hold(
                     # first roll that HAS a covering future (nothing to carry from at
                     # bar 0).
                     fref0 = _fref_at(spec, 0)
+                    # P-OFFROLL-SIZING: a bar-0 OFF-ROLL open (no roll reference)
+                    # is sized off the per-date front-future price so it is not left
+                    # unsized until the first roll.  Guarded on ``not is_roll[0]`` so
+                    # a roll-with-missing-future bar-0 keeps its tail/flat behaviour
+                    # (byte-identical).
+                    if not np.isfinite(fref0) and not bool(spec.is_roll[0]):
+                        fref0 = _daily_fref_at(spec, 0)
                     if _futures_denom_ok(spec, fref0):
                         seg_premium[rid] = float(open_prem)
                         seg_fref[rid] = float(fref0)
@@ -271,6 +425,91 @@ def _compound_with_hold(
                 # premium — a NaN leaves the base unchanged).
                 if np.isfinite(cur):
                     last_finite[rid] = float(cur)
+
+                # ── Delta-hedge overlay (F2) ──────────────────────────────────
+                # A futures HEDGE sized off THIS option's net delta, rebalanced
+                # DAILY, accrued into the SAME leg contrib.  qty_hedge(s) =
+                # -factor·option_qty·delta[s]; hedge $ P&L = qty_hedge·ΔVX1[s].
+                # ``option_qty`` is the SAME quantity that scales ``dprem`` in the
+                # option's OWN contrib — i.e. the coefficient of ``dprem`` above —
+                # so the hedge and the hedged option are sized off ONE consistent
+                # quantity in EITHER notional basis (GAP B):
+                #   * premium_notional: sign·nav_times·(seg_er/ratio)/seg_premium
+                #     (byte-identical to before);
+                #   * futures_notional: sign·nav_times·(seg_er/ratio)·mult_opt/
+                #     (seg_fref·mult_fut)  — the option's futures-notional qty; the
+                #     future's per-unit delta is 1 in this same quantity space.
+                # The extra 1/ratio[s] converts the $ P&L to a fraction of CURRENT
+                # NAV, exactly as the option contrib does.  The hedge is INDEPENDENT
+                # of the option's own premium move (depends only on the frozen option
+                # qty, today's delta and ΔVX1), so it books even on a NaN-premium day.
+                # Guarded: no hedge_factor ⇒ untouched (byte-identical).
+                if spec.hedge_factor is not None and (
+                    spec.hedge_active is None or bool(spec.hedge_active[s])
+                ):
+                    hd = spec.hedge_delta
+                    hp = spec.hedge_price
+                    hud = spec.hedge_unit_delta
+                    if hd is not None and hp is not None:
+                        # Mode-specific: the option's OWN roll-frozen quantity — the
+                        # SAME coefficient of ``dprem`` in the option contrib above,
+                        # in EITHER notional basis (GAP B).  ``None`` ⇒ this step's
+                        # seg-denominator is unusable ⇒ no hedge (as before).
+                        option_qty_cur: "float | None" = None
+                        if spec.sizing_mode == "futures_notional":
+                            # Sized off the frozen future notional (seg_fref·mult_fut),
+                            # dollar-delta exposure carries mult_opt.
+                            seg_f_h = seg_fref[rid]
+                            if (
+                                np.isfinite(seg_f_h)
+                                and seg_f_h != 0.0
+                                and np.isfinite(spec.mult_fut)
+                                and spec.mult_fut != 0.0
+                            ):
+                                option_qty_cur = (
+                                    spec.sign
+                                    * spec.nav_times
+                                    * (seg_er[rid] / ratio[s])
+                                    * spec.mult_opt
+                                    / (seg_f_h * spec.mult_fut)
+                                )
+                        else:
+                            seg_p_h = seg_premium[rid]
+                            if np.isfinite(seg_p_h) and seg_p_h != 0.0:
+                                option_qty_cur = (
+                                    spec.sign
+                                    * spec.nav_times
+                                    * (seg_er[rid] / ratio[s])
+                                    / seg_p_h
+                                )
+                        if option_qty_cur is not None:
+                            # Rebalance-freeze: recapture the delta sizing (option
+                            # delta + hedge-unit delta) on a rebalance bar
+                            # (``s % N == 0``), else REUSE the last capture — "re-size
+                            # off today's delta only on rebalance bars".  ``N <= 1``
+                            # recaptures every bar ⇒ byte-identical daily behaviour.
+                            N = spec.rebalance_interval_days
+                            # ``δ_hedge = 1`` for a spot/future (all-ones array or None).
+                            raw_hud = float(hud[s]) if hud is not None else 1.0
+                            if (
+                                N <= 1
+                                or (s % N == 0)
+                                or not np.isfinite(hedge_frozen_delta[rid])
+                            ):
+                                hedge_frozen_delta[rid] = float(hd[s])
+                                hedge_frozen_hud[rid] = raw_hud
+                            delta_s = hedge_frozen_delta[rid]
+                            hud_s = hedge_frozen_hud[rid]
+                            d_hedge = float(hp[s + 1]) - float(hp[s])
+                            if np.isfinite(delta_s) and np.isfinite(d_hedge):
+                                contrib += hedge_step_contrib(
+                                    factor=spec.hedge_factor,
+                                    option_qty_cur=option_qty_cur,
+                                    delta_opt_s=delta_s,
+                                    hedge_unit_delta_s=hud_s,
+                                    d_hedge_price=d_hedge,
+                                    cap_mult=spec.qty_cap_mult,
+                                )
             hold_contrib[rid][s] = contrib
             net += contrib
 
@@ -307,6 +546,17 @@ def _compound_with_hold(
                 continue
             is_open_point = bool(spec.is_roll[s + 1]) or not holding[rid]
             if is_open_point:
+                # The delta-hedge rebalance-freeze (seg_premium's sibling) is a
+                # PER-SEGMENT capture: clear it at every segment open (a roll, or an
+                # off-roll re-latch) so the first active bar of the NEW segment
+                # recaptures off the NEW contract's delta instead of reusing the
+                # PRIOR contract's frozen value under ``rebalance_interval_days > 1``.
+                # NaN forces the next active bar's ``not np.isfinite(...)`` recapture.
+                # At ``N <= 1`` the next bar recaptures every bar regardless ⇒ this is
+                # byte-identical (incl. the VX1/VVIX default path, where N == 1).
+                if spec.hedge_factor is not None:
+                    hedge_frozen_delta[rid] = np.nan
+                    hedge_frozen_hud[rid] = np.nan
                 open_prem = (
                     spec.roll_premium[s + 1]
                     if bool(spec.is_roll[s + 1])
@@ -322,14 +572,18 @@ def _compound_with_hold(
                     # same roll period, so the segment's frozen reference (captured
                     # at its roll) is the correct anchor: carry it forward to size
                     # the re-entry.  A genuine roll bar keeps its own fref_here.
-                    # KNOWN LIMITATION: if the leg is flat ACROSS a roll (the roll's
-                    # resize was skipped while flat) and then re-enters off-roll,
-                    # ``seg_fref`` is stale by one+ roll period, so the re-entry is
-                    # approximately (not exactly) sized until the next roll re-anchors
-                    # it.  Same-roll-period re-entry is exact; and this is strictly
-                    # better than the prior behaviour (ZERO P&L for the whole window).
+                    # P-OFFROLL-SIZING: when the carried ``seg_fref`` is ALSO NaN
+                    # (the leg was never held at a roll — e.g. a signal entry that
+                    # FIRST latches off-roll), fall back to the per-date front-future
+                    # price so the open is sized instead of booking ZERO for the whole
+                    # hold.  RESCUE ONLY — reached exclusively on an off-roll bar where
+                    # both references are NaN, so a roll-aligned leg (finite
+                    # roll_future_ref) and a same-roll-period re-entry (finite
+                    # seg_fref) are byte-identical.
                     if not bool(spec.is_roll[s + 1]) and not np.isfinite(fref_here):
                         fref_here = seg_fref[rid]
+                        if not np.isfinite(fref_here):
+                            fref_here = _daily_fref_at(spec, s + 1)
                     if (
                         np.isfinite(open_prem)
                         and open_prem > 0.0
@@ -441,6 +695,11 @@ def hold_leg_notional_fractions(spec: _HoldPnLSpec) -> npt.NDArray[np.float64]:
         open_prem = roll_premium[0] if bool(is_roll[0]) else premium[0]
         if np.isfinite(open_prem) and open_prem > 0.0:
             fref0 = _fref_at(spec, 0)
+            # P-OFFROLL-SIZING (mirror the P&L seed): rescue a bar-0 OFF-ROLL open
+            # with the per-date front-future price so cost turnover matches the
+            # sizing path.  Guarded on ``not is_roll[0]`` → byte-identical otherwise.
+            if not np.isfinite(fref0) and not bool(is_roll[0]):
+                fref0 = _daily_fref_at(spec, 0)
             if _futures_denom_ok(spec, fref0):
                 seg_premium = float(open_prem)
                 seg_fref = float(fref0)
@@ -461,9 +720,14 @@ def hold_leg_notional_fractions(spec: _HoldPnLSpec) -> npt.NDArray[np.float64]:
             fref_here = _fref_at(spec, b)
             # Off-roll re-open reads NaN (roll_future_ref is finite only at rolls)
             # -> carry the segment's frozen reference forward (same-roll-period
-            # re-entry), matching the P&L path.
+            # re-entry), matching the P&L path.  P-OFFROLL-SIZING: when seg_fref is
+            # ALSO NaN (never held at a roll) fall back to the per-date front-future
+            # price so cost turnover matches the sizing rescue (byte-identical
+            # otherwise — reached only when both references are NaN off-roll).
             if not bool(is_roll[b]) and not np.isfinite(fref_here):
                 fref_here = seg_fref
+                if not np.isfinite(fref_here):
+                    fref_here = _daily_fref_at(spec, b)
             if np.isfinite(open_prem) and open_prem > 0.0:
                 seg_premium = float(open_prem)
                 if _futures_denom_ok(spec, fref_here):

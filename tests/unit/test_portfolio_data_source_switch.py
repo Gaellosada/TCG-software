@@ -880,13 +880,19 @@ async def test_signals_route_routes_each_spot_input_to_its_own_source(
 # The cache key for a known all-v1 body. Per-leaf ``data_source`` must be OMITTED
 # from the dump for a v1/unset leg (the conditional serializer), so the per-instrument
 # field itself does NOT change the key: the ``body`` half is byte-identical to the
-# pre-feature (checkpoint 02180c7) payload. The hash below DOES differ from the
-# original pre-feature capture only because the ``_cv`` namespace was bumped
-# 0.1.13 -> 0.1.14 by the hold-leg freeze fix (dd8c611), an unrelated compute-version
-# change; forcing ``_cv="0.1.13"`` reproduces the original
-# 54eaeb5509c8e2a1c83120942785b7f7c3194c1404e82f68c7bbea2f8c4e84d8 exactly (proven).
+# pre-feature (checkpoint 02180c7) payload. The strategy-repro branch's own optional
+# knobs (``cash_rate``/``delta_hedge`` per leg, ``normalize_weights`` top-level) are
+# conditional-omitted the SAME way, so they too leave the ``body`` half byte-identical
+# when unused. The hash below therefore differs from the ORIGINAL pre-feature capture
+# ONLY through the ``_cv`` namespace, which has been bumped across releases while the
+# body stayed fixed:
+#   _cv 0.1.13 -> 54eaeb5509c8e2a1c83120942785b7f7c3194c1404e82f68c7bbea2f8c4e84d8
+#   _cv 0.1.14 -> f950317e5d5addf63f07ea0cb6d8188aca0769df12ca0fe52eaa52e06d39bc0e
+#   _cv 0.1.15 -> 188d1726eae7435e6e089f69e977453e47bf7b7a825f57e7e7fecfaea18d7907  (current)
+# forcing the matching ``_cv`` reproduces each earlier value exactly (proven). The
+# 0.1.14 -> 0.1.15 bump landed on main; this pin tracks the CURRENT COMPUTE_VERSION.
 _PRE_FEATURE_ALL_V1_CACHE_KEY = (
-    "f950317e5d5addf63f07ea0cb6d8188aca0769df12ca0fe52eaa52e06d39bc0e"
+    "188d1726eae7435e6e089f69e977453e47bf7b7a825f57e7e7fecfaea18d7907"
 )
 
 
@@ -919,7 +925,48 @@ def test_all_v1_body_dump_has_no_leg_data_source_and_matches_pre_feature_key():
     dump = pr.model_dump(mode="json")
     for label, leg in dump["legs"].items():
         assert "data_source" not in leg, f"leg {label!r} leaked data_source: {leg}"
+        # The strategy-repro branch's OPTIONAL leg fields must follow the same
+        # conditional-omit discipline as ``data_source``: a default (None) value
+        # must NOT appear, so an all-v1/legacy leg's dump stays byte-identical to
+        # the pre-feature payload and its cache key is unperturbed.
+        assert "cash_rate" not in leg, f"leg {label!r} leaked cash_rate: {leg}"
+        assert "delta_hedge" not in leg, f"leg {label!r} leaked delta_hedge: {leg}"
+    # ``normalize_weights`` (top level) defaults to True = pre-feature behaviour;
+    # it too must be omitted when default so the body stays byte-identical.
+    assert "normalize_weights" not in dump, f"body leaked normalize_weights: {dump}"
     assert _portfolio_cache_key(pr) == _PRE_FEATURE_ALL_V1_CACHE_KEY
+
+
+def test_used_optional_leg_fields_appear_in_dump_and_change_the_key():
+    """The over-omission guard, mirroring the v2 ``data_source`` case: a leg that
+    actually USES one of the branch's optional fields (``cash_rate`` /
+    ``delta_hedge``) — or a body that turns OFF ``normalize_weights`` — MUST
+    serialise it and get a DIFFERENT cache key from the default body. Conditional
+    omit drops only the default value, never a real one, so cache correctness is
+    preserved (two compute-distinct bodies never share an entry)."""
+    base = PortfolioRequest(**_byte_identity_body())
+    base_key = _portfolio_cache_key(base)
+
+    b1 = _byte_identity_body()
+    b1["legs"]["a"]["cash_rate"] = {
+        "collection": "RATE",
+        "symbol": "RATE_US_CMT_1M",
+    }
+    pr1 = PortfolioRequest(**b1)
+    assert pr1.model_dump(mode="json")["legs"]["a"]["cash_rate"] is not None
+    assert _portfolio_cache_key(pr1) != base_key
+
+    b2 = _byte_identity_body()
+    b2["legs"]["a"]["delta_hedge"] = {"enabled": True, "factor": 0.5}
+    pr2 = PortfolioRequest(**b2)
+    assert pr2.model_dump(mode="json")["legs"]["a"]["delta_hedge"] is not None
+    assert _portfolio_cache_key(pr2) != base_key
+
+    b3 = _byte_identity_body()
+    b3["normalize_weights"] = False
+    pr3 = PortfolioRequest(**b3)
+    assert pr3.model_dump(mode="json")["normalize_weights"] is False
+    assert _portfolio_cache_key(pr3) != base_key
 
 
 def test_v2_leg_keeps_data_source_in_dump_and_changes_the_key():
@@ -1134,3 +1181,24 @@ async def test_multi_source_zero_overlap_is_a_clean_400_not_a_crash(client, serv
     # merge, not a dropped leg.
     assert services["v1"].get_aligned_prices.await_count == 1
     assert services["v2"].get_aligned_prices.await_count == 1
+
+
+def test_specless_cash_rate_leg_defaults_v2_and_dumps_spec() -> None:
+    """A5(2) pin: a specless ``cash_rate`` leg is coerced to the canonical v2 US
+    1M-CMT source in an after-validator. The coercion must (a) stamp
+    ``data_source="v2"`` (rates are v2-only) and (b) populate ``cash_rate`` so the
+    result-cache-key dump carries the source verbatim. Locks the model_dump shape
+    after switching the validator off ``object.__setattr__`` to plain assignment.
+    """
+    leg = portfolio.LegSpec(type="cash_rate")
+    assert leg.data_source == "v2"
+    assert leg.cash_rate is not None
+    dumped = leg.model_dump(mode="json")
+    assert dumped["data_source"] == "v2"
+    assert dumped["cash_rate"]["symbol"] == leg.cash_rate.symbol
+    # An explicit cash_rate spec with no data_source is still forced to v2.
+    leg2 = portfolio.LegSpec(
+        type="cash_rate",
+        cash_rate=portfolio.CashRateSpec(collection="RATE", symbol="RATE_US_CMT_1M"),
+    )
+    assert leg2.data_source == "v2"

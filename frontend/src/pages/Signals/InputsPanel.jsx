@@ -23,6 +23,40 @@ function basketLegLabel(leg) {
   return '?';
 }
 
+// Default cap enabled by the "+ Net cap" toggle: long-or-flat (fraction
+// units, 1.0 == 100% of capital). This is the canonical fix for the
+// OR-of-blocks doubling problem for a LONG leg — two +100% OR-branches that
+// would otherwise net +200% are clamped back to +100%. The user adjusts the
+// bounds (e.g. a short leg → low -100, high 0) after enabling.
+const DEFAULT_CAP = [0, 1];
+
+/**
+ * Format a stored cap bound (wire units — a FRACTION, 1.0 == 100% of
+ * capital) as a percent string for the cap fields. Rounds away binary-float
+ * noise so a fraction like 0.1 renders "10", not "10.000000000000002".
+ * Non-finite → '' (defensive; the control only renders finite bounds).
+ */
+function fracToPctStr(frac) {
+  if (typeof frac !== 'number' || !Number.isFinite(frac)) return '';
+  return String(Number((frac * 100).toFixed(6)));
+}
+
+/**
+ * Parse a cap field's raw percent text → a FRACTION (÷100), or ``null`` when
+ * the text is not yet a finite number (empty / lone sign / lone dot — states
+ * a user passes through mid-typing). ``Number()`` (not ``parseFloat``) so
+ * "12abc" is rejected outright rather than silently truncated to 12.
+ */
+function pctTextToFrac(raw) {
+  const t = (raw ?? '').trim();
+  if (t === '' || t === '-' || t === '+' || t === '.' || t === '-.' || t === '+.') {
+    return null;
+  }
+  const n = Number(t);
+  if (!Number.isFinite(n)) return null;
+  return n / 100;
+}
+
 /**
  * Format an instrument value as a human-readable label for the trigger button.
  */
@@ -85,6 +119,10 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
   // keystrokes here so that empty or duplicate values are visible (and
   // flagged) rather than silently reverting the input.
   const [idDrafts, setIdDrafts] = useState({});
+  // Per-field text drafts for in-progress cap edits, keyed `${idx}:low|high`.
+  // Same rationale as idDrafts: keep the user's raw keystrokes visible (incl.
+  // a partial "-" or "") without committing a NaN bound into state.
+  const [capDrafts, setCapDrafts] = useState({});
 
   const configuredCount = useMemo(
     () => list.filter(isInputConfigured).length,
@@ -144,6 +182,53 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
   function handleDelete(idx) {
     onChange(list.filter((_, i) => i !== idx));
     setPendingDeleteIdx(null);
+  }
+
+  // --- per-input net-position cap (OR-branch clamp) ---------------------
+
+  // Enable the cap with the long-or-flat default; the user then adjusts the
+  // bounds. Spread preserves id + instrument.
+  function handleCapEnable(idx) {
+    onChange(list.map((x, i) => (i !== idx ? x : { ...x, position_cap: [...DEFAULT_CAP] })));
+  }
+
+  // Remove the cap entirely — drops the key so the wire/persist payload is
+  // byte-identical to a never-capped input (no stray position_cap).
+  function handleCapClear(idx) {
+    setCapDrafts((d) => {
+      const rest = { ...d };
+      delete rest[`${idx}:low`];
+      delete rest[`${idx}:high`];
+      return rest;
+    });
+    onChange(list.map((x, i) => {
+      if (i !== idx) return x;
+      const { position_cap: _drop, ...rest } = x;
+      return rest;
+    }));
+  }
+
+  function handleCapDraftChange(idx, bound, raw) {
+    setCapDrafts((d) => ({ ...d, [`${idx}:${bound}`]: raw }));
+    const frac = pctTextToFrac(raw);
+    if (frac === null) return; // mid-typing (empty / lone sign) — keep draft, don't commit NaN
+    onChange(list.map((x, i) => {
+      if (i !== idx) return x;
+      const cur = Array.isArray(x.position_cap) && x.position_cap.length === 2
+        ? x.position_cap
+        : [...DEFAULT_CAP];
+      const next = bound === 'low' ? [frac, cur[1]] : [cur[0], frac];
+      return { ...x, position_cap: next };
+    }));
+  }
+
+  function handleCapDraftCommit(idx, bound) {
+    setCapDrafts((d) => {
+      const key = `${idx}:${bound}`;
+      if (!(key in d)) return d;
+      const { [key]: _discard, ...rest } = d;
+      return rest;
+    });
   }
 
   return (
@@ -265,6 +350,97 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
                 >
                   ×
                 </button>
+                {(() => {
+                  // Net-position cap (fraction units in state; edited in %).
+                  // Clamps the SUM of every latched entry block bound to this
+                  // input each bar, so OR-branches don't stack beyond the
+                  // intended weight (engine: signal_exec.py np.clip). When
+                  // unset the key is absent → byte-identical uncapped path.
+                  const cap = Array.isArray(input.position_cap)
+                    && input.position_cap.length === 2
+                    ? input.position_cap
+                    : null;
+                  const capInvalid = cap !== null && Number(cap[0]) > Number(cap[1]);
+                  const invalidTitle = capInvalid
+                    ? 'Low must be ≤ high, otherwise the cap is dropped and the position is left uncapped'
+                    : undefined;
+                  if (cap === null) {
+                    // Locked + no cap → nothing to show or inspect.
+                    if (readOnly) return null;
+                    return (
+                      <div className={styles.capRow}>
+                        <button
+                          type="button"
+                          className={styles.capToggle}
+                          onClick={() => handleCapEnable(idx)}
+                          data-testid={`input-cap-toggle-${idx}`}
+                          title="Cap this input's net position so OR-branches don't stack beyond the intended weight (two +100% OR-branches would otherwise net +200%)."
+                        >
+                          + Net cap
+                        </button>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className={styles.capRow}>
+                      <span
+                        className={styles.capLabel}
+                        title="Net-position cap (% of capital). Clamps the sum of every latched entry block bound to this input each bar, so OR-branches don't stack beyond the intended weight. Long-or-flat leg: low 0, high 100. Short-or-flat: low -100, high 0."
+                      >
+                        Net cap %
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        className={styles.capField}
+                        value={
+                          capDrafts[`${idx}:low`] !== undefined
+                            ? capDrafts[`${idx}:low`]
+                            : fracToPctStr(cap[0])
+                        }
+                        onChange={(e) => handleCapDraftChange(idx, 'low', e.target.value)}
+                        onBlur={() => handleCapDraftCommit(idx, 'low')}
+                        aria-label={`Input ${input.id || idx + 1} net position cap low percent`}
+                        aria-invalid={capInvalid ? 'true' : 'false'}
+                        title={invalidTitle}
+                        data-testid={`input-cap-low-${idx}`}
+                        readOnly={readOnly}
+                        spellCheck={false}
+                      />
+                      <span className={styles.capTo} aria-hidden="true">to</span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        className={styles.capField}
+                        value={
+                          capDrafts[`${idx}:high`] !== undefined
+                            ? capDrafts[`${idx}:high`]
+                            : fracToPctStr(cap[1])
+                        }
+                        onChange={(e) => handleCapDraftChange(idx, 'high', e.target.value)}
+                        onBlur={() => handleCapDraftCommit(idx, 'high')}
+                        aria-label={`Input ${input.id || idx + 1} net position cap high percent`}
+                        aria-invalid={capInvalid ? 'true' : 'false'}
+                        title={invalidTitle}
+                        data-testid={`input-cap-high-${idx}`}
+                        readOnly={readOnly}
+                        spellCheck={false}
+                      />
+                      {!readOnly && (
+                        <button
+                          type="button"
+                          className={styles.capClear}
+                          onClick={() => handleCapClear(idx)}
+                          data-testid={`input-cap-clear-${idx}`}
+                          aria-label={`Remove net position cap on input ${input.id || idx + 1}`}
+                          title="Remove cap (net position left uncapped)"
+                        >
+                          clear cap
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             );
           })}

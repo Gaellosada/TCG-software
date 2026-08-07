@@ -377,3 +377,80 @@ class TestFEAliasCompatibility:
         body = _request_body([stream])
         resp = await client.post("/api/options/stream", json=body)
         assert resp.status_code == 200, resp.text
+
+
+# ── A2: per-instrument data_source on /stream ────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestDataSourceRouting:
+    """A2: /stream must honour each ref's ``data_source`` — never silently serve
+    v1 for a v2 ref — and route the materialiser to the matching warehouse."""
+
+    async def test_v2_ref_unserviceable_stream_is_rejected(self, client: AsyncClient):
+        # stream='mid' + a v2 source: v2 cannot serve 'mid'. Must 400 up front,
+        # not degrade to an all-NaN curve (or silently return v1 'mid').
+        entry = _stream_entry(collection="OPT_SP_500", stream="mid")
+        entry["ref"]["cycle"] = "W"
+        entry["ref"]["data_source"] = "v2"
+        resp = await client.post("/api/options/stream", json=_request_body([entry]))
+        assert resp.status_code == 400, resp.text
+
+    async def test_mixed_sources_rejected(self, client: AsyncClient):
+        v1 = _stream_entry(label="a", stream="iv")
+        v2 = _stream_entry(label="b", stream="iv")
+        v2["ref"]["cycle"] = "W"
+        v2["ref"]["data_source"] = "v2"
+        resp = await client.post("/api/options/stream", json=_request_body([v1, v2]))
+        assert resp.status_code == 400, resp.text
+        assert "mix" in resp.json().get("message", resp.text).lower()
+
+    async def test_v1_request_unchanged(self, client: AsyncClient):
+        # Byte-identical v1 path: no data_source key, still 200.
+        resp = await client.post(
+            "/api/options/stream", json=_request_body([_stream_entry()])
+        )
+        assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_v2_ref_routes_materialiser_to_v2_service(monkeypatch):
+    """A serviceable v2 ref must hand the v2 service to the materialiser — the
+    original bug served v1 for a v2 ref (dead ``request`` param, v1-fixed svc)."""
+    captured: dict = {}
+
+    async def capturing_materialise(
+        refs_with_labels, *, svc, start_date, end_date, progress_callback=None
+    ):
+        captured["svc"] = svc
+        return _fake_materialise_result([lbl for lbl, _ in refs_with_labels])
+
+    monkeypatch.setattr(
+        "tcg.core.api._options_materialise.materialise_option_streams",
+        capturing_materialise,
+    )
+
+    v1_svc = MagicMock(name="v1")
+    v2_svc = MagicMock(name="v2")
+    app = FastAPI()
+    app.add_exception_handler(TCGError, tcg_error_handler)
+    app.include_router(options_router)
+    app.state.market_data = v1_svc
+    app.state.market_data_v2_compat = v2_svc
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        entry = _stream_entry(collection="OPT_SP_500", stream="close")
+        entry["ref"]["cycle"] = "W"
+        entry["ref"]["data_source"] = "v2"
+        resp = await ac.post("/api/options/stream", json=_request_body([entry]))
+        assert resp.status_code == 200, resp.text
+    assert captured["svc"] is v2_svc  # NOT v1_svc — the fix
+
+    # And a v1 ref still binds the v1 service.
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/options/stream", json=_request_body([_stream_entry(stream="close")])
+        )
+        assert resp.status_code == 200, resp.text
+    assert captured["svc"] is v1_svc

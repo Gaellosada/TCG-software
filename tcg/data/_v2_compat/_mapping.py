@@ -48,6 +48,21 @@ V2_INDEX_COLLECTION: str = "INDEX"
 V2_FUTURES_COLLECTION: str = "FUT_SP_500"
 V2_OPTIONS_COLLECTION: str = "OPT_SP_500"
 
+# --- Rate series (US CMT yields, kind='rate') ------------------------------ #
+#
+# v2 has no native "collection"; the adapter invents ``RATE`` to expose the
+# object-level rate series (``kind='rate'``, ``type='value'``, no contract) as a
+# v1-shaped ``(collection, symbol)`` price-like series. Values are the annualized
+# yield in PERCENT (``3.72 == 3.72%``); the ÷100 to a fraction happens in the
+# cash-rate wiring layer, never here. Symbols resolve by their ``object.symbol``
+# natural key (NOT a hardcoded object_id). Only the US 1-Month CMT yield
+# (``RATE_US_CMT_1M``, FRED DGS1MO) is live-verified/loaded today.
+V2_RATE_COLLECTION: str = "RATE"
+V2_RATE_1M_SYMBOL: str = "RATE_US_CMT_1M"
+# The rate symbols the adapter surfaces (list_instruments / get_prices). Extend
+# as more CMT tenors are loaded; each entry resolves purely by symbol.
+V2_RATE_SYMBOLS: tuple[str, ...] = (V2_RATE_1M_SYMBOL,)
+
 # --- Weekly option roots (spec §3.2) --------------------------------------- #
 #
 # One logical v1 collection (OPT_SP_500) fans out to four EW root objects,
@@ -97,7 +112,12 @@ EW_CYCLE_BY_OBJECT: Mapping[int, str] = {
 
 # Collections the v2 warehouse can serve. Everything else raises (spec §1.4).
 V2_SUPPORTED_COLLECTIONS: frozenset[str] = frozenset(
-    {V2_INDEX_COLLECTION, V2_FUTURES_COLLECTION, V2_OPTIONS_COLLECTION}
+    {
+        V2_INDEX_COLLECTION,
+        V2_FUTURES_COLLECTION,
+        V2_OPTIONS_COLLECTION,
+        V2_RATE_COLLECTION,
+    }
 )
 
 # --- Symbol grammar (spec §2.3, §2.4) -------------------------------------- #

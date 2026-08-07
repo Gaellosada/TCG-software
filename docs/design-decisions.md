@@ -307,3 +307,35 @@ re-fund logic are invalidated rather than served stale.
 **Locations:** `tcg/engine/metrics.py::_compute_periodic_rebalance`,
 `tcg/core/api/portfolio.py` (rebalance guard, `COMPUTE_VERSION`),
 `tcg/engine/hold_pnl.py` / `tcg/engine/signal_exec.py` (the exact-0 ruin clamps).
+
+## Cash-rate leg is series-only — flat `rate_pct` removed (2026-08)
+
+**What changed.** The portfolio cash-rate leg (`cash_rate`) no longer supports a
+**flat / constant-rate** source. The old `{kind: "flat", rate_pct: <n>}` shape is
+gone: a cash-rate leg now **requires** a real rate series (`collection` + `symbol`,
+`data_source = "v2"`) and is materialised from that series alone. The flat FUT_VIX
+companion instrument that used to pair with the flat cash leg was removed at the
+same time.
+
+**Why.** The cash / financing leg must model the *actual* short-rate the strategy
+earns or pays, not a hand-picked constant. It is now backed by the **real 1-month
+US Treasury yield** — FRED **DGS1MO** — loaded into the v2 `RATE` collection
+(symbol `RATE_US_CMT_1M`) as a proper daily series. A constant `rate_pct` silently
+mis-states carry across a regime where the front-end curve moved from ~0% (2020-21)
+to >5% (2023-24); the series removes that source of error and makes cash carry
+reproduce the historical financing environment.
+
+**Back-compat break (authorized).** A pre-existing **saved** portfolio whose JSONB
+carries a flat cash leg (`cash_rate: {kind: "flat", rate_pct: …}`) will **fail to
+load/compute**: the removed keys are ignored on read, leaving `collection`/`symbol`
+unset, so validation raises `ValidationError` ("cash_rate source requires
+'collection' and 'symbol' …"). This is intentional and the error is actionable —
+there is no silent fallback. **Fix for an affected portfolio:** re-create the cash
+leg via the picker's **Rate** tab (which emits the series-backed
+`RATE` / `RATE_US_CMT_1M` reference). There is no automatic migration of old flat
+legs.
+
+**Locations:** `tcg/core/api/portfolio.py` (`CashRateSpec`,
+`LegSpec.validate_cash_rate_has_spec`, `_series_requires_ref`),
+`tcg/data/_v2_compat/_sql_v2.py::read_rate_values` (read-only v2 rate SELECT);
+frontend Rate tab in the instrument picker.

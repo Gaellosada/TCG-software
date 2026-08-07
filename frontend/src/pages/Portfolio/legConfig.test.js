@@ -107,6 +107,25 @@ describe('instrumentToLegConfig (modal onSelect union -> leg config)', () => {
     expect(config.nav_times).toBe(1.0);
   });
 
+  it('maps a cash_rate union to a cash_rate leg config (v2, nested rate ref)', () => {
+    const config = instrumentToLegConfig({
+      type: 'cash_rate',
+      collection: 'RATE',
+      instrument_id: 'RATE_US_CMT_1M',
+      data_source: 'v2',
+    });
+    expect(config).toEqual({
+      type: 'cash_rate',
+      dataSource: 'v2',
+      cash_rate: {
+        collection: 'RATE',
+        symbol: 'RATE_US_CMT_1M',
+        unit: 'percent',
+        compound: true,
+      },
+    });
+  });
+
   it('maps a spot union to an instrument leg config (type instrument, symbol from instrument_id)', () => {
     const config = instrumentToLegConfig({
       type: 'spot',

@@ -13,6 +13,7 @@ import { buildComputeRequestBody, costFieldsForRequest } from '../Signals/reques
 import { dataSourceFieldsForRequest } from '../../lib/dataSource';
 import { persistedDocToLegs } from './persistedDoc';
 import { getChildPortfolioId } from './resolvePortfolioRange';
+import { cashRateApiSpec } from './cashRateLeg';
 
 /**
  * Build the resolved compute request body.
@@ -232,6 +233,18 @@ export function buildPortfolioComputeBody({
       if (leg.rank > 1) {
         apiLegs[leg.label].rank = leg.rank;
       }
+    } else if (leg.type === 'cash_rate') {
+      // Cash / financing accrual leg (F4). The rate SOURCE is a real v2 RATE
+      // series, emitted under ``cash_rate`` in the backend's CashRateSpec shape;
+      // the backend reads it (÷100) and accrues it on the common calendar (SPEC
+      // §5.7). Rates are a v2-ONLY object, so ``data_source: 'v2'`` is MANDATORY
+      // — always stamped (a rate leg always carries dataSource 'v2', but default
+      // to 'v2' defensively so a hand-built/legacy cash leg still routes to v2).
+      apiLegs[leg.label] = {
+        type: 'cash_rate',
+        ...dataSourceFieldsForRequest(leg.dataSource || 'v2'),
+        cash_rate: cashRateApiSpec(leg),
+      };
     } else {
       apiLegs[leg.label] = {
         type: 'instrument',

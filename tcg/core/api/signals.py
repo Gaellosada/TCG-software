@@ -110,10 +110,14 @@ from tcg.core.api._series_fetch import (
     _saved_basket_leg_to_typed,
     basket_leg_date_intersection,
     make_signal_fetcher,
+    resolve_delta_hedge_raw,
+    resolve_hedge_activation_gate,
+    resolve_hedge_raw,
 )
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api._v2_preconditions import (
     check_v2_option_coverage_floor,
+    check_v2_option_node,
     check_v2_preconditions,
     collect_v2_option_roots,
 )
@@ -142,6 +146,7 @@ from tcg.types.signal import (
     Condition,
     ConstantOperand,
     CrossCondition,
+    HysteresisCondition,
     IndicatorOperand,
     InRangeCondition,
     Input,
@@ -183,6 +188,11 @@ class _InputIn(BaseModel):
     # ``_parse_input``'s validator and yields the uniform HTTP-400 envelope
     # instead of a Pydantic 422. ``None``/absent ⇒ no clamp (byte-identical).
     position_cap: Any = None
+    # Optional per-input SIGNAL LAG in trading bars (legacy real-time D-1
+    # timing). Typed ``Any`` (not ``int``) so a malformed value reaches
+    # ``_parse_input``'s validator → uniform HTTP-400 (not a Pydantic 422).
+    # ``None``/absent/``0`` ⇒ no lag (byte-identical same-bar behaviour).
+    signal_lag_days: Any = None
 
 
 class _OperandIn(BaseModel):
@@ -209,6 +219,19 @@ class _ConditionIn(BaseModel):
     min: _OperandIn | None = None
     max: _OperandIn | None = None
     lookback: int | None = None
+    # Hysteresis "episode completion" (op == "hysteresis"): the entry / exit
+    # threshold operands and the episode direction. ``enter``/``exit`` are
+    # ordinary operands; ``direction`` is validated ("up"|"down") in
+    # ``_parse_condition``. Typed ``Any`` so a bad direction routes through the
+    # uniform HTTP-400 envelope rather than a Pydantic 422.
+    enter: _OperandIn | None = None
+    exit: _OperandIn | None = None
+    direction: Any = None
+    # N-consecutive-days extension for the binary comparators (SPEC §5.5).
+    # Absent / 1 ⇒ today's single-bar comparison, byte-identical. Typed ``Any``
+    # (not ``int``) so ``1.5``/``true``/null reach ``_parse_condition``'s guard
+    # and emit the uniform HTTP-400 envelope instead of a Pydantic coercion.
+    consecutive_days: Any = None
     # cross_count extension (cross_above / cross_below only). Defaults
     # reproduce today's single-bar crossover byte-identically; both must be
     # integers >= 1 when supplied (validated in ``_parse_condition``).
@@ -290,6 +313,13 @@ class _BlockIn(BaseModel):
     # envelope rather than a Pydantic 422. Absent ⇒ ``"sustained"`` (so stored
     # signals lacking the field hydrate to the byte-identical default).
     fire_mode: Any = None
+    # LEGACY §4.2 "since last ACTUAL exit" reset semantics for a THEN-chain
+    # entry targeted by an exit (entries only; rejected on resets). Absent /
+    # ``False`` ⇒ the historical raw-exit-condition abort (byte-identical);
+    # ``True`` ⇒ the in-flight arm is aborted ONLY when an exit actually closes
+    # an OPEN position of this entry. Typed ``Any`` so a non-bool routes through
+    # ``_parse_blocks``'s guard to the uniform HTTP-400 envelope.
+    reset_on_actual_exit: Any = None
 
 
 class _SignalRulesIn(BaseModel):
@@ -381,6 +411,9 @@ class _ResolvedBasketInput:
     # Feature 1 per-input net-position clamp, carried through basket resolution
     # (raw wire value; validated in ``_parse_input`` like the non-basket path).
     position_cap: Any = None
+    # Per-input signal lag, carried through basket resolution (raw wire value;
+    # validated in ``_parse_input`` like the non-basket path).
+    signal_lag_days: Any = None
 
 
 async def _resolve_basket_inputs(
@@ -441,6 +474,7 @@ async def _resolve_basket_inputs(
                     basket_id=basket_id,
                     legs=typed_legs,
                     position_cap=inp.position_cap,
+                    signal_lag_days=inp.signal_lag_days,
                 )
             )
         elif isinstance(inp.instrument, BasketRefInline):
@@ -460,11 +494,49 @@ async def _resolve_basket_inputs(
                     legs=typed_legs,
                     asset_class=inline.asset_class,
                     position_cap=inp.position_cap,
+                    signal_lag_days=inp.signal_lag_days,
                 )
             )
         else:
             out.append(inp)
     return out
+
+
+def check_v2_basket_option_legs(
+    resolved_inputs: "Iterable[_InputIn | _ResolvedBasketInput]",
+    *,
+    default_source: str,
+) -> None:
+    """Gate v2 option legs materialised from a basket, which the wire-JSON
+    precondition walk cannot see.
+
+    A saved basket is only an id on the request, so
+    :func:`check_v2_preconditions` (which walks ``model_dump``) never reaches its
+    option legs. Without this a v2 option leg nested in a basket with the default
+    ``stream="mid"`` or a cycle v2 cannot serve skips the collection/cycle/stream
+    check and regresses to the exact unattributable all-NaN curve the
+    preconditions exist to prevent. Mirrors the coverage-floor union: each
+    resolved basket option leg is gated on its OWN effective source, so an all-v1
+    (or v1-basket) run no-ops entirely (Sign 1). Called by BOTH the signals route
+    and the portfolio signal-leg path, right after basket resolution.
+    """
+    for inp in resolved_inputs:
+        if not isinstance(inp, _ResolvedBasketInput):
+            continue
+        for inst, _weight in inp.legs:
+            if (
+                isinstance(inst, InstrumentOptionStream)
+                and effective_data_source(inst.data_source, default_source) == "v2"
+            ):
+                check_v2_option_node(
+                    {
+                        "type": "option_stream",
+                        "collection": inst.collection,
+                        "cycle": inst.cycle,
+                        "stream": inst.stream,
+                    },
+                    label=f"Basket '{inp.id}'",
+                )
 
 
 def _parse_position_cap(raw: Any, *, iid: str) -> tuple[float, float] | None:
@@ -502,11 +574,35 @@ def _parse_position_cap(raw: Any, *, iid: str) -> tuple[float, float] | None:
     return (lo_cap, hi_cap)
 
 
+def _parse_signal_lag_days(raw: Any, *, iid: str) -> int:
+    """Validate a wire ``signal_lag_days`` → a non-negative int (bars) or 0.
+
+    Accepts ``None``/absent (⇒ 0 = no lag). Otherwise requires a non-negative
+    integer. ``bool`` is rejected (it subclasses ``int`` — ``True`` is almost
+    certainly a client bug). Floats are rejected even when integral (a lag is a
+    whole number of trading bars). All failures raise
+    :class:`SignalValidationError` (uniform HTTP-400 envelope).
+    """
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise SignalValidationError(
+            f"input {iid!r}: signal_lag_days must be a non-negative integer "
+            f"(got {raw!r})"
+        )
+    if raw < 0:
+        raise SignalValidationError(
+            f"input {iid!r}: signal_lag_days must be >= 0 (got {raw!r})"
+        )
+    return raw
+
+
 def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
     iid = inp_in.id
     if not iid:
         raise SignalValidationError("input id must be non-empty")
     cap = _parse_position_cap(inp_in.position_cap, iid=iid)
+    lag = _parse_signal_lag_days(inp_in.signal_lag_days, iid=iid)
     # Pre-resolved basket — typed legs already materialised by
     # ``_resolve_basket_inputs``.  No I/O performed here.
     if isinstance(inp_in, _ResolvedBasketInput):
@@ -515,7 +611,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             basket_id=inp_in.basket_id,
             asset_class=inp_in.asset_class,
         )
-        return Input(id=iid, instrument=instrument, position_cap=cap)
+        return Input(id=iid, instrument=instrument, position_cap=cap, signal_lag_days=lag)
     inst_in = inp_in.instrument
     if isinstance(inst_in, SpotInstrumentRef):
         if not inst_in.collection or not inst_in.instrument_id:
@@ -561,7 +657,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             strategy=inst_in.strategy,
             data_source=inst_in.data_source,
         )
-    return Input(id=iid, instrument=instrument, position_cap=cap)
+    return Input(id=iid, instrument=instrument, position_cap=cap, signal_lag_days=lag)
 
 
 def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
@@ -606,10 +702,40 @@ def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
 def _parse_condition(c: _ConditionIn, *, path: str) -> Condition:
     op = c.op
     if op in _COMPARE_OPS:
+        # consecutive_days: absent ⇒ 1 (byte-identical single-bar compare).
+        # Explicitly supplied (incl. null) must pass the integer >= 1 guard.
+        cd = 1 if "consecutive_days" not in c.model_fields_set else c.consecutive_days
+        if (
+            cd is None
+            or isinstance(cd, bool)
+            or not isinstance(cd, int)
+            or cd < 1
+        ):
+            raise SignalValidationError(
+                f"{path}: '{op}' consecutive_days must be an integer >= 1 "
+                f"(got {c.consecutive_days!r})"
+            )
         return CompareCondition(
             op=op,  # type: ignore[arg-type]
             lhs=_parse_operand(c.lhs, path=f"{path}.lhs"),
             rhs=_parse_operand(c.rhs, path=f"{path}.rhs"),
+            consecutive_days=cd,
+        )
+    if op == "hysteresis":
+        # Two-threshold episode-completion pulse (SPEC §4.1). Requires the
+        # moving operand, both threshold operands, and a valid direction.
+        direction = c.direction
+        if direction not in ("up", "down"):
+            raise SignalValidationError(
+                f"{path}: 'hysteresis' direction must be 'up' or 'down' "
+                f"(got {c.direction!r})"
+            )
+        return HysteresisCondition(
+            op="hysteresis",
+            operand=_parse_operand(c.operand, path=f"{path}.operand"),
+            enter=_parse_operand(c.enter, path=f"{path}.enter"),
+            exit=_parse_operand(c.exit, path=f"{path}.exit"),
+            direction=direction,  # type: ignore[arg-type]
         )
     if op in _CROSS_OPS:
         # Absent field (not in model_fields_set) → use default 1 (byte-identical
@@ -793,6 +919,10 @@ def _parse_blocks(
         rrc = blk.requires_reset_count
         raw_links = blk.links or None
         raw_fire_mode = blk.fire_mode
+        raw_reset_on_actual_exit = blk.reset_on_actual_exit
+        # Validated below (entries/exits only; resets reject). Default False =
+        # historical raw-exit-condition abort.
+        parsed_reset_on_actual_exit: bool = False
         # Validated temporal chain (entries/exits only). Stays None for
         # placeholders and resets (resets reject non-empty links above).
         parsed_links: dict[int, int] | None = None
@@ -859,6 +989,13 @@ def _parse_blocks(
                 if raw_fire_mode is not None:
                     raise SignalValidationError(
                         f"{path}: reset blocks must not set fire_mode"
+                    )
+                # ``reset_on_actual_exit`` selects an ENTRY's exit-driven abort
+                # semantics; it is meaningless on a signal-global reset block.
+                # Reject any explicit value (mirror the fire_mode rejection).
+                if raw_reset_on_actual_exit is not None:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set reset_on_actual_exit"
                     )
             elif is_entry:
                 if has_target:
@@ -990,6 +1127,19 @@ def _parse_blocks(
                     )
                 parsed_fire_mode = raw_fire_mode
 
+            # ``reset_on_actual_exit`` (entries/exits only — resets reject
+            # above). Absent ⇒ False (byte-identical historical abort). Must be
+            # a genuine bool; any other value is a malformed payload → uniform
+            # HTTP-400 envelope (routed here rather than a Pydantic 422 because
+            # the wire field is typed ``Any``).
+            if raw_reset_on_actual_exit is not None:
+                if not isinstance(raw_reset_on_actual_exit, bool):
+                    raise SignalValidationError(
+                        f"{path}: reset_on_actual_exit must be a boolean "
+                        f"(got {raw_reset_on_actual_exit!r})"
+                    )
+                parsed_reset_on_actual_exit = raw_reset_on_actual_exit
+
         out.append(
             Block(
                 id=bid,
@@ -1004,6 +1154,7 @@ def _parse_blocks(
                 requires_reset_count=int(rrc),
                 links=parsed_links,
                 fire_mode=parsed_fire_mode,  # type: ignore[arg-type]
+                reset_on_actual_exit=parsed_reset_on_actual_exit,
             )
         )
     return tuple(out)
@@ -1273,6 +1424,12 @@ async def compute_signal(
     except SignalValidationError as exc:
         return error_response("validation", str(exc))
 
+    # Pure v2 preconditions for BASKET-nested option legs — invisible to the
+    # wire-JSON check above (a saved basket is just an id). Runs before the DB
+    # floor so a bad cycle/stream fails without a round-trip. Raises the same
+    # ``ValidationError`` → uniform HTTP-400 as ``check_v2_preconditions``.
+    check_v2_basket_option_legs(resolved_inputs, default_source=body.data_source)
+
     # E7 option coverage floor — the ONE v2 precondition that needs a query, so it
     # runs here rather than in the pure checker above. Deferred until after basket
     # resolution because a SAVED basket's legs are not on the wire (the payload
@@ -1432,5 +1589,8 @@ __all__ = [
     "IndicatorSpecIn",
     "parse_signal",
     "make_signal_fetcher",
+    "resolve_delta_hedge_raw",
+    "resolve_hedge_activation_gate",
+    "resolve_hedge_raw",
     "compute_input_overlap",
 ]
