@@ -183,7 +183,7 @@ class InstrumentOptionStream:
     # ``signal_exec`` feeds them to ``_HoldPnLSpec``.  ``None`` (default) = NO
     # hedge → the new path is fully skipped (byte-identical).  This is the SIGNAL
     # analog of the portfolio path's ``LegSpec.delta_hedge``.
-    delta_hedge: "DeltaHedgeSpec | None" = None
+    delta_hedge: "DeltaHedgeSpec | HedgeSpec | None" = None
     kind: Literal["option_stream"] = "option_stream"
     # Per-instrument warehouse selector (see :class:`InstrumentSpot`).
     data_source: str | None = None

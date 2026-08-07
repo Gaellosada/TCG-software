@@ -1132,16 +1132,38 @@ def make_signal_fetcher(
                 "fetch_delta_hedge_series called for an option input without a "
                 "delta_hedge config"
             )
+        gate_threshold = float(hedge.gate_threshold)
+        gate_op = str(hedge.gate_op)
         try:
-            (d_pair, vx_pair, gate_pair) = await resolve_delta_hedge_raw(
-                label=str(instrument.collection),
-                hedge=hedge,
-                instrument=instrument,
-                fetch_fn=fetch,
-                svc=svc,
-                start_date=start,
-                end_date=end,
-            )
+            if isinstance(hedge, HedgeSpec):
+                # P1: generalized spot/any-future hedge via the unified resolver
+                # (whose gate pair may be ``None`` = always-on).
+                (d_pair, vx_pair, gate_pair) = await resolve_hedge_raw(
+                    label=str(instrument.collection),
+                    hedge=hedge,
+                    instrument=instrument,
+                    fetch_fn=fetch,
+                    svc=svc,
+                    start_date=start,
+                    end_date=end,
+                )
+                if gate_pair is None:
+                    # Always-on activation: synthesise a constant-1 gate the
+                    # engine's ``gate_level > 0.5`` reproduces as all-True (the
+                    # engine consumes only the (series, op, threshold) triple).
+                    gd = np.asarray(d_pair[0], dtype=np.int64)
+                    gate_pair = (gd, np.ones(gd.shape[0], dtype=np.float64))
+                    gate_threshold, gate_op = 0.5, "gt"
+            else:
+                (d_pair, vx_pair, gate_pair) = await resolve_delta_hedge_raw(
+                    label=str(instrument.collection),
+                    hedge=hedge,
+                    instrument=instrument,
+                    fetch_fn=fetch,
+                    svc=svc,
+                    start_date=start,
+                    end_date=end,
+                )
         except ValidationError as exc:
             # Convert the portfolio-convention error to the engine's domain error so
             # ``evaluate_signal`` handles it uniformly (same flow as a hold-roll
@@ -1152,8 +1174,8 @@ def make_signal_fetcher(
             vx_pair,
             gate_pair,
             float(hedge.factor),
-            float(hedge.gate_threshold),
-            str(hedge.gate_op),
+            gate_threshold,
+            gate_op,
         )
 
     fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]

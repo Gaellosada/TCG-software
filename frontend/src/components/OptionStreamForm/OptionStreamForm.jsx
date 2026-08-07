@@ -501,6 +501,38 @@ const DH_PAUSE_HELP =
 const DH_INTERVAL_INVALID = 'Interval must be a whole number ≥ 1 — reset to 1.';
 const DH_QTY_CAP_INVALID = 'Cap multiple must be greater than 0 — reset to 10.';
 
+// ── P1 hedge-instrument chooser (labels + defaults) ─────────────────────────
+// The hedge instrument generalises the VX1-only future to ANY continuous future
+// (arbitrary collection + roll strategy / adjustment / cycle) OR a spot (δ≈1).
+// "VX1" is the default — it omits the wire ``hedge_instrument`` so the hedge is
+// byte-identical to the legacy FUT_VIX/front-month/difference path.
+const DH_INSTR_MODE_LABELS = {
+  vx1: 'VX1 front-month VIX future (default)',
+  continuous: 'Continuous future (custom)',
+  spot: 'Spot instrument',
+};
+const DH_ROLL_STRATEGY_LABELS = {
+  front_month: 'Front month',
+  end_of_month: 'End of month',
+};
+const DH_ADJUSTMENT_LABELS = {
+  none: 'None',
+  ratio: 'Ratio',
+  difference: 'Difference',
+};
+const DH_INSTR_HELP =
+  'Which instrument to short as the hedge. VX1 (default) = the front-month VIX '
+  + 'future, difference-adjusted (byte-identical to the shipped path). Continuous '
+  + 'future = any collection with a roll strategy / adjustment. Spot = a single '
+  + 'instrument (per-unit delta ≈ 1 in every case).';
+
+// Derive the chooser mode from a wire ``hedge_instrument`` object (absent = VX1
+// default). Kept module-scope so both the render and tests can reuse it.
+function hedgeInstrumentMode(hedgeInstrument) {
+  if (!hedgeInstrument || typeof hedgeInstrument !== 'object') return 'vx1';
+  return hedgeInstrument.type === 'spot' ? 'spot' : 'continuous';
+}
+
 /**
  * Delta-hedge overlay controls (F2, SPEC §5.5/§5.6). Enable checkbox + hedge
  * factor (default 1/3) + gate threshold (default VVIX>150). An "Advanced"
@@ -515,8 +547,10 @@ const DH_QTY_CAP_INVALID = 'Cap multiple must be greater than 0 — reset to 10.
 function DeltaHedgeControls({
   enabled, factor, threshold,
   interval, qtyCap, pauseOnRoll,
+  hedgeInstrument,
   onEnabled, onFactor, onThreshold,
   onInterval, onQtyCap, onPauseOnRoll,
+  onHedgeInstrument,
   disabled,
 }) {
   // Transient invalid-entry flags so a bad interval/cap surfaces a hint even
@@ -535,6 +569,26 @@ function DeltaHedgeControls({
     setQtyCapInvalid(!(Number.isFinite(n) && n > 0) && raw !== '');
     onQtyCap(raw);
   };
+
+  // Hedge-instrument chooser (P1). Mode derives from the wire object; changing
+  // it seeds a default-shaped ``hedge_instrument`` (or clears it for VX1).
+  const hi = (hedgeInstrument && typeof hedgeInstrument === 'object') ? hedgeInstrument : null;
+  const hiMode = hedgeInstrumentMode(hi);
+  const handleHedgeMode = (mode) => {
+    if (mode === 'vx1') {
+      onHedgeInstrument(undefined);
+    } else if (mode === 'spot') {
+      onHedgeInstrument({ type: 'spot', collection: (hi && hi.collection) || '', instrument_id: (hi && hi.instrument_id) || '' });
+    } else {
+      onHedgeInstrument({
+        type: 'continuous',
+        collection: (hi && hi.collection) || '',
+        adjustment: (hi && hi.adjustment) || 'difference',
+        strategy: (hi && hi.strategy) || 'front_month',
+      });
+    }
+  };
+  const patchHedgeInstrument = (patch) => onHedgeInstrument({ ...(hi || {}), ...patch });
 
   return (
     <label className={styles.row}>
@@ -583,6 +637,97 @@ function DeltaHedgeControls({
                 data-testid="delta-hedge-threshold"
               />
             </label>
+            {/* Hedge instrument (P1) — VX1 default omits the wire key entirely
+                (byte-identical); a custom continuous future or spot emits a
+                first-class ``hedge_instrument`` ref. */}
+            <label className={styles.fieldInline} title={DH_INSTR_HELP}>
+              Hedge instrument
+              <select
+                className={styles.input}
+                value={hiMode}
+                onChange={(e) => handleHedgeMode(e.target.value)}
+                disabled={disabled}
+                aria-label="Hedge instrument type"
+                data-testid="delta-hedge-instrument-mode"
+              >
+                <option value="vx1">{DH_INSTR_MODE_LABELS.vx1}</option>
+                <option value="continuous">{DH_INSTR_MODE_LABELS.continuous}</option>
+                <option value="spot">{DH_INSTR_MODE_LABELS.spot}</option>
+              </select>
+            </label>
+            {hiMode === 'continuous' && (
+              <>
+                <label className={styles.fieldInline} title="The future collection to roll into a continuous hedge series (e.g. FUT_ES, FUT_VIX).">
+                  Collection
+                  <input
+                    type="text"
+                    className={styles.input}
+                    value={(hi && hi.collection) || ''}
+                    onChange={(e) => patchHedgeInstrument({ collection: e.target.value })}
+                    disabled={disabled}
+                    aria-label="Hedge future collection"
+                    data-testid="delta-hedge-instrument-collection"
+                  />
+                </label>
+                <label className={styles.fieldInline} title="How to stitch the continuous hedge series across rolls.">
+                  Roll strategy
+                  <select
+                    className={styles.input}
+                    value={(hi && hi.strategy) || 'front_month'}
+                    onChange={(e) => patchHedgeInstrument({ strategy: e.target.value })}
+                    disabled={disabled}
+                    aria-label="Hedge roll strategy"
+                    data-testid="delta-hedge-instrument-strategy"
+                  >
+                    <option value="front_month">{DH_ROLL_STRATEGY_LABELS.front_month}</option>
+                    <option value="end_of_month">{DH_ROLL_STRATEGY_LABELS.end_of_month}</option>
+                  </select>
+                </label>
+                <label className={styles.fieldInline} title="Back-adjustment applied when stitching contracts (difference keeps daily diffs = true daily P&L).">
+                  Adjustment
+                  <select
+                    className={styles.input}
+                    value={(hi && hi.adjustment) || 'difference'}
+                    onChange={(e) => patchHedgeInstrument({ adjustment: e.target.value })}
+                    disabled={disabled}
+                    aria-label="Hedge adjustment"
+                    data-testid="delta-hedge-instrument-adjustment"
+                  >
+                    <option value="none">{DH_ADJUSTMENT_LABELS.none}</option>
+                    <option value="ratio">{DH_ADJUSTMENT_LABELS.ratio}</option>
+                    <option value="difference">{DH_ADJUSTMENT_LABELS.difference}</option>
+                  </select>
+                </label>
+              </>
+            )}
+            {hiMode === 'spot' && (
+              <>
+                <label className={styles.fieldInline} title="The spot instrument's collection (e.g. INDEX).">
+                  Collection
+                  <input
+                    type="text"
+                    className={styles.input}
+                    value={(hi && hi.collection) || ''}
+                    onChange={(e) => patchHedgeInstrument({ collection: e.target.value })}
+                    disabled={disabled}
+                    aria-label="Hedge spot collection"
+                    data-testid="delta-hedge-instrument-collection"
+                  />
+                </label>
+                <label className={styles.fieldInline} title="The spot instrument id (e.g. SPX).">
+                  Instrument id
+                  <input
+                    type="text"
+                    className={styles.input}
+                    value={(hi && hi.instrument_id) || ''}
+                    onChange={(e) => patchHedgeInstrument({ instrument_id: e.target.value })}
+                    disabled={disabled}
+                    aria-label="Hedge spot instrument id"
+                    data-testid="delta-hedge-instrument-id"
+                  />
+                </label>
+              </>
+            )}
             {/* Advanced (optional) knobs — collapsed by default, keys omitted
                 until touched so an untouched hedge stays byte-identical. */}
             <details className={styles.row} data-testid="delta-hedge-advanced" style={{ width: '100%' }}>
@@ -936,6 +1081,21 @@ export default function OptionStreamForm({
   }, [emit, dh]);
   const setDeltaHedgePauseOnRoll = useCallback((checked) => {
     emit({ delta_hedge: { ...(dh || { enabled: true }), pause_on_roll: !!checked } });
+  }, [emit, dh]);
+  // ── P1 hedge INSTRUMENT chooser ───────────────────────────────────────────
+  // Default (VX1) omits ``hedge_instrument`` entirely so an untouched hedge is
+  // byte-identical to the legacy FUT_VIX/front-month path. Picking a custom
+  // continuous future (arbitrary collection + roll strategy / adjustment) or a
+  // spot instrument emits a first-class ``hedge_instrument`` ref the backend
+  // maps to tcg.types.signal.HedgeSpec. ``undefined`` clears it back to VX1.
+  const setDeltaHedgeInstrument = useCallback((next) => {
+    const base = { ...(dh || { enabled: true }) };
+    if (next === undefined) {
+      delete base.hedge_instrument;
+    } else {
+      base.hedge_instrument = next;
+    }
+    emit({ delta_hedge: base });
   }, [emit, dh]);
 
   // Roll offset is the unified {value, unit}. A legacy int (days-only) is read
@@ -1399,12 +1559,14 @@ export default function OptionStreamForm({
                 interval={(dh && dh.rebalance_interval_days != null) ? dh.rebalance_interval_days : 1}
                 qtyCap={(dh && dh.qty_cap_mult != null) ? dh.qty_cap_mult : 10}
                 pauseOnRoll={!(dh && dh.pause_on_roll === false)}
+                hedgeInstrument={dh ? dh.hedge_instrument : undefined}
                 onEnabled={setDeltaHedgeEnabled}
                 onFactor={setDeltaHedgeFactor}
                 onThreshold={setDeltaHedgeThreshold}
                 onInterval={setDeltaHedgeInterval}
                 onQtyCap={setDeltaHedgeQtyCap}
                 onPauseOnRoll={setDeltaHedgePauseOnRoll}
+                onHedgeInstrument={setDeltaHedgeInstrument}
                 disabled={disabled || sizingMode === 'futures_notional'}
               />
             ) : null}

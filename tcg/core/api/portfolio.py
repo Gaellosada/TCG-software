@@ -59,6 +59,7 @@ from tcg.core.api.signals import (
     make_signal_fetcher,
     parse_signal,
     resolve_delta_hedge_raw,
+    resolve_hedge_raw,
 )
 from tcg.data._utils import date_to_int, int_to_iso
 from tcg.data._v2_compat._mapping import V2_RATE_1M_SYMBOL, V2_RATE_COLLECTION
@@ -97,6 +98,7 @@ from tcg.types.multipliers import (
 from tcg.types.portfolio import RebalanceFreq
 from tcg.types.signal import (
     DeltaHedgeSpec,
+    HedgeSpec,
     InstrumentContinuous,
     InstrumentOptionStream,
     InstrumentSpot,
@@ -1353,7 +1355,7 @@ def _align_to_axis(
 async def _build_delta_hedge_arrays(
     *,
     label: str,
-    hedge: DeltaHedgeSpec,
+    hedge: DeltaHedgeSpec | HedgeSpec,
     instrument: "InstrumentOptionStream",
     fetcher: object,
     svc: MarketDataService,
@@ -1381,19 +1383,32 @@ async def _build_delta_hedge_arrays(
     uses (P-F2-1 dedup); only the alignment axis + gate/roll masking below is
     per-site.
     """
-    (
-        (d_dates, d_vals),
-        (vx_dates, vx_close),
-        (gate_dates, gate_close),
-    ) = await resolve_delta_hedge_raw(
-        label=label,
-        hedge=hedge,
-        instrument=instrument,
-        fetch_fn=fetcher,
-        svc=svc,
-        start_date=start_date,
-        end_date=end_date,
-    )
+    # Dispatch on the spec flavour: a generalized :class:`HedgeSpec` (P1 —
+    # arbitrary spot/future hedge instrument) resolves via the unified
+    # ``resolve_hedge_raw`` (whose gate pair may be ``None`` = always-on); the
+    # legacy :class:`DeltaHedgeSpec` migrates through the byte-identical shim.
+    if isinstance(hedge, HedgeSpec):
+        (d_pair, hp_pair, gate_pair) = await resolve_hedge_raw(
+            label=label,
+            hedge=hedge,
+            instrument=instrument,
+            fetch_fn=fetcher,
+            svc=svc,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    else:
+        (d_pair, hp_pair, gate_pair) = await resolve_delta_hedge_raw(
+            label=label,
+            hedge=hedge,
+            instrument=instrument,
+            fetch_fn=fetcher,
+            svc=svc,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    (d_dates, d_vals) = d_pair
+    (vx_dates, vx_close) = hp_pair
 
     # ── DELTA: align the held contract's delta onto the leg axis ──
     hedge_delta = _align_to_axis(
@@ -1411,18 +1426,25 @@ async def _build_delta_hedge_arrays(
     hedge_price = _align_to_axis(dates_arr, vx_dates, vx_close)
 
     # ── HEDGE_ACTIVE: gate(VVIX) AND not-a-roll-bar ──
-    gate_level = _align_to_axis(dates_arr, gate_dates, gate_close)
-    thr = hedge.gate_threshold
-    with np.errstate(invalid="ignore"):
-        if hedge.gate_op == "gt":
-            gate_on = gate_level > thr
-        elif hedge.gate_op == "ge":
-            gate_on = gate_level >= thr
-        elif hedge.gate_op == "lt":
-            gate_on = gate_level < thr
-        else:  # "le"
-            gate_on = gate_level <= thr
-    gate_on = gate_on & np.isfinite(gate_level)
+    # ``gate_pair is None`` (only reachable for a HedgeSpec with
+    # ``gate_collection=None``) ⇒ always-on activation (all-True before the
+    # roll-pause AND).  The legacy DeltaHedgeSpec path always carries a gate.
+    if gate_pair is None:
+        gate_on = np.ones(dates_arr.shape[0], dtype=np.bool_)
+    else:
+        (gate_dates, gate_close) = gate_pair
+        gate_level = _align_to_axis(dates_arr, gate_dates, gate_close)
+        thr = hedge.gate_threshold
+        with np.errstate(invalid="ignore"):
+            if hedge.gate_op == "gt":
+                gate_on = gate_level > thr
+            elif hedge.gate_op == "ge":
+                gate_on = gate_level >= thr
+            elif hedge.gate_op == "lt":
+                gate_on = gate_level < thr
+            else:  # "le"
+                gate_on = gate_level <= thr
+        gate_on = gate_on & np.isfinite(gate_level)
     # ``pause_on_roll`` (default True) ANDs ``~is_roll`` so the hedge books 0 on the
     # option's roll bar (SPEC §5.5 exit (3), the VX1 default); False hedges through.
     if hedge.pause_on_roll:

@@ -147,6 +147,74 @@ describe('<OptionStreamForm> delta-hedge ADVANCED knobs (modular hedge)', () => 
   });
 });
 
+describe('<OptionStreamForm> delta-hedge INSTRUMENT chooser (P1 modular hedge)', () => {
+  const hedged = () => ({
+    ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+    delta_hedge: { enabled: true, factor: 1 / 3, gate_threshold: 150 },
+  });
+
+  it('defaults the chooser to VX1 and omits hedge_instrument on enable (byte-identical)', () => {
+    const onChange = vi.fn();
+    renderForm({ showDeltaHedge: true, onChange, value: buildDefaultOptionStream({ availableRoots: ROOTS }) });
+    fireEvent.click(screen.getByTestId('delta-hedge-enabled'));
+    const dh = onChange.mock.calls.at(-1)[0].delta_hedge;
+    expect('hedge_instrument' in dh).toBe(false);
+    // Re-render with the enabled hedge; the mode select reads VX1.
+    renderForm({ showDeltaHedge: true, value: hedged() });
+    expect(screen.getByTestId('delta-hedge-instrument-mode').value).toBe('vx1');
+    // No collection field while VX1.
+    expect(screen.queryByTestId('delta-hedge-instrument-collection')).toBeNull();
+  });
+
+  it('emits a continuous-future hedge_instrument when the mode switches to continuous', () => {
+    const onChange = vi.fn();
+    renderForm({ showDeltaHedge: true, onChange, value: hedged() });
+    fireEvent.change(screen.getByTestId('delta-hedge-instrument-mode'), { target: { value: 'continuous' } });
+    const emitted = onChange.mock.calls.at(-1)[0].delta_hedge.hedge_instrument;
+    expect(emitted).toMatchObject({ type: 'continuous', adjustment: 'difference', strategy: 'front_month' });
+  });
+
+  it('threads collection + roll strategy onto a continuous hedge_instrument', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...hedged(),
+      delta_hedge: { enabled: true, factor: 1 / 3, gate_threshold: 150, hedge_instrument: { type: 'continuous', collection: 'FUT_VIX', adjustment: 'difference', strategy: 'front_month' } },
+    };
+    renderForm({ showDeltaHedge: true, onChange, value });
+    fireEvent.change(screen.getByTestId('delta-hedge-instrument-collection'), { target: { value: 'FUT_ES' } });
+    expect(onChange.mock.calls.at(-1)[0].delta_hedge.hedge_instrument.collection).toBe('FUT_ES');
+    fireEvent.change(screen.getByTestId('delta-hedge-instrument-strategy'), { target: { value: 'end_of_month' } });
+    expect(onChange.mock.calls.at(-1)[0].delta_hedge.hedge_instrument.strategy).toBe('end_of_month');
+  });
+
+  it('emits a spot hedge_instrument and threads collection + instrument id', () => {
+    const onChange = vi.fn();
+    renderForm({ showDeltaHedge: true, onChange, value: hedged() });
+    fireEvent.change(screen.getByTestId('delta-hedge-instrument-mode'), { target: { value: 'spot' } });
+    expect(onChange.mock.calls.at(-1)[0].delta_hedge.hedge_instrument).toMatchObject({ type: 'spot' });
+    // Re-render carrying the spot instrument so the id field is present.
+    const value = {
+      ...hedged(),
+      delta_hedge: { enabled: true, factor: 1 / 3, gate_threshold: 150, hedge_instrument: { type: 'spot', collection: '', instrument_id: '' } },
+    };
+    renderForm({ showDeltaHedge: true, onChange, value });
+    fireEvent.change(screen.getByTestId('delta-hedge-instrument-id'), { target: { value: 'SPX' } });
+    expect(onChange.mock.calls.at(-1)[0].delta_hedge.hedge_instrument.instrument_id).toBe('SPX');
+  });
+
+  it('clears hedge_instrument when the mode switches back to VX1', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...hedged(),
+      delta_hedge: { enabled: true, factor: 1 / 3, gate_threshold: 150, hedge_instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
+    };
+    renderForm({ showDeltaHedge: true, onChange, value });
+    fireEvent.change(screen.getByTestId('delta-hedge-instrument-mode'), { target: { value: 'vx1' } });
+    const dh = onChange.mock.calls.at(-1)[0].delta_hedge;
+    expect('hedge_instrument' in dh).toBe(false);
+  });
+});
+
 describe('legConfig delta-hedge round-trip', () => {
   it('forwards an enabled delta_hedge onto the leg config', () => {
     const instrument = {

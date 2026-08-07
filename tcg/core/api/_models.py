@@ -65,7 +65,12 @@ from tcg.core.api._models_options import (
     reject_contradicting_delta_sign,
 )
 from tcg.core.api.common import DataSource
-from tcg.types.signal import DeltaHedgeSpec
+from tcg.types.signal import (
+    DeltaHedgeSpec,
+    HedgeSpec,
+    InstrumentContinuous,
+    InstrumentSpot,
+)
 
 
 class _PerInstrumentSourceMixin(BaseModel):
@@ -212,6 +217,21 @@ class DeltaHedgeConfig(BaseModel):
     qty_cap_mult: float = 10.0
     # Book 0 hedge on the option's roll bar (default) vs hedge through the roll.
     pause_on_roll: bool = True
+    # ── P1 modular hedge instrument (OPTIONAL; absent ⇒ legacy VX1 path) ───────
+    # When set, the hedge instrument is a first-class reference — an arbitrary
+    # continuous future (any ``collection`` + roll ``strategy`` / ``adjustment`` /
+    # ``cycle`` / ``rollOffset``) OR a spot instrument (δ≈1) — and ``to_spec()``
+    # emits the generalized :class:`tcg.types.signal.HedgeSpec` instead of the
+    # legacy :class:`DeltaHedgeSpec`.  ``hedge_collection`` above is IGNORED when
+    # this is present (the instrument's own collection wins).  Absent (the
+    # default) ⇒ byte-identical legacy FUT_VIX/front-month/difference continuous.
+    hedge_instrument: (
+        Annotated[
+            Union[SpotInstrumentRef, ContinuousInstrumentRef],
+            Field(discriminator="type"),
+        ]
+        | None
+    ) = None
 
     @field_validator("factor")
     @classmethod
@@ -233,17 +253,54 @@ class DeltaHedgeConfig(BaseModel):
             raise ValueError("delta_hedge qty_cap_mult must be a finite positive number")
         return float(v)
 
-    def to_spec(self) -> DeltaHedgeSpec:
-        return DeltaHedgeSpec(
+    def to_spec(self) -> DeltaHedgeSpec | HedgeSpec:
+        """Build the engine-agnostic hedge spec.
+
+        Absent ``hedge_instrument`` ⇒ the legacy :class:`DeltaHedgeSpec` (VX1
+        FUT_VIX / front-month / difference continuous — byte-identical).  When
+        ``hedge_instrument`` is set, emit the generalized :class:`HedgeSpec`
+        carrying the arbitrary spot / continuous-future reference; the gate +
+        parametrization knobs carry across identically.
+        """
+        if self.hedge_instrument is None:
+            return DeltaHedgeSpec(
+                factor=float(self.factor),
+                hedge_collection=self.hedge_collection,
+                gate_collection=self.gate_collection,
+                gate_symbol=self.gate_symbol,
+                gate_threshold=float(self.gate_threshold),
+                gate_op=self.gate_op,
+                rebalance_interval_days=int(self.rebalance_interval_days),
+                qty_cap_mult=float(self.qty_cap_mult),
+                pause_on_roll=bool(self.pause_on_roll),
+            )
+        hi = self.hedge_instrument
+        instrument: InstrumentSpot | InstrumentContinuous
+        if isinstance(hi, SpotInstrumentRef):
+            instrument = InstrumentSpot(
+                collection=hi.collection,
+                instrument_id=hi.instrument_id,
+                data_source=hi.data_source,
+            )
+        else:  # ContinuousInstrumentRef (discriminated union — closed)
+            instrument = InstrumentContinuous(
+                collection=hi.collection,
+                adjustment=hi.adjustment,
+                cycle=hi.cycle,
+                roll_offset=int(hi.rollOffset),
+                strategy=hi.strategy,
+                data_source=hi.data_source,
+            )
+        return HedgeSpec(
+            hedge_instrument=instrument,
             factor=float(self.factor),
-            hedge_collection=self.hedge_collection,
+            rebalance_interval_days=int(self.rebalance_interval_days),
+            qty_cap_mult=float(self.qty_cap_mult),
+            pause_on_roll=bool(self.pause_on_roll),
             gate_collection=self.gate_collection,
             gate_symbol=self.gate_symbol,
             gate_threshold=float(self.gate_threshold),
             gate_op=self.gate_op,
-            rebalance_interval_days=int(self.rebalance_interval_days),
-            qty_cap_mult=float(self.qty_cap_mult),
-            pause_on_roll=bool(self.pause_on_roll),
         )
 
 
