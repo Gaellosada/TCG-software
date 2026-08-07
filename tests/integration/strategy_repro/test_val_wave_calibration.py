@@ -481,3 +481,85 @@ async def test_short_spx_10d_put_EOM_persisted_entity(client):
     assert cmp.monthly_corr >= 0.86, cmp.monthly_corr
     assert cmp.equity_log_corr >= 0.99, cmp.equity_log_corr
     assert cmp.ann_ret_abs_diff_pp <= DEFAULT_BAND.ann_ret_abs_pp_max, cmp.ann_ret_abs_diff_pp
+
+
+# --------------------------------------------------------------------------- #
+# v2 WEEKLY PROXY (v1->v2 rebase, Gael 2026-08-07) — the §5.1 puts run on the v2
+# (Databento) warehouse.  v2 has NO monthly S&P options (empty object + the
+# adapter raises V2UnsupportedCycle for cycle "M"), so the closest cadence is the
+# EW3 "W3 Friday" weekly — the classic monthly 3rd-Friday expiry — with greeks
+# from 2016-02-22.  This is a deliberately WINDOW-LIMITED proxy (2016-2026, no
+# 2008/GFC): the faithful full-window reproduction stays on v1 (the _EOM_ tests
+# above).  Gated on SHAPE over the available overlap (monthly_corr, equity_log_corr,
+# no-ruin); ann_ret/maxDD are informational because the proxy window differs from
+# the full 2006-2026 target window.  Persisted as a SEPARATE durable DEV entity so
+# the v1 faithful and the v2 proxy coexist and are both UI-visible.
+# --------------------------------------------------------------------------- #
+REPRO_ENTITY_50D_PUT_V2WK = "Reproduction_Short_SPX_50d_Put_2M_v2wk"
+REPRO_ENTITY_10D_PUT_V2WK = "Reproduction_Short_SPX_10d_Put_2M_v2wk"
+_V2WK_START = "2016-02-22"  # v2 EW3 greeks floor
+_V2WK_END = "2026-06-11"
+
+
+async def _run_v2wk_put_leg(client, *, target_delta, portfolio_id, name):
+    saved_legs = [
+        {
+            "label": "put", "type": "option_stream", "collection": "OPT_SP_500",
+            "option_type": "P", "cycle": "W3 Friday", "data_source": "v2",
+            "maturity": {"kind": "nearest_to_target", "target_days": 60},
+            "selection": {"kind": "by_delta", "target": target_delta, "tolerance": 0.10},
+            "stream": "close", "hold_between_rolls": True, "nav_times": 1.0,
+            "sizing_mode": "futures_notional", "weight": -100.0,
+        }
+    ]
+    doc, result = await durable_persist_and_run_portfolio(
+        client, saved_legs, portfolio_id=portfolio_id, name=name,
+        category=REPRO_VISIBLE_CATEGORY,
+        start=_V2WK_START, end=_V2WK_END, normalize_weights=True,
+    )
+    assert doc["category"] == REPRO_VISIBLE_CATEGORY and doc["category"] != "DELETED"
+    # rebase proof: the persisted leg actually carries the v2 source.
+    assert any(leg.get("data_source") == "v2" for leg in doc["legs"]), doc["legs"]
+    dates = result["dates"]
+    eq = np.array([np.nan if v is None else v for v in result["portfolio_equity"]], dtype=float)
+    ok = np.isfinite(eq)
+    return [d for d, k in zip(dates, ok) if k], eq[ok]
+
+
+async def test_short_spx_50d_put_v2wk_proxy(client):
+    """§5.1 50Δ put — v2 EW3-weekly proxy (2016+), durable DEV entity
+    ``Reproduction_Short_SPX_50d_Put_2M_v2wk``.  Shape-gated over the overlap."""
+    target, checks = parse_target_section("Short_SPX_50d_Put_2M")
+    dates, eq = await _run_v2wk_put_leg(
+        client, target_delta=-0.50,
+        portfolio_id=REPRO_ENTITY_50D_PUT_V2WK, name=REPRO_ENTITY_50D_PUT_V2WK)
+    cmp = compare(dates, eq, target, section="Short_SPX_50d_Put_2M [v2 EW3-wk proxy]",
+                  checksums=checks)
+    print(f"\n[50d v2wk] overlap_months={cmp.n_overlap_months} "
+          f"monthly_corr={cmp.monthly_corr:.4f} equity_log_corr={cmp.equity_log_corr:.4f} "
+          f"ann_ret={cmp.repro_ann_ret_pct:.2f}% maxDD={cmp.repro_maxdd_pct:.2f}% "
+          f"min_equity={cmp.repro_min_equity:.2f}")
+    assert cmp.checksum_failures == []
+    assert cmp.monthly_corr >= 0.80, cmp.monthly_corr
+    assert cmp.equity_log_corr >= 0.90, cmp.equity_log_corr
+    assert cmp.repro_min_equity > DEFAULT_BAND.ruin_floor, cmp.repro_min_equity
+
+
+async def test_short_spx_10d_put_v2wk_proxy(client):
+    """§5.1 10Δ put — v2 EW3-weekly proxy (2016+), durable DEV entity
+    ``Reproduction_Short_SPX_10d_Put_2M_v2wk``.  Shape-gated over the overlap
+    (10Δ monthly_corr sits near the 0.80 floor — the leg is thin-tailed)."""
+    target, checks = parse_target_section("Short_SPX_10d_Put_2M")
+    dates, eq = await _run_v2wk_put_leg(
+        client, target_delta=-0.10,
+        portfolio_id=REPRO_ENTITY_10D_PUT_V2WK, name=REPRO_ENTITY_10D_PUT_V2WK)
+    cmp = compare(dates, eq, target, section="Short_SPX_10d_Put_2M [v2 EW3-wk proxy]",
+                  checksums=checks)
+    print(f"\n[10d v2wk] overlap_months={cmp.n_overlap_months} "
+          f"monthly_corr={cmp.monthly_corr:.4f} equity_log_corr={cmp.equity_log_corr:.4f} "
+          f"ann_ret={cmp.repro_ann_ret_pct:.2f}% maxDD={cmp.repro_maxdd_pct:.2f}% "
+          f"min_equity={cmp.repro_min_equity:.2f}")
+    assert cmp.checksum_failures == []
+    assert cmp.monthly_corr >= 0.80, cmp.monthly_corr
+    assert cmp.equity_log_corr >= 0.90, cmp.equity_log_corr
+    assert cmp.repro_min_equity > DEFAULT_BAND.ruin_floor, cmp.repro_min_equity
