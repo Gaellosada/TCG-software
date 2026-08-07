@@ -59,6 +59,7 @@ from tcg.core.api.signals import (
     make_signal_fetcher,
     parse_signal,
     resolve_delta_hedge_raw,
+    resolve_hedge_activation_gate,
     resolve_hedge_raw,
 )
 from tcg.data._utils import date_to_int, int_to_iso
@@ -1425,11 +1426,20 @@ async def _build_delta_hedge_arrays(
     # ── HEDGE_PRICE: align the VX1 front-month continuous onto the leg axis ──
     hedge_price = _align_to_axis(dates_arr, vx_dates, vx_close)
 
-    # ── HEDGE_ACTIVE: gate(VVIX) AND not-a-roll-bar ──
-    # ``gate_pair is None`` (only reachable for a HedgeSpec with
-    # ``gate_collection=None``) ⇒ always-on activation (all-True before the
-    # roll-pause AND).  The legacy DeltaHedgeSpec path always carries a gate.
-    if gate_pair is None:
+    # ── HEDGE_ACTIVE: gate AND not-a-roll-bar ──
+    # P2b: a HedgeSpec carrying an ``activation`` Condition resolves the gate in
+    # the CORE layer (fetch operands → evaluate → bool), superseding the degenerate
+    # series<op>threshold gate.  Otherwise ``gate_pair is None`` (HedgeSpec with
+    # ``gate_collection=None``) ⇒ always-on; the legacy path always carries a gate.
+    if isinstance(hedge, HedgeSpec) and hedge.activation is not None:
+        gate_on = await resolve_hedge_activation_gate(
+            label=label,
+            condition=hedge.activation,
+            activation_inputs=hedge.activation_inputs,
+            fetch_fn=fetcher,
+            axis_dates=dates_arr,
+        )
+    elif gate_pair is None:
         gate_on = np.ones(dates_arr.shape[0], dtype=np.bool_)
     else:
         (gate_dates, gate_close) = gate_pair

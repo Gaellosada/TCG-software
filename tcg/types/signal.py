@@ -280,6 +280,20 @@ class HedgeSpec:
     gate_symbol: str | None = "IND_VVIX"
     gate_threshold: float = 150.0
     gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
+    # ── P2b — activation as an arbitrary signals-layer Condition ──────────────
+    # When ``activation`` is set, it SUPERSEDES the degenerate
+    # ``gate_collection``/``gate_symbol``/``gate_op``/``gate_threshold`` gate: the
+    # core layer resolves the Condition's operands (fetch series) and evaluates it
+    # to the ``hedge_active`` bool array (reusing the signals-layer condition
+    # evaluator), ANDed with the leg's in-position state (engine's existing gate)
+    # and the roll-pause flag.  This unifies the split-brain lifecycle exits
+    # (VIX<MA5 two consecutive days, VX1<VX2) into ordinary Conditions.
+    # ``activation_inputs`` binds the Condition's ``input_id`` operand references
+    # to concrete instruments (like a signal's declared inputs); it is a tuple of
+    # ``(input_id, Input)`` pairs so the type stays frozen + hashable.  ``None``
+    # activation ⇒ the degenerate gate above (back-compat, byte-identical).
+    activation: "Condition | None" = None
+    activation_inputs: "tuple[tuple[str, Input], ...]" = ()
 
 
 def delta_hedge_to_hedge_spec(dh: DeltaHedgeSpec) -> HedgeSpec:

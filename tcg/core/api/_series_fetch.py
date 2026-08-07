@@ -34,17 +34,32 @@ from tcg.core.api._models import (
     SpotInstrumentRef,
 )
 from tcg.data.protocols import MarketDataService
-from tcg.engine.signal_exec import SignalDataError, SignalValidationError
+from tcg.engine.signal_exec import (
+    SignalDataError,
+    SignalValidationError,
+    _align_series_to_index,
+    _eval_condition,
+    _operand_key,
+    _resolve_operand,
+    _union_align,
+)
 from tcg.types.errors import DataNotFoundError, ValidationError
 from tcg.types.options import expand_cycle
 from tcg.types.signal import (
+    CompareCondition,
+    Condition,
+    CrossCondition,
     DeltaHedgeSpec,
     HedgeSpec,
+    HysteresisCondition,
     InputInstrument,
+    InRangeCondition,
     InstrumentBasket,
     InstrumentContinuous,
     InstrumentOptionStream,
     InstrumentSpot,
+    Operand,
+    RollingCondition,
     delta_hedge_to_hedge_spec,
 )
 
@@ -588,6 +603,99 @@ async def resolve_delta_hedge_raw(
     )
     assert gate_pair is not None  # legacy spec always carries a gate
     return d_pair, hp_pair, gate_pair
+
+
+def _condition_operands(cond: Condition) -> list[Operand]:
+    """Every operand referenced by a single Condition (mirrors the engine's
+    per-block walk, applied to one condition)."""
+    if isinstance(cond, (CompareCondition, CrossCondition)):
+        return [cond.lhs, cond.rhs]
+    if isinstance(cond, InRangeCondition):
+        return [cond.operand, cond.min, cond.max]
+    if isinstance(cond, RollingCondition):
+        return [cond.operand]
+    if isinstance(cond, HysteresisCondition):
+        return [cond.operand, cond.enter, cond.exit]
+    raise ValidationError(
+        f"hedge activation: unsupported condition type {type(cond).__name__!r}"
+    )
+
+
+async def resolve_hedge_activation_raw(
+    *,
+    label: str,
+    condition: Condition,
+    activation_inputs: tuple[tuple[str, Any], ...],
+    fetch_fn: Any,
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
+    """Resolve a signals-layer activation :class:`Condition` to a RAW
+    ``(dates, truth01)`` gate series (P2b, CORE layer).
+
+    Fetches the Condition's operand series (via the SAME ``fetch_fn`` the delta
+    second-resolve uses), evaluates the Condition with the signals-layer evaluator
+    and returns the per-bar truth as a ``{0.0, 1.0}`` series on the operands' union
+    index.  Callers re-index onto their own axis (the portfolio path aligns to the
+    leg axis; the signal path returns it as a ``> 0.5`` gate for the engine).  No
+    condition logic crosses into the engine — the import-linter
+    ``core -> engine -> types`` layering is preserved.
+
+    ``activation_inputs`` binds the Condition's ``input_id`` operand references to
+    concrete instruments (``(input_id, Input)`` pairs).  Only Instrument / Constant
+    operands are supported for a hedge activation; an ``IndicatorOperand`` raises
+    loudly through the operand resolver (indicators are out of scope here).
+    """
+    inputs = {rid: inp for rid, inp in activation_inputs}
+    indicators: dict[str, Any] = {}
+    operands = _condition_operands(condition)
+    unique_keys: dict[tuple, Operand] = {}
+    for op in operands:
+        unique_keys.setdefault(_operand_key(op, indicators, inputs), op)
+    resolved: dict[tuple, Any] = {}
+    try:
+        for key, op in unique_keys.items():
+            resolved[key] = await _resolve_operand(op, indicators, inputs, fetch_fn)
+    except (SignalDataError, SignalValidationError) as exc:
+        raise ValidationError(
+            f"Leg '{label}': hedge activation could not resolve a condition "
+            f"operand: {exc}"
+        ) from exc
+    index, values_by_key = _union_align(resolved)
+    T = index.size
+    if T == 0:
+        return (np.array([], dtype=np.int64), np.array([], dtype=np.float64))
+    truth, _nan_at_t = _eval_condition(condition, indicators, inputs, values_by_key, T)
+    return (np.asarray(index, dtype=np.int64), truth.astype(np.float64))
+
+
+async def resolve_hedge_activation_gate(
+    *,
+    label: str,
+    condition: Condition,
+    activation_inputs: tuple[tuple[str, Any], ...],
+    fetch_fn: Any,
+    axis_dates: npt.NDArray[np.int64],
+) -> npt.NDArray[np.bool_]:
+    """Resolve an activation :class:`Condition` to the hedge gate bool array,
+    aligned to ``axis_dates`` (P2b — portfolio path).  A bar absent from the
+    condition's union index is INACTIVE (``False``), never carried forward.
+    """
+    index, truth01 = await resolve_hedge_activation_raw(
+        label=label,
+        condition=condition,
+        activation_inputs=activation_inputs,
+        fetch_fn=fetch_fn,
+    )
+    n = int(np.asarray(axis_dates, dtype=np.int64).shape[0])
+    if index.shape[0] == 0:
+        return np.zeros(n, dtype=np.bool_)
+    aligned = _align_series_to_index(
+        index,
+        truth01,
+        np.asarray(axis_dates, dtype=np.int64),
+        fill=0.0,
+    )
+    with np.errstate(invalid="ignore"):
+        return np.isfinite(aligned) & (aligned > 0.5)
 
 
 def make_signal_fetcher(
@@ -1147,7 +1255,18 @@ def make_signal_fetcher(
                     start_date=start,
                     end_date=end,
                 )
-                if gate_pair is None:
+                if hedge.activation is not None:
+                    # P2b: an activation Condition is resolved in CORE to a
+                    # {0,1} gate series; the engine's unchanged ``gate_level >
+                    # 0.5`` triple reproduces it (no condition logic in engine).
+                    gate_pair = await resolve_hedge_activation_raw(
+                        label=str(instrument.collection),
+                        condition=hedge.activation,
+                        activation_inputs=hedge.activation_inputs,
+                        fetch_fn=fetch,
+                    )
+                    gate_threshold, gate_op = 0.5, "gt"
+                elif gate_pair is None:
                     # Always-on activation: synthesise a constant-1 gate the
                     # engine's ``gate_level > 0.5`` reproduces as all-True (the
                     # engine consumes only the (series, op, threshold) triple).
