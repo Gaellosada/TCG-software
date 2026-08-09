@@ -339,3 +339,25 @@ def test_saved_legs_to_compute_body_cash():
                       "unit": "percent", "compound": True},
     }
     assert body["weights"] == {"cash": 100.0}
+
+
+def test_saved_legs_to_compute_body_option_stream_data_source():
+    """An option_stream leg carrying its own ``data_source`` ("v2") MUST propagate
+    it into the compute body — the fetch layer routes each leaf to its warehouse
+    via ``svc_for``.  Previously only ``cash_rate`` propagated data_source, so a
+    v2 option leg silently ran on v1 (the principal v1->v2 rebase wiring gap)."""
+    saved = [
+        {
+            "label": "put", "type": "option_stream", "collection": "OPT_SP_500",
+            "option_type": "P", "cycle": "W3 Friday", "data_source": "v2",
+            "maturity": {"kind": "nearest_to_target", "target_days": 60},
+            "selection": {"kind": "by_delta", "target": -0.50, "tolerance": 0.10},
+            "stream": "close", "hold_between_rolls": True, "nav_times": 1.0,
+            "sizing_mode": "futures_notional", "weight": -100.0,
+        }
+    ]
+    body = saved_legs_to_compute_body(saved)
+    assert body["legs"]["put"]["data_source"] == "v2"
+    # a leg WITHOUT data_source must NOT gain the key (defaults to v1 downstream)
+    saved_v1 = [dict(saved[0], data_source=None)]
+    assert "data_source" not in saved_legs_to_compute_body(saved_v1)["legs"]["put"]
