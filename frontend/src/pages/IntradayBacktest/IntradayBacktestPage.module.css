@@ -1,0 +1,219 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.pageHeader h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+}
+
+.pageHeader p {
+  margin: 0;
+  color: var(--text-muted, #888);
+  font-size: 0.9rem;
+}
+
+.controlsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.9rem 1.2rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.field > span,
+.field > .fieldLabel {
+  color: var(--text-muted, #888);
+  font-weight: 600;
+}
+
+.field input,
+.field select {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  background: var(--surface, #1a1a1a);
+  color: var(--text, #eee);
+  font: inherit;
+}
+
+.inlineRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.checkboxRow {
+  flex-direction: row;
+  align-items: center;
+}
+
+.checkboxRow input {
+  width: auto;
+}
+
+.exceptionList {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.exceptionChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  background: var(--surface-alt, #2a2a2a);
+  border: 1px solid var(--border-color, #333);
+  font-size: 0.8rem;
+}
+
+.chipRemove {
+  border: none;
+  background: transparent;
+  color: var(--text-muted, #999);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.runRow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.runBtn {
+  padding: 0.5rem 1.1rem;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.runBtn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.smallBtn {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  background: var(--surface, #1a1a1a);
+  color: var(--text, #eee);
+  cursor: pointer;
+}
+
+.error {
+  color: var(--danger, #ef4444);
+  font-size: 0.9rem;
+}
+
+.warnings {
+  margin: 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, #f59e0b 15%, transparent);
+  border: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
+  color: var(--text, #eee);
+  font-size: 0.85rem;
+}
+
+.warnings ul {
+  margin: 0.3rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.75rem;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.statLabel {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted, #888);
+}
+
+.statValue {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.positive { color: var(--success, #22c55e); }
+.negative { color: var(--danger, #ef4444); }
+
+.tableWrap {
+  overflow-x: auto;
+}
+
+.daysTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.daysTable th,
+.daysTable td {
+  padding: 0.4rem 0.6rem;
+  text-align: right;
+  border-bottom: 1px solid var(--border-color, #2a2a2a);
+}
+
+.daysTable th:first-child,
+.daysTable td:first-child,
+.daysTable th.left,
+.daysTable td.left {
+  text-align: left;
+}
+
+.skippedRow {
+  color: var(--text-muted, #888);
+  font-style: italic;
+}
+
+.statusBadge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.statusOk {
+  background: color-mix(in srgb, #22c55e 20%, transparent);
+  color: var(--success, #22c55e);
+}
+
+.statusSkipped {
+  background: color-mix(in srgb, #f59e0b 20%, transparent);
+  color: #f59e0b;
+}
+
+.chartBox {
+  height: 340px;
+  width: 100%;
+}
