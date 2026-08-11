@@ -30,6 +30,12 @@ import numpy as np
 import numpy.typing as npt
 
 from tcg.data._cache import LRUCache
+from tcg.data._options_coverage_cache import (
+    get_coverage_cache,
+    make_coverage_key,
+    make_span_key,
+    service_source_id,
+)
 from tcg.data._rolling import ContinuousSeriesBuilder
 from tcg.data._sql.connection import DwhConnectionPool
 from tcg.data._utils import date_to_int, filter_date_range, int_to_date
@@ -491,7 +497,13 @@ class V2MarketDataAdapter:
     async def option_trade_date_coverage(
         self, root: str
     ) -> tuple[date | None, date | None]:
-        return await self.options_reader.trade_date_coverage(root)
+        cache = get_coverage_cache()
+        if cache is None:
+            return await self.options_reader.trade_date_coverage(root)
+        key = make_coverage_key(source=service_source_id(self), root=root)
+        return await cache.get_or_fetch(
+            key, lambda: self.options_reader.trade_date_coverage(root)
+        )
 
     async def option_cycle_trade_date_span(
         self,
@@ -500,8 +512,23 @@ class V2MarketDataAdapter:
         end: date | None = None,
         cycle: str | Sequence[str] | None = None,
     ) -> tuple[date | None, date | None]:
-        return await self.options_reader.cycle_trade_date_span(
-            root, start, end, cycle=cycle
+        cache = get_coverage_cache()
+        if cache is None:
+            return await self.options_reader.cycle_trade_date_span(
+                root, start, end, cycle=cycle
+            )
+        key = make_span_key(
+            source=service_source_id(self),
+            root=root,
+            start=start,
+            end=end,
+            cycle=cycle,
+        )
+        return await cache.get_or_fetch(
+            key,
+            lambda: self.options_reader.cycle_trade_date_span(
+                root, start, end, cycle=cycle
+            ),
         )
 
     async def list_option_expirations_filtered(
