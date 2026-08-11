@@ -376,8 +376,8 @@ class DefaultMarketDataService:
     async def option_cycle_trade_date_span(
         self,
         root: str,
-        start: date,
-        end: date,
+        start: date | None = None,
+        end: date | None = None,
         cycle: str | Sequence[str] | None = None,
     ) -> tuple[date | None, date | None]:
         return await self._options.cycle_trade_date_span(

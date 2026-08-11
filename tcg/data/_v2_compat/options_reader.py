@@ -689,7 +689,19 @@ class V2OptionsDataReader:
         return _ROOT_UNDERLYING
 
     async def trade_date_coverage(self, root: str) -> tuple[date | None, date | None]:
-        """``(first, last)`` settlement-bar coverage across all option objects."""
+        """``(first, last)`` settlement-bar coverage across all option objects.
+
+        An EXACT global ``min/max`` over every option ``fact_value`` bar. There
+        is no ``ts``-usable index for an unbounded extreme (the PK is
+        ``(serie_id, ts)``; a BRIN on ``ts`` does not order an unbounded
+        min/max) and — unlike v1 — v2 has no cheap representative shortcut, so
+        this genuinely scans the fact (~10s). A single-representative-serie
+        heuristic was rejected: it is not provably exact (a later-expiring serie
+        could carry an earlier/later bar). This no-cycle read is NOT on the
+        portfolio cache-status hot path (that goes through
+        :meth:`cycle_trade_date_span`); it backs the nav badge / collection-wide
+        coverage endpoint only.
+        """
         _require_options_root(root)
         sql = f"""
             SELECT min(fv.ts) AS lo, max(fv.ts) AS hi
@@ -783,36 +795,46 @@ class V2OptionsDataReader:
     async def cycle_trade_date_span(
         self,
         root: str,
-        start: date,
-        end: date,
+        start: date | None = None,
+        end: date | None = None,
         cycle: "str | Sequence[str] | None" = None,
     ) -> tuple[date | None, date | None]:
-        """``(first, last)`` settlement ``ts`` for ONE ``cycle`` in a window.
+        """EXACT ``(first, last)`` settlement ``ts`` for ONE ``cycle``.
 
-        The bounded ``min/max`` counterpart of :meth:`list_expirations_by_date`:
-        SAME object routing (:func:`_route_objects`) and SAME half-open ``ts``
-        window, but a two-row aggregate over ``fact_value`` with NO contract
-        join and NO per-date map — so a cycle-scoped coverage read no longer
-        scans every settlement bar just to keep the extremes. A cycle's objects
-        are a subset of all option objects, so ``min/max`` over them already IS
-        the cycle span; min/max is identical to ``min``/``max`` of the map's
-        keys for the same arguments. Returns ``(None, None)`` when the cycle has
-        no bar in the window.
+        A two-value ``min/max`` aggregate over ``fact_value`` for the cycle's
+        routed ``object_id``s (:func:`_route_objects`) — the bounded counterpart
+        of :meth:`list_expirations_by_date`, identical to ``min``/``max`` of the
+        per-date map's keys for the same arguments, without materialising every
+        settlement bar. A cycle's objects are a SUBSET of all option objects, so
+        the object-scoped scan is far cheaper than the collection-wide
+        no-cycle coverage (e.g. W3's two objects are ~4s vs the ~10s union) and
+        stays EXACT — unlike a representative-serie heuristic, which is not
+        provably correct.
+
+        ``start``/``end`` are OPTIONAL. When given they bound the scan to the
+        half-open ``[start, end)`` UTC window; when omitted the true unbounded
+        cycle extent is returned (byte-identical whenever the window covers the
+        data, which lets the coverage handler skip the collection pre-fetch).
+        Returns ``(None, None)`` when the cycle has no bar.
         """
         _require_options_root(root)
         objects = _route_objects(cycle, require_filter=False)
-        lo, hi = date_int_bounds(start, end)
+        where = ["sv.type = 'value'", "sv.object_id = ANY(%s)"]
+        params: list[Any] = [objects]
+        if start is not None or end is not None:
+            ts_lo, ts_hi = date_int_bounds(start, end)
+            where.append("fv.ts >= %s")
+            params.append(ts_lo)
+            where.append("fv.ts < %s")
+            params.append(ts_hi)
         sql = f"""
             SELECT min(fv.ts) AS lo, max(fv.ts) AS hi
             FROM {V2_SCHEMA}.serie sv
             JOIN {V2_SCHEMA}.fact_value fv ON fv.serie_id = sv.serie_id
-            WHERE sv.type = 'value'
-              AND sv.object_id = ANY(%s)
-              AND fv.ts >= %s
-              AND fv.ts < %s
+            WHERE {" AND ".join(where)}
         """
         rows = await self._fetch(
-            sql, [objects, lo, hi], what=f"cycle trade-date span on '{root}'"
+            sql, params, what=f"cycle trade-date span on '{root}'"
         )
         if not rows:
             return None, None

@@ -1,22 +1,25 @@
-"""Unit tests for the bounded cycle trade-date-span reader (v1 + v2).
+"""Unit tests for the EXACT cycle trade-date-span reader (v1 + v2).
 
-``cycle_trade_date_span`` replaces the old ``min/max`` over
-``list_expirations_by_date``'s keys on the cycle-scoped coverage path.  The old
-path materialised EVERY settlement bar of the cycle (a 3-table
-``serie ⋈ fact_value ⋈ contract`` DISTINCT scan — ~14M rows for W3 across ~16
-years) only to keep the two extremes.  These tests pin the cheap replacement:
+``cycle_trade_date_span`` returns ``(first, last)`` settlement ``trade_date`` for
+ONE ``expiration_cycle``. It is an EXACT ``min/max`` (identical to
+``min``/``max`` of ``list_expirations_by_date``'s keys) computed WITHOUT
+materialising every settlement bar:
 
-  * a two-value ``min/max`` aggregate (no ``DISTINCT``, no per-date map);
-  * v2 issues NO ``contract`` join and routes the SAME objects the map used
-    (``_route_objects``), bounded to the SAME half-open ``ts`` window;
-  * v1 keeps the constant ``trade_date BETWEEN`` partition-pruning join and the
-    same cycle predicate, but selects ``min/max`` not a DISTINCT column;
-  * both map the aggregate row back to the ``(first, last)`` tuple and return
-    ``(None, None)`` on an all-``NULL`` (empty) aggregate row.
+  * v1 replaces the partition-wide hash join over ALL cycle ``instrument_id``s
+    (which seq-scanned every ``fact_price_eod`` partition) with a per-contract
+    ``LATERAL`` PK-index ``min/max`` whose extremes are aggregated — byte-
+    identical, index-only, and inherently robust to phantom dim contracts
+    (a listed-but-never-traded contract yields ``NULL``, dropped by the outer
+    aggregate; the reason a single "representative contract" is NOT safe);
+  * v2 keeps a two-value aggregate over the cycle's routed objects (NO contract
+    join, NO per-date map);
+  * both accept OPTIONAL ``start``/``end`` bounds and return ``(None, None)`` on
+    an all-``NULL`` (empty) aggregate.
 
-A live-DB byte-identity + timing proof (new ``min/max`` == old map extremes,
-old-vs-new wall clock) is captured separately in the task output — these unit
-tests lock the SQL shape so a regression goes RED offline.
+A live-DB byte-identity + timing proof (new EXACT reader == old full-scan
+extremes, all 26 real portfolios' params) is captured in the task output and in
+``tests/integration/data/options/test_coverage_heuristic_equivalence.py`` —
+these unit tests lock the SQL SHAPE so a regression goes RED offline.
 """
 
 from __future__ import annotations
@@ -74,7 +77,7 @@ class _FakePool:
         return _FakeConn(self._cursor)
 
 
-async def test_v1_span_is_bounded_min_max_aggregate_with_cycle():
+async def test_v1_span_is_lateral_per_contract_min_max_with_cycle():
     cur = _FakeCursor({"lo": date(2016, 2, 22), "hi": date(2026, 6, 30)})
     reader = SqlOptionsDataReader(_FakePool(cur))  # type: ignore[arg-type]
 
@@ -84,21 +87,42 @@ async def test_v1_span_is_bounded_min_max_aggregate_with_cycle():
     assert (first, last) == (date(2016, 2, 22), date(2026, 6, 30))
 
     sql, params = cur.calls[0]
-    # A bounded min/max aggregate — NOT a DISTINCT per-date map.
-    assert "min(p.trade_date)" in sql
-    assert "max(p.trade_date)" in sql
+    # A per-contract LATERAL PK min/max, aggregated — NOT a hash join over all
+    # cycle bars, NOT a DISTINCT per-date map.
+    assert "LATERAL" in sql
+    assert "min(m.lo)" in sql and "max(m.hi)" in sql
+    assert "min(f.trade_date)" in sql and "max(f.trade_date)" in sql
+    assert "f.instrument_id = i.instrument_id" in sql
     assert "DISTINCT" not in sql
-    # Constant partition-pruning window + cycle predicate pushed to the dim.
-    assert "trade_date BETWEEN %s AND %s" in sql
+    # Cycle predicate pushed to the dim CTE; bounds present when given.
     assert "expiration_cycle = %s" in sql
-    # start bound (2x: expiration>=start and BETWEEN start), cycle, end bound.
+    assert "expiration >= %s" in sql
+    assert "f.trade_date >= %s" in sql and "f.trade_date <= %s" in sql
+    # root, expiration>=start (dim), cycle, trade_date>=start, trade_date<=end.
     assert params == [
         "OPT_SP_500",
-        date(2011, 6, 15),  # expiration >= start
-        "M",  # cycle bind
-        date(2011, 6, 15),  # BETWEEN start
-        date(2026, 7, 21),  # BETWEEN end
+        date(2011, 6, 15),
+        "M",
+        date(2011, 6, 15),
+        date(2026, 7, 21),
     ]
+
+
+async def test_v1_span_unbounded_omits_expiration_and_trade_date_bounds():
+    cur = _FakeCursor({"lo": date(2009, 12, 15), "hi": date(2026, 6, 12)})
+    reader = SqlOptionsDataReader(_FakePool(cur))  # type: ignore[arg-type]
+
+    first, last = await reader.cycle_trade_date_span(
+        "OPT_SP_500", cycle="W1 Friday"
+    )
+    assert (first, last) == (date(2009, 12, 15), date(2026, 6, 12))
+
+    sql, params = cur.calls[0]
+    assert "LATERAL" in sql
+    assert "expiration >= %s" not in sql
+    assert "trade_date >=" not in sql and "trade_date <=" not in sql
+    # Only the root and the cycle bind survive.
+    assert params == ["OPT_SP_500", "W1 Friday"]
 
 
 async def test_v1_span_empty_aggregate_row_is_none_none():
@@ -152,7 +176,7 @@ async def test_v2_span_no_contract_join_routes_cycle_objects_and_window():
     sql = captured["sql"]
     assert "min(fv.ts)" in sql and "max(fv.ts)" in sql
     assert "DISTINCT" not in sql
-    # The whole point: NO contract join (the old map's third table).
+    # The whole point: NO contract join (the old per-date map's third table).
     assert "contract" not in sql.lower()
     assert "sv.object_id = ANY(%s)" in sql
 
@@ -162,6 +186,20 @@ async def test_v2_span_no_contract_join_routes_cycle_objects_and_window():
     # Half-open [start, end+1day) UTC window (date_int_bounds).
     assert ts_lo == datetime(2011, 6, 15, tzinfo=timezone.utc)
     assert ts_hi == datetime(2026, 7, 22, tzinfo=timezone.utc)
+
+
+async def test_v2_span_unbounded_omits_ts_window():
+    lo = datetime(2010, 6, 7, tzinfo=timezone.utc)
+    hi = datetime(2026, 7, 31, tzinfo=timezone.utc)
+    reader, captured = _v2_reader_capturing([{"lo": lo, "hi": hi}])
+
+    first, last = await reader.cycle_trade_date_span(
+        "OPT_SP_500", cycle="W3 Friday"
+    )
+    assert (first, last) == (date(2010, 6, 7), date(2026, 7, 31))
+    assert "fv.ts >=" not in captured["sql"] and "fv.ts <" not in captured["sql"]
+    # Only the routed-objects bind survives.
+    assert captured["params"] == [_route_objects("W3 Friday", require_filter=False)]
 
 
 async def test_v2_span_empty_result_is_none_none():
