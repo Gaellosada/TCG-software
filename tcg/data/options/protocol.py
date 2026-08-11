@@ -207,17 +207,19 @@ class OptionsDataReader(Protocol):
     async def cycle_trade_date_span(
         self,
         root: str,
-        start: date,
-        end: date,
+        start: date | None = None,
+        end: date | None = None,
         cycle: str | Sequence[str] | None = None,
     ) -> tuple[date | None, date | None]:
-        """``(first, last)`` settlement-bar trade_date for ONE ``cycle``.
+        """EXACT ``(first, last)`` settlement-bar trade_date for ONE ``cycle``.
 
-        The bounded ``min/max`` counterpart of :meth:`list_expirations_by_date`:
-        SAME cycle routing and window, but a two-row aggregate instead of the
-        full per-date DISTINCT map — so a cycle-scoped coverage read no longer
-        scans (then discards) every settlement bar of the cycle. Either bound is
-        ``None`` when the cycle has no bar in ``[start, end]``.
+        The ``min/max`` counterpart of :meth:`list_expirations_by_date`: SAME
+        cycle routing, but a two-row aggregate instead of the full per-date
+        DISTINCT map — so a cycle-scoped coverage read no longer scans (then
+        discards) every settlement bar of the cycle. ``start``/``end`` are
+        OPTIONAL: when given they bound the scan; when omitted the cycle's true
+        unbounded extent is returned. Either bound is ``None`` when the cycle
+        has no bar.
         """
         ...
 

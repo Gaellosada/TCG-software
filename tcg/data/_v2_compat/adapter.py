@@ -30,6 +30,12 @@ import numpy as np
 import numpy.typing as npt
 
 from tcg.data._cache import LRUCache
+from tcg.data._options_coverage_cache import (
+    get_coverage_cache,
+    make_coverage_key,
+    make_span_key,
+    service_source_id,
+)
 from tcg.data._rolling import ContinuousSeriesBuilder
 from tcg.data._sql.connection import DwhConnectionPool
 from tcg.data._utils import date_to_int, filter_date_range, int_to_date
@@ -246,6 +252,27 @@ class V2MarketDataAdapter:
         if result is not None:
             self._cache.put(key, result)
         return result
+
+    async def get_price_bounds(
+        self,
+        collection: str,
+        instrument_id: str,
+        *,
+        provider: str | None = None,
+    ) -> tuple[int | None, int | None]:
+        """First/last available ``trade_date`` (``(min, max)`` YYYYMMDD ints, or
+        ``(None, None)``) for one instrument — the endpoints of
+        :meth:`get_prices`.
+
+        The v1 default-warehouse path serves the cache-status range fan-out, so
+        v2 never receives this on the hot path; the adapter derives the bounds
+        from its own :meth:`get_prices` (correct, off the hot path) purely to
+        satisfy the shared ``MarketDataService`` contract.
+        """
+        series = await self.get_prices(collection, instrument_id, provider=provider)
+        if series is None or len(series) == 0:
+            return (None, None)
+        return (int(series.dates[0]), int(series.dates[-1]))
 
     # --- Continuous futures ------------------------------------------------ #
 
@@ -470,17 +497,38 @@ class V2MarketDataAdapter:
     async def option_trade_date_coverage(
         self, root: str
     ) -> tuple[date | None, date | None]:
-        return await self.options_reader.trade_date_coverage(root)
+        cache = get_coverage_cache()
+        if cache is None:
+            return await self.options_reader.trade_date_coverage(root)
+        key = make_coverage_key(source=service_source_id(self), root=root)
+        return await cache.get_or_fetch(
+            key, lambda: self.options_reader.trade_date_coverage(root)
+        )
 
     async def option_cycle_trade_date_span(
         self,
         root: str,
-        start: date,
-        end: date,
+        start: date | None = None,
+        end: date | None = None,
         cycle: str | Sequence[str] | None = None,
     ) -> tuple[date | None, date | None]:
-        return await self.options_reader.cycle_trade_date_span(
-            root, start, end, cycle=cycle
+        cache = get_coverage_cache()
+        if cache is None:
+            return await self.options_reader.cycle_trade_date_span(
+                root, start, end, cycle=cycle
+            )
+        key = make_span_key(
+            source=service_source_id(self),
+            root=root,
+            start=start,
+            end=end,
+            cycle=cycle,
+        )
+        return await cache.get_or_fetch(
+            key,
+            lambda: self.options_reader.cycle_trade_date_span(
+                root, start, end, cycle=cycle
+            ),
         )
 
     async def list_option_expirations_filtered(

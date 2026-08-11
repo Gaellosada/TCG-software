@@ -21,7 +21,6 @@ import { queryKeys } from '../../queryKeys';
 
 const CONCURRENCY = 4;
 const DEBOUNCE_MS = 300;
-const ACTIVE_TAG = '__active__';
 
 /** PURE: map a boolean (or missing) cached flag to a row status string. */
 export function statusForCached(cached) {
@@ -129,27 +128,31 @@ export default function usePortfolioCacheStatus({
       const slippageBps = getSlippageBps();
       const feesBps = getFeesBps();
 
-      // ── Build the ACTIVE body (if keyable) ──
-      const queries = [];       // { tag, body }
-      // Mirror the active editor's window default (usePortfolio): the cache
-      // status must probe the SAME key the compute will use, i.e. seed from the
-      // cadence recommendation, not the raw overlap start.
-      const effStart = startDate || overlapRange?.recommendedStart || overlapRange?.start;
-      const effEnd = endDate || overlapRange?.end;
-      if (legs.length > 0 && effStart && effEnd) {
+      // Cheap per-body cache-status peek → boolean `cached`. The backend status
+      // call is a SQLite key peek, so firing one small call per row (instead of
+      // a single batched call gated behind the SLOWEST row) is cheap and lets
+      // each label commit the instant its OWN body resolves. An endpoint error
+      // is treated as not-cached (same as the old batched-failure fallback).
+      // NOT itself stale-guarded — the guard lives at the commit site
+      // (`commitRow` / `setActiveCached`, via `live()`), so a superseded run's
+      // result is dropped there rather than skipped here.
+      const probeCached = async (body) => {
         try {
-          // Fund-of-funds key parity: resolve each active child's OWN range so
-          // the composed body matches what Compute/auto-display send (shared
-          // single-source accessor keeps the id predicate + wiring identical).
-          const resolveChildRange = await childRangeAccessorFor(legs, { queryClient });
-          if (!live()) return;
-          const { body, missing, brokenRefs = [] } = buildPortfolioComputeBody({
-            legs, rebalance, start: effStart, end: effEnd, availableIndicators, resolvePortfolio,
-            resolveChildRange, slippageBps, feesBps,
-          });
-          if (!missing.length && !brokenRefs.length) queries.push({ tag: ACTIVE_TAG, body });
-        } catch { /* un-keyable active config → no active query (stays null) */ }
-      }
+          const res = await getPortfolioCacheStatus([body]);
+          const results = Array.isArray(res?.results) ? res.results : [];
+          return !!(results[0] && results[0].cached);
+        } catch {
+          return false;
+        }
+      };
+
+      // Commit exactly ONE row's status. Stale-guarded: a superseded run's
+      // late-arriving result must never overwrite a newer run's state, so bail
+      // unless THIS run is still current (per-run token via `live()`).
+      const commitRow = (id, cached) => {
+        if (!live()) return;
+        setRowStatusById((prev) => ({ ...prev, [id]: statusForCached(cached) }));
+      };
 
       // Resolve a saved ROW's OWN referenced child portfolios (by id) → a sync
       // ``(id) => doc|null`` resolver over the fetched current specs. A row's
@@ -188,9 +191,47 @@ export default function usePortfolioCacheStatus({
         };
       };
 
-      // ── Build ROW bodies (the active row is derived from activeCached) ──
-      await runPool(rows, CONCURRENCY, async (doc) => {
+      // ── ACTIVE probe — independent of the rows; commits as soon as it keys ──
+      // Mirror the active editor's window default (usePortfolio): probe the SAME
+      // key Compute will use, i.e. seed from the cadence recommendation, not the
+      // raw overlap start. Runs concurrently with the row pool so neither blocks
+      // the other.
+      const activeTask = (async () => {
+        const effStart = startDate || overlapRange?.recommendedStart || overlapRange?.start;
+        const effEnd = endDate || overlapRange?.end;
+        let activeBody = null;
+        if (legs.length > 0 && effStart && effEnd) {
+          try {
+            // Fund-of-funds key parity: resolve each active child's OWN range so
+            // the composed body matches what Compute/auto-display send (shared
+            // single-source accessor keeps the id predicate + wiring identical).
+            const resolveChildRange = await childRangeAccessorFor(legs, { queryClient });
+            if (!live()) return;
+            const { body, missing, brokenRefs = [] } = buildPortfolioComputeBody({
+              legs, rebalance, start: effStart, end: effEnd, availableIndicators, resolvePortfolio,
+              resolveChildRange, slippageBps, feesBps,
+            });
+            if (!missing.length && !brokenRefs.length) activeBody = body;
+          } catch { /* un-keyable active config → active stays null */ }
+        }
+        if (!live()) return;
+        if (activeBody) {
+          const cached = await probeCached(activeBody);
+          if (!live()) return;
+          setActiveCached(cached);
+        } else {
+          setActiveCached(null);
+        }
+      })();
+
+      // ── ROW probes — each row commits the INSTANT its own range resolves ──
+      // A bounded pool resolves each row's body; the moment a body is ready its
+      // status is probed and committed, so fast rows show while slow rows stay
+      // `checking` (no all-or-nothing barrier). The active row is skipped here —
+      // its label derives from `activeCached`.
+      const rowsTask = runPool(rows, CONCURRENCY, async (doc) => {
         if (!live() || doc.id === activeId) return;
+        let body = null;
         try {
           const rowLegs = persistedDocToLegs(doc);
           const hasChildRefs = rowLegs.some((l) => l.type === 'portfolio');
@@ -200,7 +241,7 @@ export default function usePortfolioCacheStatus({
           // change without the row's OWN legs changing (docSignature unchanged),
           // so it must rebuild each probe to stay content-addressed on the
           // current child (the child fetch is still React-Query-cached).
-          let body = (!hasChildRefs && memo && memo.sig === sig) ? memo.body : null;
+          body = (!hasChildRefs && memo && memo.sig === sig) ? memo.body : null;
           if (!body) {
             const { overlapRange: ov } = await resolvePortfolioRange(rowLegs, { queryClient });
             if (ov && ov.start && ov.end) {
@@ -213,9 +254,9 @@ export default function usePortfolioCacheStatus({
               const built = buildPortfolioComputeBody({
                 legs: rowLegs,
                 rebalance: doc.rebalance || 'none',
-                // Mirror the ACTIVE probe (line ~137) and the compute sites: seed
-                // from the cadence recommendation so a cadence-cliff option row's
-                // status body keys the SAME entry Compute wrote (else false
+                // Mirror the ACTIVE probe and the compute sites: seed from the
+                // cadence recommendation so a cadence-cliff option row's status
+                // body keys the SAME entry Compute wrote (else false
                 // "not-cached"). Falls back to raw start when there's no cliff.
                 start: ov.recommendedStart || ov.start,
                 end: ov.end,
@@ -231,36 +272,23 @@ export default function usePortfolioCacheStatus({
               }
             }
           }
-          if (body) queries.push({ tag: doc.id, body });
-        } catch { /* dwh flake / un-keyable row → omitted → not-cached below */ }
-      });
-      if (!live()) return;
-
-      // ── ONE batched status call for every keyable body ──
-      let results = [];
-      if (queries.length > 0) {
-        try {
-          const res = await getPortfolioCacheStatus(queries.map((q) => q.body));
-          results = Array.isArray(res?.results) ? res.results : [];
         } catch {
-          results = []; // endpoint error → treat everything as not-cached
+          body = null; // dwh flake / un-keyable row → not-cached below
         }
-      }
-      if (!live()) return;
-
-      // ── Map results back by position ──
-      const cachedByTag = {};
-      queries.forEach((q, i) => { cachedByTag[q.tag] = !!(results[i] && results[i].cached); });
-
-      setActiveCached(ACTIVE_TAG in cachedByTag ? cachedByTag[ACTIVE_TAG] : null);
-      setRowStatusById((prev) => {
-        const next = { ...prev };
-        for (const doc of rows) {
-          if (doc.id === activeId) continue; // active row derives from activeCached
-          next[doc.id] = statusForCached(cachedByTag[doc.id]);
+        if (!live()) return;
+        // Probe + commit THIS row alone. A body that never keyed (broken ref /
+        // flake) commits `not-cached`, matching the old batched fallback. Both
+        // `probeCached` and `commitRow` are stale-guarded, so a superseded run's
+        // late result is dropped rather than overwriting the current run.
+        if (body) {
+          const cached = await probeCached(body);
+          commitRow(doc.id, cached);
+        } else {
+          commitRow(doc.id, false);
         }
-        return next;
       });
+
+      await Promise.all([activeTask, rowsTask]);
     }, DEBOUNCE_MS);
 
     return () => { cancelled = true; clearTimeout(timer); };

@@ -429,16 +429,16 @@ async def test_coverage_cycle_narrows_start(client: AsyncClient, mock_svc):
     )
     assert resp.status_code == 200
     body = resp.json()
-    # Cycle start is LATER than the collection-wide 2011-06-15 floor.
+    # Cycle start is the cycle's own EXACT extent (later than the collection).
     assert body["start"] == "2016-02-22"
     assert body["end"] == "2026-06-30"
-    # The span was read with the cycle filter, bounded to the collection window
-    # (real data extent) — NOT the heavy per-date map.
+    # The span is read cycle-scoped with NO collection-window pre-fetch (the
+    # cold fan-out onto option_trade_date_coverage is gone) — NOT the heavy
+    # per-date map.
     call = mock_svc.option_cycle_trade_date_span.await_args
     assert call.args[0] == "OPT_SP_500"
-    assert call.args[1] == date(2011, 6, 15)
-    assert call.args[2] == date(2026, 7, 21)
     assert call.kwargs["cycle"] == "W3 Friday"
+    mock_svc.option_trade_date_coverage.assert_not_awaited()
     mock_svc.list_option_expirations_by_date.assert_not_awaited()
 
 
@@ -520,11 +520,12 @@ async def test_coverage_cycle_no_bars_returns_null(client: AsyncClient, mock_svc
     }
 
 
-async def test_coverage_cycle_null_collection_short_circuits(
+async def test_coverage_cycle_empty_returns_null_without_prefetch(
     client: AsyncClient, mock_svc
 ):
-    """When the collection itself has no coverage, the cycle path returns null
-    without probing the per-date map."""
+    """A cycle with no bars yields null bounds directly from the (EXACT) span —
+    no collection-coverage pre-fetch is consulted (that fan-out is gone), and
+    the per-date map is never probed."""
     mock_svc.option_trade_date_coverage = AsyncMock(return_value=(None, None))
     mock_svc.option_cycle_trade_date_span = AsyncMock(return_value=(None, None))
     resp = await client.get(
@@ -539,8 +540,11 @@ async def test_coverage_cycle_null_collection_short_circuits(
         "recommended_start": None,
         "segments": [],
     }
-    # Collection has no coverage → the cycle span read is never attempted.
-    mock_svc.option_cycle_trade_date_span.assert_not_awaited()
+    # The span itself reports the empty cycle; the collection pre-fetch is gone.
+    mock_svc.option_cycle_trade_date_span.assert_awaited_once_with(
+        "OPT_EMPTY", cycle="M"
+    )
+    mock_svc.option_trade_date_coverage.assert_not_awaited()
 
 
 async def test_coverage_cycle_respects_data_source_v2(client: AsyncClient, mock_svc):
@@ -597,9 +601,11 @@ async def test_coverage_cycle_uses_span_not_per_date_map(
     assert resp.status_code == 200
     assert resp.json()["start"] == "2016-02-22"
     assert resp.json()["end"] == "2026-06-30"
+    # Cycle-scoped, no collection-window pre-fetch (the cold fan-out is gone).
     mock_svc.option_cycle_trade_date_span.assert_awaited_once_with(
-        "OPT_SP_500", date(2010, 6, 7), date(2026, 7, 27), cycle="W3 Friday"
+        "OPT_SP_500", cycle="W3 Friday"
     )
+    mock_svc.option_trade_date_coverage.assert_not_awaited()
     mock_svc.list_option_expirations_by_date.assert_not_awaited()
 
 

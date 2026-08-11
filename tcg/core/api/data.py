@@ -269,6 +269,26 @@ async def list_instruments(
     }
 
 
+@router.get("/{collection}/{instrument_id}/bounds")
+async def get_price_bounds(
+    collection: str,
+    instrument_id: str,
+    svc: MarketDataService = Depends(get_market_data),
+) -> dict:
+    """Cheap first/last available ``trade_date`` for an instrument.
+
+    Returns ``{"start", "end"}`` as YYYYMMDD ints (or ``null`` when the
+    instrument has no bars) — the endpoints of what ``GET
+    /{collection}/{instrument_id}`` would return, WITHOUT hydrating the whole
+    OHLCV series. The portfolio cache-status probe uses this to resolve each
+    leg's date range (part of the compute cache key) without a cold full-history
+    dwh round-trip per leg. Same read-only ``get_market_data`` dependency and
+    unknown-collection guard as ``get_prices``.
+    """
+    start_int, end_int = await svc.get_price_bounds(collection, instrument_id)
+    return {"start": start_int, "end": end_int}
+
+
 @router.get("/{collection}/{instrument_id}")
 async def get_prices(
     collection: str,

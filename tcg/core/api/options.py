@@ -330,25 +330,24 @@ async def _cycle_trade_date_coverage(
     """Min/max ``trade_date`` over the contracts of ONE ``expiration_cycle``.
 
     Cycle-scoped coverage cannot go through ``option_trade_date_coverage`` (a
-    collection-wide, cycle-blind heuristic), so it is derived source-agnostically
-    from :meth:`MarketDataService.option_cycle_trade_date_span` — a bounded
-    ``min(trade_date)/max(trade_date)`` aggregate over just THIS cycle's bars,
-    which BOTH the v1 service and the v2 adapter expose with a ``cycle`` filter.
-    The scan is bounded to the collection's real data window (from the cheap
-    collection-coverage heuristic) so the planner prunes to the spanned
-    partitions.  (This supersedes deriving the extremes from the full per-date
-    map ``list_option_expirations_by_date``, which had to materialise every
+    collection-wide read), so it is derived source-agnostically from
+    :meth:`MarketDataService.option_cycle_trade_date_span` — an EXACT
+    ``min(trade_date)/max(trade_date)`` over just THIS cycle's bars, which BOTH
+    the v1 service and the v2 adapter expose with a ``cycle`` filter.  (This
+    supersedes deriving the extremes from the full per-date map
+    ``list_option_expirations_by_date``, which had to materialise every
     settlement bar of the cycle — ~14M rows for W3 — only to keep min/max; the
-    aggregate returns the SAME two dates without the scan.)  Returns
-    ``(None, None)`` when the collection has no coverage or the cycle lists no
-    bar in the window.
+    aggregate returns the SAME two dates without the scan.)
+
+    No collection-coverage pre-fetch: the span reads the cycle's true unbounded
+    extent directly (v1 via a per-contract ``LATERAL`` PK min/max; v2 via an
+    object-scoped aggregate), which for the collection-wide window is
+    byte-identical to the previously window-bounded read but drops the cold
+    fan-out onto ``option_trade_date_coverage`` — critical for v2, whose
+    no-cycle coverage is a ~10s full ``fact_value`` scan that this path no
+    longer pays.  Returns ``(None, None)`` when the cycle lists no bar.
     """
-    coll_first, coll_last = await svc.option_trade_date_coverage(root)
-    if coll_first is None or coll_last is None:
-        return None, None
-    return await svc.option_cycle_trade_date_span(
-        root, coll_first, coll_last, cycle=cycle
-    )
+    return await svc.option_cycle_trade_date_span(root, cycle=cycle)
 
 
 @router.get("/coverage")

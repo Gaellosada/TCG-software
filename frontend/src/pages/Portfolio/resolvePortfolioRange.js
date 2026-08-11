@@ -6,7 +6,7 @@
 // path and lie. This is the single source of that logic (extracted verbatim
 // from the usePortfolio effect).
 
-import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
+import { getInstrumentPriceBounds, getContinuousSeries } from '../../api/data';
 import { getPortfolio } from '../../api/persistence';
 import { queryKeys } from '../../queryKeys';
 import { formatDateInt } from '../../utils/format';
@@ -85,8 +85,16 @@ export async function resolveLegRange(leg, { queryClient, dataSource = 'v1' }, _
     return fetchOptionLegRange(queryClient, leg, effSource);
   }
   try {
-    let dates;
     if (leg.type === 'continuous') {
+      // Continuous legs KEEP the full-series fetch: the range must be the
+      // STITCHED continuous series' first/last date, and stitching
+      // (``trim_overlaps`` drops post-expiration + zero-close bars, the
+      // monotone-ownership dedup drops stale post-roll days) can move the
+      // endpoints away from a raw min/max over the underlying contract facts.
+      // A cheap facts-bounds lookup is therefore NOT provably equal here, so we
+      // resolve the endpoints from the same authoritative stitched series the
+      // compute path uses (correctness beats speed). See resolvePortfolioRange
+      // Wave-2 notes.
       const params = {
         strategy: leg.strategy || 'front_month',
         adjustment: leg.adjustment || 'none',
@@ -98,19 +106,33 @@ export async function resolveLegRange(leg, { queryClient, dataSource = 'v1' }, _
         queryKey: queryKeys.market.continuous(leg.collection, params),
         queryFn: () => getContinuousSeries(leg.collection, params),
       });
-      dates = res?.dates;
-    } else {
-      const res = await queryClient.fetchQuery({
-        queryKey: queryKeys.market.prices(leg.collection, leg.symbol),
-        queryFn: () => getInstrumentPrices(leg.collection, leg.symbol),
-      });
-      dates = res?.dates;
+      const dates = res?.dates;
+      if (dates && dates.length > 0) {
+        return {
+          id: leg.id,
+          start: formatDateInt(dates[0]),
+          end: formatDateInt(dates[dates.length - 1]),
+        };
+      }
+      return { id: leg.id, start: null, end: null };
     }
-    if (dates && dates.length > 0) {
+    // Plain instrument leg: resolve the range via a CHEAP min/max-trade_date
+    // bounds lookup instead of hydrating the whole OHLCV history just to read
+    // two dates. ``read_prices`` returns EVERY fact row in the (collection,
+    // symbol) window with NO row filtering, so its ``dates[0]``/``dates[-1]``
+    // are exactly MIN/MAX ``trade_date`` over that identical row set — the
+    // bounds endpoint runs the same predicate as an aggregate. The resolved
+    // ``start``/``end`` are byte-identical, so the portfolio cache key (which
+    // hashes start/end) is unchanged and the "cached" label stays accurate.
+    const bounds = await queryClient.fetchQuery({
+      queryKey: queryKeys.market.priceBounds(leg.collection, leg.symbol),
+      queryFn: () => getInstrumentPriceBounds(leg.collection, leg.symbol),
+    });
+    if (bounds && bounds.start != null && bounds.end != null) {
       return {
         id: leg.id,
-        start: formatDateInt(dates[0]),
-        end: formatDateInt(dates[dates.length - 1]),
+        start: formatDateInt(bounds.start),
+        end: formatDateInt(bounds.end),
       };
     }
     return { id: leg.id, start: null, end: null };

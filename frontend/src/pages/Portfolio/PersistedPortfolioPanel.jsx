@@ -19,7 +19,9 @@
 //   selectedId            {string|null} id of the currently loaded portfolio
 //   onSelect              {Function} (id) => void — load this portfolio into editor
 
+import { useState } from 'react';
 import Card from '../../components/Card';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import LockToggle from '../../components/LockToggle';
 import styles from './PersistedPortfolioPanel.module.css';
 import { CATEGORIES } from '../../api/persistence';
@@ -40,6 +42,10 @@ function PersistedPortfolioPanel({
   cacheEnabled = false,
   cacheStatusById = {},
 }) {
+  // Row-level archive requires confirmation — {id, name} of the portfolio
+  // pending removal, or null when no confirm dialog is open.
+  const [pendingArchive, setPendingArchive] = useState(null);
+
   const headerRight = (
     <div className={styles.headerActions}>
       <label className={styles.categoryLabel} htmlFor="portfolio-category-select">
@@ -169,7 +175,7 @@ function PersistedPortfolioPanel({
                   <button
                     type="button"
                     className={styles.rowDeleteBtn}
-                    onClick={() => onArchive(p.id)}
+                    onClick={() => setPendingArchive({ id: p.id, name: p.name })}
                     title={isLocked ? 'Locked — unlock to archive' : 'Archive portfolio'}
                     aria-label={`Archive ${p.name}`}
                     data-testid={`archive-portfolio-${p.id}`}
@@ -183,6 +189,33 @@ function PersistedPortfolioPanel({
           })
         )}
       </div>
+
+      <ConfirmDialog
+        open={pendingArchive !== null}
+        title="Remove portfolio?"
+        message={
+          pendingArchive
+            ? `"${pendingArchive.name}" will be removed from your saved portfolios.`
+            : ''
+        }
+        confirmLabel="Remove"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={() => {
+          const pending = pendingArchive;
+          setPendingArchive(null);
+          if (!pending) return;
+          // Defensive re-check: a concurrent action could have locked this
+          // portfolio while the confirm dialog was open. Re-read the lock
+          // signal from the current `portfolios` prop (same one each row
+          // uses for `disabled={isLocked}`) rather than trust whatever was
+          // true when the dialog opened.
+          const current = portfolios.find((p) => p.id === pending.id);
+          if (current && current.locked) return;
+          onArchive(pending.id);
+        }}
+        onCancel={() => setPendingArchive(null)}
+      />
     </Card>
   );
 }
