@@ -204,7 +204,15 @@ function PersistedPortfolioPanel({
         onConfirm={() => {
           const pending = pendingArchive;
           setPendingArchive(null);
-          if (pending) onArchive(pending.id);
+          if (!pending) return;
+          // Defensive re-check: a concurrent action could have locked this
+          // portfolio while the confirm dialog was open. Re-read the lock
+          // signal from the current `portfolios` prop (same one each row
+          // uses for `disabled={isLocked}`) rather than trust whatever was
+          // true when the dialog opened.
+          const current = portfolios.find((p) => p.id === pending.id);
+          if (current && current.locked) return;
+          onArchive(pending.id);
         }}
         onCancel={() => setPendingArchive(null)}
       />

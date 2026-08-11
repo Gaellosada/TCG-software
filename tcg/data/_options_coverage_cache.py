@@ -37,6 +37,17 @@ Lifetime: in-memory only; a process restart flushes it (the moment a dwh backfil
 is most likely).  The TTL backstop bounds staleness for a long-lived process and
 ``COVERAGE_CACHE_VERSION`` salts the key so a shape change can never serve a
 stale-shaped entry across a deploy.
+
+Environment variables (not documented elsewhere — this is the source of truth,
+mirroring the undocumented ``TCG_CHAIN_CACHE_*`` precedent in
+``_options_chain_cache.py``):
+- ``TCG_COVERAGE_CACHE_ENABLED`` (default ``true``) — master kill switch; a
+  false value makes ``get_coverage_cache()`` return ``None``, giving
+  byte-identical-to-uncached behaviour.
+- ``TCG_COVERAGE_CACHE_TTL_SECONDS`` (default ``21600`` — 6 h) — staleness
+  backstop per entry.
+- ``TCG_COVERAGE_CACHE_MAX_ENTRIES`` (default ``512``) — LRU cap on the number
+  of cached spans.
 """
 
 from __future__ import annotations

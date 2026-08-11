@@ -133,6 +133,9 @@ export default function usePortfolioCacheStatus({
       // a single batched call gated behind the SLOWEST row) is cheap and lets
       // each label commit the instant its OWN body resolves. An endpoint error
       // is treated as not-cached (same as the old batched-failure fallback).
+      // NOT itself stale-guarded — the guard lives at the commit site
+      // (`commitRow` / `setActiveCached`, via `live()`), so a superseded run's
+      // result is dropped there rather than skipped here.
       const probeCached = async (body) => {
         try {
           const res = await getPortfolioCacheStatus([body]);

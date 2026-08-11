@@ -143,6 +143,23 @@ describe('<PersistedPortfolioPanel>', () => {
     expect(screen.queryByTestId('confirm-dialog')).toBeNull();
   });
 
+  it('does not call onArchive if the portfolio becomes locked while the confirm dialog is open (defensive re-check)', () => {
+    const props = defaultProps();
+    const { rerender } = render(<PersistedPortfolioPanel {...props} />);
+    fireEvent.click(screen.getByTestId('archive-portfolio-p1'));
+    expect(screen.getByTestId('confirm-dialog')).toBeTruthy();
+
+    // Simulate a concurrent action locking p1 while the dialog is open.
+    const lockedPortfolios = props.portfolios.map((p) => (
+      p.id === 'p1' ? { ...p, locked: true } : p
+    ));
+    rerender(<PersistedPortfolioPanel {...props} portfolios={lockedPortfolios} />);
+
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'));
+    expect(props.onArchive).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('confirm-dialog')).toBeNull();
+  });
+
   it('disables category select and archive button when row is locked', () => {
     const lockedPortfolios = [
       { id: 'p1', name: 'Alpha Portfolio', category: 'RESEARCH', locked: true },
