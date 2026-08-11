@@ -22,7 +22,10 @@
 //      (`getInstrumentPrices` is NOT used for range) — the debt is gone;
 //   2. each instrument leg drives exactly one CHEAP bounds call instead
 //      (N×M `getInstrumentPriceBounds`);
-//   3. the status label still resolves (one batched status call, N bodies).
+//   3. the status label still resolves — and, since the Wave 3 progressive fix,
+//      via one CHEAP per-row status call each (N calls, one body apiece), NOT a
+//      single all-or-nothing batched call gated behind the slowest row. The
+//      first status call still fires with ZERO full-series fetches outstanding.
 //
 // It FAILS on origin/main (main resolves the range via `getInstrumentPrices`
 // and never calls `getInstrumentPriceBounds`) and PASSES after the fix.
@@ -146,8 +149,10 @@ describe('usePortfolioCacheStatus — status label is no longer gated behind a c
       initialProps: baseProps({ portfolios: rows }),
     });
 
-    // The cheap status call is what ultimately resolves the label.
-    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    // The cheap status calls are what ultimately resolve the labels. Progressive:
+    // one small per-row status call each (N total), each fired the instant that
+    // row's range resolves — NOT one batched call gated behind the slowest row.
+    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalledTimes(N), { timeout: 3000 });
 
     // 1) THE FIX: no full-series instrument hydration on the range path at all.
     expect(getInstrumentPrices).not.toHaveBeenCalled();
@@ -156,10 +161,13 @@ describe('usePortfolioCacheStatus — status label is no longer gated behind a c
     // 2) Each instrument leg drove exactly one CHEAP bounds lookup instead.
     expect(getInstrumentPriceBounds).toHaveBeenCalledTimes(N * M); // 15
 
-    // 3) The status call was NOT gated behind any full-series fan-out.
+    // 3) The first status call was NOT gated behind any full-series fan-out.
     expect(fullSeriesWhenStatusCalled).toBe(0);
 
-    // The status body count matches the rows (parity check — not the defect).
-    expect(getPortfolioCacheStatus.mock.calls[0][0]).toHaveLength(N);
+    // Each status call carries exactly ONE row body (per-row peek), never a
+    // batched array of N bodies (the removed all-or-nothing barrier).
+    for (const call of getPortfolioCacheStatus.mock.calls) {
+      expect(call[0]).toHaveLength(1);
+    }
   });
 });

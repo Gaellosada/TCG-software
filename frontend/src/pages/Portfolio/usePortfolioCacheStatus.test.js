@@ -73,8 +73,17 @@ describe('usePortfolioCacheStatus', () => {
     await waitFor(() => expect(result.current.activeCached).toBe(true), { timeout: 2000 });
   });
 
-  it('batches the active config AND saved rows into ONE call', async () => {
-    getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }, { cached: false }] });
+  it('probes the active config AND each saved row with its OWN per-row status call', async () => {
+    // Progressive (Wave 3): the active config and each row are probed by a
+    // SEPARATE cheap per-row status call — never one batched all-or-nothing call.
+    // The active body reports cached; the row body reports not-cached, and each
+    // label reflects ITS OWN resolved body.
+    getPortfolioCacheStatus.mockImplementation((bodies) => {
+      const b = bodies[0];
+      // The row body carries the NDX leg; the active body carries SPX.
+      const cached = !(b && b.legs && b.legs.NDX);
+      return Promise.resolve({ results: [{ cached }] });
+    });
     const row = {
       id: 'row-1', rebalance: 'none',
       legs: [{ label: 'NDX', type: 'instrument', collection: 'INDEX', symbol: 'NDX', weight: 100 }],
@@ -82,8 +91,11 @@ describe('usePortfolioCacheStatus', () => {
     const { result } = renderHook((props) => usePortfolioCacheStatus(props), {
       initialProps: baseProps({ portfolios: [row] }),
     });
-    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalledTimes(1), { timeout: 2000 });
-    expect(getPortfolioCacheStatus.mock.calls[0][0]).toHaveLength(2); // active + 1 row, one call
+    // Two independent per-row calls (active + 1 row), each carrying ONE body.
+    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalledTimes(2), { timeout: 2000 });
+    for (const call of getPortfolioCacheStatus.mock.calls) {
+      expect(call[0]).toHaveLength(1);
+    }
     await waitFor(() => {
       expect(result.current.activeCached).toBe(true);
       expect(result.current.rowStatusById['row-1']).toBe('not-cached');
@@ -106,11 +118,17 @@ describe('usePortfolioCacheStatus', () => {
     renderHook((props) => usePortfolioCacheStatus(props), {
       initialProps: baseProps({ portfolios: [row] }),
     });
-    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalled(), { timeout: 2000 });
-    const queries = getPortfolioCacheStatus.mock.calls[0][0];
-    // queries[0] = active (from overlapRange prop); queries[1] = the saved row —
-    // it must key from recommendedStart (2016-05-01), NOT the raw start (2010-01-01).
-    expect(queries[1].start).toBe('2016-05-01');
+    // Progressive per-row calls: the saved row is probed by its OWN call. Find
+    // the row body (carries the OPT leg) across all calls and assert it keys from
+    // recommendedStart (2016-05-01), NOT the raw start (2010-01-01).
+    await waitFor(() => {
+      const bodies = getPortfolioCacheStatus.mock.calls.flatMap((c) => c[0]);
+      expect(bodies.some((b) => b && b.legs && b.legs.OPT)).toBe(true);
+    }, { timeout: 2000 });
+    const rowBody = getPortfolioCacheStatus.mock.calls
+      .flatMap((c) => c[0])
+      .find((b) => b && b.legs && b.legs.OPT);
+    expect(rowBody.start).toBe('2016-05-01');
     // Restore the module default for subsequent tests.
     resolvePortfolioRange.mockResolvedValue({
       ranges: {}, overlapRange: { start: '2020-01-01', end: '2020-12-31' },
