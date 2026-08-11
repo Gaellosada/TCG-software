@@ -7,7 +7,8 @@
 //   - empty state shown when portfolios list is empty
 //   - rows rendered with name and per-row category select
 //   - per-row category change fires onChangeItemCat
-//   - archive button fires onArchive
+//   - archive button opens a confirm dialog naming the portfolio; onArchive
+//     fires only after Confirm, not on Cancel
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
@@ -110,11 +111,36 @@ describe('<PersistedPortfolioPanel>', () => {
     expect(props.onChangeItemCat).toHaveBeenCalledWith('p1', 'PROD');
   });
 
-  it('calls onArchive with the correct id when archive button is clicked', () => {
+  it('clicking the archive button does NOT call onArchive immediately — it opens a confirm dialog', () => {
     const props = defaultProps();
     render(<PersistedPortfolioPanel {...props} />);
     fireEvent.click(screen.getByTestId('archive-portfolio-p1'));
+    expect(props.onArchive).not.toHaveBeenCalled();
+    expect(screen.getByTestId('confirm-dialog')).toBeTruthy();
+  });
+
+  it('confirm dialog names the portfolio pending removal', () => {
+    render(<PersistedPortfolioPanel {...defaultProps()} />);
+    fireEvent.click(screen.getByTestId('archive-portfolio-p1'));
+    expect(screen.getByTestId('confirm-dialog').textContent).toContain('Alpha Portfolio');
+  });
+
+  it('calls onArchive with the correct id only after Confirm is clicked', () => {
+    const props = defaultProps();
+    render(<PersistedPortfolioPanel {...props} />);
+    fireEvent.click(screen.getByTestId('archive-portfolio-p1'));
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'));
     expect(props.onArchive).toHaveBeenCalledWith('p1');
+    expect(screen.queryByTestId('confirm-dialog')).toBeNull();
+  });
+
+  it('calls nothing and closes the dialog when Cancel is clicked', () => {
+    const props = defaultProps();
+    render(<PersistedPortfolioPanel {...props} />);
+    fireEvent.click(screen.getByTestId('archive-portfolio-p1'));
+    fireEvent.click(screen.getByTestId('confirm-dialog-cancel'));
+    expect(props.onArchive).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('confirm-dialog')).toBeNull();
   });
 
   it('disables category select and archive button when row is locked', () => {
