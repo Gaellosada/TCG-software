@@ -9,11 +9,12 @@ import { overlapRangeOf } from './resolvePortfolioRange';
 vi.mock('../../api/persistence', () => ({ getPortfolio: vi.fn() }));
 vi.mock('../../api/data', () => ({
   getInstrumentPrices: vi.fn(),
+  getInstrumentPriceBounds: vi.fn(),
   getContinuousSeries: vi.fn(),
 }));
 
 import { getPortfolio } from '../../api/persistence';
-import { getInstrumentPrices } from '../../api/data';
+import { getInstrumentPriceBounds } from '../../api/data';
 import { childPortfolioIds, childRangeAccessorFor } from './resolvePortfolioRange';
 
 describe('overlapRangeOf()', () => {
@@ -107,7 +108,7 @@ describe('childPortfolioIds() / childRangeAccessorFor() — non-empty map', () =
 
   beforeEach(() => {
     getPortfolio.mockReset();
-    getInstrumentPrices.mockReset();
+    getInstrumentPriceBounds.mockReset();
   });
 
   it('extracts referenced child ids (camelCase/snake_case, deduped) …', () => {
@@ -133,10 +134,11 @@ describe('childPortfolioIds() / childRangeAccessorFor() — non-empty map', () =
         symbol: id === 'child-a' ? 'A' : 'B', weight: 100,
       }],
     }));
-    getInstrumentPrices.mockImplementation((_collection, symbol) => {
-      if (symbol === 'A') return Promise.resolve({ dates: [20200101, 20200630] });
-      if (symbol === 'B') return Promise.resolve({ dates: [20190101, 20201231] });
-      return Promise.resolve({ dates: [] });
+    // Instrument-leg range resolution reads the cheap bounds endpoint now.
+    getInstrumentPriceBounds.mockImplementation((_collection, symbol) => {
+      if (symbol === 'A') return Promise.resolve({ start: 20200101, end: 20200630 });
+      if (symbol === 'B') return Promise.resolve({ start: 20190101, end: 20201231 });
+      return Promise.resolve({ start: null, end: null });
     });
 
     const accessor = await childRangeAccessorFor(legs, { queryClient: fakeQueryClient() });

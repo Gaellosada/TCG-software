@@ -27,6 +27,7 @@ vi.mock('../../api/portfolio', () => ({
 }));
 vi.mock('../../api/data', () => ({
   getInstrumentPrices: vi.fn(() => Promise.resolve({ dates: [20200101, 20201231] })),
+  getInstrumentPriceBounds: vi.fn(() => Promise.resolve({ start: 20200101, end: 20201231 })),
   getContinuousSeries: vi.fn(() => Promise.resolve({ dates: [20200101, 20201231] })),
 }));
 vi.mock('../../api/options', () => ({

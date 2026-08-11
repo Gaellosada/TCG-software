@@ -149,6 +149,27 @@ class DefaultMarketDataService:
             self._cache.put(cache_key, result)
         return result
 
+    async def get_price_bounds(
+        self,
+        collection: str,
+        instrument_id: str,
+        *,
+        provider: str | None = None,
+    ) -> tuple[int | None, int | None]:
+        """Cheap first/last available ``trade_date`` (``(min, max)`` YYYYMMDD
+        ints) for one instrument — the endpoints of what :meth:`get_prices`
+        would return, WITHOUT hydrating the series. Feeds the portfolio
+        cache-status range resolution (byte-identical start/end → identical
+        cache key). Mirrors :meth:`get_prices`' unknown-collection guard so
+        route input can't probe arbitrary ``source_collection`` values; a valid
+        collection with no matching instrument returns ``(None, None)``.
+        """
+        if not await self._sql.collection_exists(collection):
+            raise DataNotFoundError(f"Collection '{collection}' not found")
+        return await self._sql.read_price_bounds(
+            collection, instrument_id, provider=provider
+        )
+
     # --- Continuous futures series ---
 
     async def get_continuous(

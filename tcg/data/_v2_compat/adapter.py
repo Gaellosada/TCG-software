@@ -247,6 +247,27 @@ class V2MarketDataAdapter:
             self._cache.put(key, result)
         return result
 
+    async def get_price_bounds(
+        self,
+        collection: str,
+        instrument_id: str,
+        *,
+        provider: str | None = None,
+    ) -> tuple[int | None, int | None]:
+        """First/last available ``trade_date`` (``(min, max)`` YYYYMMDD ints, or
+        ``(None, None)``) for one instrument — the endpoints of
+        :meth:`get_prices`.
+
+        The v1 default-warehouse path serves the cache-status range fan-out, so
+        v2 never receives this on the hot path; the adapter derives the bounds
+        from its own :meth:`get_prices` (correct, off the hot path) purely to
+        satisfy the shared ``MarketDataService`` contract.
+        """
+        series = await self.get_prices(collection, instrument_id, provider=provider)
+        if series is None or len(series) == 0:
+            return (None, None)
+        return (int(series.dates[0]), int(series.dates[-1]))
+
     # --- Continuous futures ------------------------------------------------ #
 
     async def get_continuous(

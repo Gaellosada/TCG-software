@@ -69,6 +69,18 @@ export async function getInstrumentPrices(collection, instrumentId, { start, end
   return res; // { dates, open, high, low, close, volume }
 }
 
+// Cheap first/last available trade_date for one instrument — the SAME endpoints
+// the full price series exposes (min/max ``trade_date`` over the identical
+// (collection, symbol) row set), WITHOUT hydrating the whole OHLCV history. Used
+// to resolve a portfolio leg's date range for the cache-status key. Returns
+// ``{ start, end }`` as YYYYMMDD ints (or nulls when the instrument has no bars).
+export async function getInstrumentPriceBounds(collection, instrumentId) {
+  const res = await fetchClassified(
+    `/data/${encodeURIComponent(collection)}/${encodeURIComponent(instrumentId)}/bounds`,
+  );
+  return res; // { start, end } — YYYYMMDD ints or null
+}
+
 export async function getContinuousSeries(collection, { strategy = 'front_month', adjustment = 'none', cycle, rollOffset, rank, start, end } = {}) {
   const params = new URLSearchParams();
   params.set('strategy', strategy);

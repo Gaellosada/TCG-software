@@ -68,6 +68,19 @@ class MarketDataService(Protocol):
         provider: str | None = None,
     ) -> PriceSeries | None: ...
 
+    async def get_price_bounds(
+        self,
+        collection: str,
+        instrument_id: str,
+        *,
+        provider: str | None = None,
+    ) -> tuple[int | None, int | None]:
+        """First/last available ``trade_date`` (``(min, max)`` YYYYMMDD ints, or
+        ``(None, None)``) for one instrument — the endpoints of ``get_prices``
+        WITHOUT hydrating the series. Used to resolve a portfolio leg's date
+        range cheaply for the cache-status key."""
+        ...
+
     # --- Continuous futures series ---
 
     async def get_continuous(

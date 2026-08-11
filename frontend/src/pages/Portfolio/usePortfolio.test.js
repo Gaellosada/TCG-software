@@ -19,6 +19,9 @@ vi.mock('../../api/portfolio', () => ({
 
 vi.mock('../../api/data', () => ({
   getInstrumentPrices: vi.fn(() => Promise.resolve({ dates: [20200101, 20201231] })),
+  // Instrument-leg RANGE resolution now uses the cheap bounds endpoint; its
+  // start/end mirror the full-series dates[0]/dates[-1] (byte-identical range).
+  getInstrumentPriceBounds: vi.fn(() => Promise.resolve({ start: 20200101, end: 20201231 })),
   getContinuousSeries: vi.fn(() => Promise.resolve({ dates: [20200101, 20201231] })),
 }));
 
@@ -55,7 +58,7 @@ vi.mock('../../components/SaveControls', () => ({
 }));
 
 import { computePortfolio } from '../../api/portfolio';
-import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
+import { getInstrumentPrices, getInstrumentPriceBounds, getContinuousSeries } from '../../api/data';
 import { getOptionCoverage } from '../../api/options';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 
@@ -672,11 +675,12 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
     // though the option leg's coverage (2005..2025) spans both. With an option
     // leg present and no derivable window, the guard correctly fires instead of
     // sending an undefined window to the backend.
-    const prev = getInstrumentPrices.getMockImplementation();
-    getInstrumentPrices.mockImplementation((_collection, symbol) => {
-      if (symbol === 'EARLY') return Promise.resolve({ dates: [20180101, 20181231] });
-      if (symbol === 'LATE') return Promise.resolve({ dates: [20230101, 20231231] });
-      return Promise.resolve({ dates: [20200101, 20201231] });
+    const prev = getInstrumentPriceBounds.getMockImplementation();
+    // Instrument legs resolve their range via the cheap bounds endpoint now.
+    getInstrumentPriceBounds.mockImplementation((_collection, symbol) => {
+      if (symbol === 'EARLY') return Promise.resolve({ start: 20180101, end: 20181231 });
+      if (symbol === 'LATE') return Promise.resolve({ start: 20230101, end: 20231231 });
+      return Promise.resolve({ start: 20200101, end: 20201231 });
     });
     try {
       const { result } = renderHook(() => usePortfolio());
@@ -706,7 +710,7 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
       );
       expect(computePortfolio).not.toHaveBeenCalled();
     } finally {
-      getInstrumentPrices.mockImplementation(prev);
+      getInstrumentPriceBounds.mockImplementation(prev);
     }
   });
 

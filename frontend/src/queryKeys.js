@@ -40,6 +40,15 @@ export const queryKeys = {
     prices: (collection, instrument) => ['market', 'prices', collection, instrument],
 
     /**
+     * GET /data/{collection}/{instrument}/bounds — cheap first/last trade_date.
+     * The min/max-date endpoints of the FULL price series without hydrating it;
+     * used to resolve a portfolio leg's range for the cache-status key. Kept
+     * distinct from ``prices`` so the tiny bounds payload never shadows (or is
+     * shadowed by) the full-series cache entry.
+     */
+    priceBounds: (collection, instrument) => ['market', 'priceBounds', collection, instrument],
+
+    /**
      * GET /data/continuous/{collection} — rolled continuous series.
      * ``cycle`` is normalised: ''/undefined/null all collapse to null (the
      * "all cycles" case) so the Data-page chart and a portfolio leg with no
