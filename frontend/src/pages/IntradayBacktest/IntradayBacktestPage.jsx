@@ -58,6 +58,97 @@ function signClass(v) {
   return '';
 }
 
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+
+// Compact USD for the tight calendar cells: whole dollars with a sign, e.g.
+// -$228 / $100. Full precision stays in the cell tooltip.
+function compactUsd(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return '';
+  const sign = v < 0 ? '-' : '';
+  return `${sign}$${Math.round(Math.abs(v)).toLocaleString('en-US')}`;
+}
+
+// Group the flat days list into calendar months, laid out on a Mon–Fri
+// (trading-week) grid. Each month is an ordered list of "weeks"; every week is
+// exactly 5 slots (Mon..Fri). A slot is null (alignment blank) or { dom, iso,
+// data } where data is the matching day record or null for an in-range weekday
+// with no result (e.g. a market holiday). This is what lets a reader situate a
+// day under the correct weekday at a glance.
+function groupDaysByMonth(days) {
+  const byMonth = new Map();
+  for (const d of days) {
+    if (!d || !d.date) continue;
+    const key = d.date.slice(0, 7); // YYYY-MM
+    if (!byMonth.has(key)) byMonth.set(key, new Map());
+    byMonth.get(key).set(d.date, d);
+  }
+
+  return [...byMonth.keys()].sort().map((key) => {
+    const [year, month] = key.split('-').map(Number);
+    const label = new Date(Date.UTC(year, month - 1, 1))
+      .toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    const dayMap = byMonth.get(key);
+    const lastDom = new Date(Date.UTC(year, month, 0)).getUTCDate();
+
+    const weeks = [];
+    let week = [null, null, null, null, null];
+    let filled = false;
+    for (let dom = 1; dom <= lastDom; dom += 1) {
+      const dow = new Date(Date.UTC(year, month - 1, dom)).getUTCDay(); // 0 Sun..6 Sat
+      if (dow === 0 || dow === 6) continue; // weekends are not columns
+      const col = dow - 1; // Mon=0 .. Fri=4
+      // A new Monday starts a fresh week once the current one has any content.
+      if (col === 0 && filled) {
+        weeks.push(week);
+        week = [null, null, null, null, null];
+        filled = false;
+      }
+      const iso = `${key}-${String(dom).padStart(2, '0')}`;
+      week[col] = { dom, iso, data: dayMap.get(iso) || null };
+      filled = true;
+    }
+    if (filled) weeks.push(week);
+
+    return { key, label, weeks };
+  });
+}
+
+function dayOutcome(data) {
+  if (!data) return 'gap';
+  if (data.status === 'skipped') return 'skipped';
+  const usd = data.pnl ? data.pnl.total_pnl_usd : null;
+  if (typeof usd === 'number' && Number.isFinite(usd)) {
+    if (usd > 0) return 'profit';
+    if (usd < 0) return 'loss';
+  }
+  return 'flat';
+}
+
+const OUTCOME_CLASS = {
+  profit: styles.cellProfit,
+  loss: styles.cellLoss,
+  flat: styles.cellFlat,
+  skipped: styles.cellSkipped,
+};
+
+// Full detail for a cell's tooltip — preserves everything the old table row
+// showed (status, strike, option/hedge P&L, USD, skip reason).
+function cellTitle(iso, data) {
+  if (!data) return `${iso} — no data (non-trading day)`;
+  if (data.status === 'skipped') {
+    return `${iso} — skipped: ${data.skip_reason || 'skipped'}`;
+  }
+  const p = data.pnl || {};
+  const parts = [
+    `${iso} — ${data.status}`,
+    data.strike != null ? `strike ${formatNumber(data.strike, 0)}` : null,
+    p.option_pnl_pts != null ? `option ${formatNumber(p.option_pnl_pts)} pts` : null,
+    p.hedge_pnl_pts != null ? `hedge ${formatNumber(p.hedge_pnl_pts)} pts` : null,
+    p.total_pnl_usd != null ? `Day P&L ${formatCurrency(p.total_pnl_usd)}` : null,
+  ].filter(Boolean);
+  return parts.join('  •  ');
+}
+
 export default function IntradayBacktestPage() {
   const [meta, setMeta] = useState(null);
   const [metaError, setMetaError] = useState(null);
@@ -237,6 +328,7 @@ export default function IntradayBacktestPage() {
   const agg = result ? result.aggregate : null;
   const days = (result && result.days) || [];
   const warnings = (result && result.warnings) || [];
+  const months = useMemo(() => groupDaysByMonth(days), [days]);
 
   if (metaError) {
     return (
@@ -537,7 +629,12 @@ export default function IntradayBacktestPage() {
       )}
 
       {agg && (
-        <Card title="Aggregate" bodyClassName={styles.cardBody}>
+        <Card
+          title="Aggregate"
+          className={styles.resultCard}
+          bodyClassName={styles.cardBody}
+          data-result-card="true"
+        >
           <div className={styles.statsGrid} data-testid="aggregate-stats">
             <div className={styles.stat}>
               <span className={styles.statLabel}>Days</span>
@@ -582,7 +679,12 @@ export default function IntradayBacktestPage() {
       )}
 
       {equityTraces && (
-        <Card title="Equity curve (cumulative P&L)" bodyClassName={styles.cardBody}>
+        <Card
+          title="Equity curve (cumulative P&L)"
+          className={styles.resultCard}
+          bodyClassName={styles.cardBody}
+          data-result-card="true"
+        >
           <div className={styles.chartBox}>
             <Chart
               traces={equityTraces}
@@ -594,52 +696,66 @@ export default function IntradayBacktestPage() {
       )}
 
       {days.length > 0 && (
-        <Card title="Backtest days" bodyClassName={styles.cardBody}>
-          <div className={styles.tableWrap}>
-            <table className={styles.daysTable} data-testid="days-table">
-              <thead>
-                <tr>
-                  <th className={styles.left} scope="col">Date</th>
-                  <th className={styles.left} scope="col">Status</th>
-                  <th scope="col">Strike</th>
-                  <th scope="col">Option P&L (pts)</th>
-                  <th scope="col">Hedge P&L (pts)</th>
-                  <th scope="col">Day P&L (USD)</th>
-                  <th className={styles.left} scope="col">Note</th>
-                </tr>
-              </thead>
-              <tbody>
-                {days.map((d) => {
-                  const skipped = d.status === 'skipped';
-                  const pnl = d.pnl || null;
-                  return (
-                    <tr
-                      key={d.date}
-                      className={skipped ? styles.skippedRow : undefined}
-                      data-testid="day-row"
-                      data-skipped={skipped ? 'true' : undefined}
-                      data-status={d.status}
-                    >
-                      <td className={styles.left}>{d.date}</td>
-                      <td className={styles.left}>
-                        <span className={`${styles.statusBadge} ${skipped ? styles.statusSkipped : styles.statusOk}`}>
-                          {d.status}
-                        </span>
-                      </td>
-                      <td>{d.strike != null ? formatNumber(d.strike, 0) : '—'}</td>
-                      <td>{pnl ? formatNumber(pnl.option_pnl_pts) : '—'}</td>
-                      <td>{pnl ? formatNumber(pnl.hedge_pnl_pts) : '—'}</td>
-                      <td className={pnl ? signClass(pnl.total_pnl_usd) : undefined}>
-                        {pnl ? formatCurrency(pnl.total_pnl_usd) : '—'}
-                      </td>
-                      <td className={styles.left} data-testid={skipped ? 'skip-reason' : undefined}>
-                        {skipped ? (d.skip_reason || 'skipped') : ''}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        <Card
+          title="Backtest days"
+          className={styles.resultCard}
+          bodyClassName={styles.cardBody}
+          data-result-card="true"
+        >
+          <div className={styles.calendar} data-testid="days-grid">
+            {months.map((m) => (
+              <div className={styles.monthBlock} data-testid="month-block" key={m.key}>
+                <div className={styles.monthHeader}>{m.label}</div>
+                <div className={styles.weekdayRow} aria-hidden="true">
+                  {WEEKDAYS.map((w) => (
+                    <span className={styles.weekday} key={w}>{w}</span>
+                  ))}
+                </div>
+                <div className={styles.monthGrid}>
+                  {m.weeks.flatMap((week, wi) => week.map((slot, ci) => {
+                    // Alignment blank (leading pad before the month's first weekday).
+                    if (!slot) {
+                      return <div className={styles.emptyCell} key={`${wi}-${ci}`} aria-hidden="true" />;
+                    }
+                    // In-range weekday with no result — a non-trading gap (holiday).
+                    if (!slot.data) {
+                      return (
+                        <div
+                          className={styles.gapCell}
+                          key={slot.iso}
+                          title={cellTitle(slot.iso, null)}
+                        >
+                          {slot.dom}
+                        </div>
+                      );
+                    }
+                    const outcome = dayOutcome(slot.data);
+                    const skipped = outcome === 'skipped';
+                    const pnl = slot.data.pnl || null;
+                    return (
+                      <div
+                        key={slot.iso}
+                        className={`${styles.dayCell} ${OUTCOME_CLASS[outcome] || ''}`}
+                        data-testid="day-cell"
+                        data-date={slot.iso}
+                        data-status={slot.data.status}
+                        data-outcome={outcome}
+                        title={cellTitle(slot.iso, slot.data)}
+                      >
+                        <span className={styles.dom}>{slot.dom}</span>
+                        {skipped ? (
+                          <span className={styles.cellTag}>skipped</span>
+                        ) : (
+                          <span className={styles.cellPnl}>
+                            {pnl ? compactUsd(pnl.total_pnl_usd) : '—'}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  }))}
+                </div>
+              </div>
+            ))}
           </div>
         </Card>
       )}

@@ -196,16 +196,28 @@ describe('IntradayBacktestPage', () => {
     expect(Array.isArray(lastRunBody.date_overrides)).toBe(true);
   });
 
-  it('renders the days list, aggregate stats and the equity chart after Run', async () => {
+  it('renders the days calendar grid, aggregate stats and the equity chart after Run', async () => {
     await renderReady();
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
 
-    await waitFor(() => expect(screen.getByTestId('days-table')).toBeTruthy(), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
 
-    // Days rows present (3 days).
-    expect(screen.getAllByTestId('day-row').length).toBe(3);
-    // The traded day shows its strike (locale-formatted).
-    expect(screen.getByText('5,850')).toBeTruthy();
+    // One cell per day in the pinned response (3 days).
+    expect(screen.getAllByTestId('day-cell').length).toBe(3);
+
+    // The month the days fall in is labelled (all three are February 2025).
+    expect(screen.getByText('February 2025')).toBeTruthy();
+
+    // The traded day cell carries its date, a P&L (dollar) figure and its full
+    // detail (strike) in the tooltip — nothing the table showed is lost.
+    const traded = document.querySelector('[data-testid="day-cell"][data-date="2025-02-03"]');
+    expect(traded).toBeTruthy();
+    expect(traded.textContent).toMatch(/\$/); // Day P&L shown compactly
+    expect(traded.textContent).toMatch(/3\b/); // day-of-month number
+    expect(traded.getAttribute('title')).toMatch(/5,?850/); // strike surfaced in detail
+
+    // Loss day is colour-coded as a loss.
+    expect(traded.getAttribute('data-outcome')).toBe('loss');
 
     // Aggregate stats surfaced.
     const agg = screen.getByTestId('aggregate-stats');
@@ -218,17 +230,60 @@ describe('IntradayBacktestPage', () => {
     expect(chart.getAttribute('data-last')).toBe('-57.5');
   });
 
-  it('visibly flags skipped days with their skip_reason', async () => {
+  it('visibly flags skipped days with their skip_reason in the grid', async () => {
     await renderReady();
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
-    await waitFor(() => expect(screen.getByTestId('days-table')).toBeTruthy(), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
 
-    const table = screen.getByTestId('days-table');
-    const skipped = table.querySelectorAll('[data-skipped="true"]');
+    const grid = screen.getByTestId('days-grid');
+    const skipped = grid.querySelectorAll('[data-outcome="skipped"]');
     expect(skipped.length).toBe(2);
-    // Skip reasons shown.
-    expect(table.textContent).toMatch(/excluded/);
-    expect(table.textContent).toMatch(/no_quote_within_tolerance/);
+    // Skipped cells are visually distinct (not coloured as profit/loss) and
+    // expose their reason in the tooltip so no information is lost.
+    const reasons = [...skipped].map((c) => c.getAttribute('title')).join(' ');
+    expect(reasons).toMatch(/excluded/);
+    expect(reasons).toMatch(/no_quote_within_tolerance/);
+  });
+
+  it('groups days into one calendar block per month and colours profit vs loss', async () => {
+    // Custom multi-month fixture: Feb (loss) + March (profit) + a March skip.
+    const MULTI = {
+      ...RUN_RESPONSE,
+      days: [
+        {
+          date: '2025-02-28', status: 'ok', skip_reason: null, strike: 5900,
+          pnl: { option_pnl_pts: -1, hedge_pnl_pts: 0.5, total_pnl_pts: -0.5, total_pnl_usd: -25 },
+        },
+        {
+          date: '2025-03-03', status: 'ok', skip_reason: null, strike: 5950,
+          pnl: { option_pnl_pts: 3, hedge_pnl_pts: -1, total_pnl_pts: 2, total_pnl_usd: 100 },
+        },
+        {
+          date: '2025-03-04', status: 'skipped', skip_reason: 'no_quote_within_tolerance',
+          strike: null, pnl: null,
+        },
+      ],
+    };
+    installFetch({
+      progress: [{ status: 'done', days_done: 3, total_days: 3, result: MULTI, error: null }],
+    });
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
+
+    // Two month blocks with their headers.
+    expect(screen.getAllByTestId('month-block').length).toBe(2);
+    expect(screen.getByText('February 2025')).toBeTruthy();
+    expect(screen.getByText('March 2025')).toBeTruthy();
+
+    // Profit day is coloured as profit, loss day as loss.
+    const profit = document.querySelector('[data-testid="day-cell"][data-date="2025-03-03"]');
+    const loss = document.querySelector('[data-testid="day-cell"][data-date="2025-02-28"]');
+    expect(profit.getAttribute('data-outcome')).toBe('profit');
+    expect(loss.getAttribute('data-outcome')).toBe('loss');
+    // Profit/loss carry the themed colour classes.
+    expect(profit.className).toMatch(/\S/);
+    expect(loss.className).toMatch(/\S/);
   });
 
   it('surfaces the warnings array', async () => {
@@ -270,12 +325,25 @@ describe('IntradayBacktestPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
 
     // The pinned RUN_RESPONSE (delivered in the 'done' progress payload) renders.
-    await waitFor(() => expect(screen.getByTestId('days-table')).toBeTruthy(), { timeout: 3000 });
-    expect(screen.getAllByTestId('day-row').length).toBe(3);
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
+    expect(screen.getAllByTestId('day-cell').length).toBe(3);
     // Progress indicator is gone once done.
     expect(screen.queryByTestId('run-progress')).toBeNull();
     // Run button re-enabled.
     expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
+  });
+
+  it('marks result cards non-shrink so the page scrolls instead of collapsing (Part A guard)', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
+
+    // Every result card (aggregate, equity, days) carries the non-shrink class
+    // so it keeps its natural height and the scroll container scrolls rather
+    // than the cards flex-shrinking to zero (the reported layout break).
+    const cards = document.querySelectorAll('[data-result-card="true"]');
+    expect(cards.length).toBeGreaterThanOrEqual(3);
+    cards.forEach((c) => expect(c.className).toMatch(/resultCard/));
   });
 
   it('surfaces an error when the job reports status "error"', async () => {
@@ -292,7 +360,7 @@ describe('IntradayBacktestPage', () => {
       { timeout: 3000 },
     );
     // No results, progress cleared, Run re-enabled.
-    expect(screen.queryByTestId('days-table')).toBeNull();
+    expect(screen.queryByTestId('days-grid')).toBeNull();
     expect(screen.queryByTestId('run-progress')).toBeNull();
     expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
   });

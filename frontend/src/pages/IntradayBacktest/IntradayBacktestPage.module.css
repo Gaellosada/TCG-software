@@ -8,6 +8,23 @@
   padding: 24px 32px 48px;
 }
 
+/*
+ * The page is a flex column scroll container. Its direct children default to
+ * flex-shrink:1, so once the stacked content exceeds the viewport they SHRINK
+ * to fit instead of letting the container scroll — collapsing auto-height cards
+ * (the Aggregate tiles vanish) and clipping fixed-height ones (the equity
+ * chart). Pinning every child to flex-shrink:0 makes them keep their natural
+ * height so the container scrolls, which is the intended behaviour.
+ */
+.page > * {
+  flex-shrink: 0;
+}
+
+/* Explicit marker on result cards for the Part-A regression guard. */
+.resultCard {
+  flex-shrink: 0;
+}
+
 .pageHeader h1 {
   margin: 0 0 0.25rem;
   font-size: 1.4rem;
@@ -248,61 +265,137 @@
 .positive { color: var(--success); }
 .negative { color: var(--error); }
 
-.tableWrap {
-  overflow-x: auto;
+/* ---------------------------------------------------------------------------
+ * Month calendar grid (replaces the flat days table).
+ * Months stack/wrap on a responsive auto-fill grid; each month is a compact
+ * Mon–Fri (trading-week) calendar so days sit under the right weekday.
+ * ------------------------------------------------------------------------- */
+.calendar {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.25rem;
 }
 
-.daysTable {
-  width: 100%;
-  border-collapse: collapse;
+.monthBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.monthHeader {
   font-size: 0.85rem;
+  font-weight: 700;
   color: var(--text-primary);
+  letter-spacing: 0.01em;
 }
 
-.daysTable th {
-  color: var(--text-secondary);
+.weekdayRow {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+.weekday {
+  text-align: center;
+  font-size: 0.65rem;
   font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  padding-bottom: 2px;
+}
+
+.monthGrid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+/* Empty alignment placeholder (leading blanks / weekend columns don't exist). */
+.emptyCell {
+  aspect-ratio: 1 / 1;
+  border-radius: var(--radius-sm);
+}
+
+/* A weekday with no data in range (e.g. a market holiday) — a faint gap. */
+.gapCell {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  aspect-ratio: 1 / 1;
+  padding: 3px 5px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed color-mix(in srgb, var(--border-primary) 70%, transparent);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.dayCell {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  aspect-ratio: 1 / 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  cursor: default;
+  overflow: hidden;
+}
+
+.dom {
   font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  align-self: flex-end;
+  line-height: 1;
+}
+
+.cellPnl {
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cellTag {
+  font-size: 0.6rem;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  line-height: 1;
 }
 
-.daysTable th,
-.daysTable td {
-  padding: 0.4rem 0.6rem;
-  text-align: right;
-  border-bottom: 1px solid var(--border-primary);
+/* Profit — success tokens. */
+.cellProfit {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border-primary));
+  background: color-mix(in srgb, var(--success) 12%, transparent);
 }
+.cellProfit .cellPnl { color: var(--success); }
 
-.daysTable th:first-child,
-.daysTable td:first-child,
-.daysTable th.left,
-.daysTable td.left {
-  text-align: left;
+/* Loss — error tokens. */
+.cellLoss {
+  border-color: color-mix(in srgb, var(--error) 40%, var(--border-primary));
+  background: color-mix(in srgb, var(--error) 10%, transparent);
 }
+.cellLoss .cellPnl { color: var(--error); }
 
-.skippedRow {
+/* Flat (traded, ~zero P&L) — neutral. */
+.cellFlat .cellPnl { color: var(--text-secondary); }
+
+/* Skipped — clearly distinct: muted warm, dashed, no P&L emphasis. */
+.cellSkipped {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent-warm) 45%, var(--border-primary));
+  background: color-mix(in srgb, var(--accent-warm) 10%, transparent);
   color: var(--text-muted);
-  font-style: italic;
 }
-
-.statusBadge {
-  display: inline-block;
-  padding: 0.1rem 0.45rem;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 600;
-}
-
-.statusOk {
-  background: color-mix(in srgb, var(--success) 18%, transparent);
-  color: var(--success);
-}
-
-.statusSkipped {
-  background: color-mix(in srgb, var(--accent-warm) 18%, transparent);
-  color: var(--accent-warm);
-}
+.cellSkipped .cellTag { color: var(--accent-warm); }
+.cellSkipped .dom { color: var(--text-secondary); }
 
 .chartBox {
   height: 340px;
