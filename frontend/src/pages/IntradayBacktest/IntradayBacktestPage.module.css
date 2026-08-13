@@ -330,18 +330,18 @@
 .calendar {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 1.25rem;
+  gap: 0.6rem;
 }
 
 .monthBlock {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.2rem;
   min-width: 0;
 }
 
 .monthHeader {
-  font-size: 0.85rem;
+  font-size: 0.72rem;
   font-weight: 700;
   color: var(--text-primary);
   letter-spacing: 0.01em;
@@ -350,28 +350,30 @@
 .weekdayRow {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 4px;
+  gap: 3px;
 }
 
 .weekday {
   text-align: center;
-  font-size: 0.65rem;
+  font-size: 0.58rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-secondary);
-  padding-bottom: 2px;
+  padding-bottom: 1px;
 }
 
 .monthGrid {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 4px;
+  gap: 3px;
 }
 
-/* Empty alignment placeholder (leading blanks / weekend columns don't exist). */
+/* Empty alignment placeholder (leading blanks / weekend columns don't exist).
+ * aspect-ratio is wide (not 1:1) so the row is roughly half as tall as the
+ * cell width — this is what compacts the whole calendar vertically. */
 .emptyCell {
-  aspect-ratio: 1 / 1;
+  aspect-ratio: 2.2 / 1;
   border-radius: var(--radius-sm);
 }
 
@@ -380,21 +382,21 @@
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
-  aspect-ratio: 1 / 1;
-  padding: 3px 5px;
+  aspect-ratio: 2.2 / 1;
+  padding: 2px 4px;
   border-radius: var(--radius-sm);
   border: 1px dashed color-mix(in srgb, var(--border-primary) 70%, transparent);
   color: var(--text-muted);
-  font-size: 0.7rem;
+  font-size: 0.62rem;
 }
 
 .dayCell {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  aspect-ratio: 1 / 1;
+  aspect-ratio: 2.2 / 1;
   min-width: 0;
-  padding: 4px 6px;
+  padding: 2px 4px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-primary);
   background: var(--bg-primary);
@@ -403,7 +405,7 @@
 }
 
 .dom {
-  font-size: 0.72rem;
+  font-size: 0.62rem;
   font-weight: 700;
   color: var(--text-primary);
   align-self: flex-end;
@@ -411,16 +413,16 @@
 }
 
 .cellPnl {
-  font-size: 0.78rem;
+  font-size: 0.66rem;
   font-weight: 700;
-  line-height: 1.1;
+  line-height: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .cellTag {
-  font-size: 0.6rem;
+  font-size: 0.52rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
