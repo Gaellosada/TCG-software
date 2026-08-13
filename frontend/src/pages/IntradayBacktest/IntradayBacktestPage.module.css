@@ -573,12 +573,37 @@
   overflow: hidden;
 }
 
+/* Top row of a day cell: optional early-exit marker (left) + day-of-month
+ * (right). Keeps the day number top-right as before while giving the trigger
+ * badge a home. */
+.domRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px;
+  width: 100%;
+}
+
 .dom {
   font-size: 0.62rem;
   font-weight: 700;
   color: var(--text-primary);
-  align-self: flex-end;
+  margin-left: auto;
   line-height: 1;
+}
+
+/* Early-exit trigger marker (v3) — a small bolt on days that closed on a
+ * trigger. Coloured with the cool accent so it reads against any outcome tint. */
+.triggerBadge {
+  font-size: 0.6rem;
+  line-height: 1;
+  color: var(--accent);
+}
+
+/* A traded day that exited on a trigger — subtle accent outline so triggered
+ * days stand out at a glance without overriding the profit/loss fill. */
+.cellTriggered {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .cellPnl {

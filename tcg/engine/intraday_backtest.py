@@ -37,6 +37,7 @@ from tcg.types.intraday import (
     EquityPoint,
     ES_MULTIPLIER,
     ES_OPTION_TICK_SIZE,
+    ExitTrigger,
     HedgeTrade,
     IntradayBar,
     LegResult,
@@ -45,7 +46,11 @@ from tcg.types.intraday import (
     MaxUnderlyingMoveCond,
     MinPremiumCond,
     MinQuoteSizeCond,
+    NetDeltaTrigger,
+    PnlTrigger,
+    SigmaMoveTrigger,
     StraddleLegs,
+    UnderlyingMoveTrigger,
 )
 
 _ET = "America/New_York"
@@ -330,6 +335,216 @@ def net_straddle_delta(
 
 
 # --------------------------------------------------------------------------- #
+# Early-exit TRIGGERS (v3) — pure per-bar evaluation over the hold window
+# --------------------------------------------------------------------------- #
+_TRIGGER_TYPE = {
+    UnderlyingMoveTrigger: "underlying_move",
+    SigmaMoveTrigger: "sigma_move",
+    NetDeltaTrigger: "net_delta",
+    PnlTrigger: "pnl",
+}
+
+
+def entry_atm_iv(
+    kernel: PricingKernel,
+    forward: float,
+    strike: float,
+    t_years: float,
+    call_mark: float,
+    put_mark: float,
+    rate: float = 0.0,
+) -> float | None:
+    """ATM implied vol backed out of the ENTRY straddle (Black-76 inversion,
+    average of the call and put legs).
+
+    Returns ``None`` if NEITHER leg inverts to a finite positive vol (a thin /
+    one-sided entry quote) — sigma_move then cannot fire and is disabled for the
+    day rather than firing on a fabricated sigma.
+    """
+    vols: list[float] = []
+    for mark, flag in ((call_mark, "c"), (put_mark, "p")):
+        try:
+            sigma = kernel.implied_vol(mark, forward, strike, t_years, rate, flag)
+        except Exception:  # noqa: BLE001 - py_vollib Below/Above exceptions
+            continue
+        if math.isfinite(sigma) and sigma > 0.0:
+            vols.append(sigma)
+    if not vols:
+        return None
+    return sum(vols) / len(vols)
+
+
+def _eval_trigger(
+    trig: object,
+    *,
+    es_bar: float,
+    es_entry: float,
+    net_delta: float,
+    pnl_pts: float,
+    p_entry: float,
+    sigma_bar: float | None,
+    multiplier: float,
+) -> float | None:
+    """Evaluate ONE trigger at a bar; return its ``value`` if it fires, else
+    ``None``. Move / delta / sigma are absolute (either direction); pnl is
+    directional. ``value`` is in the trigger's own terms (see ``ExitTrigger``).
+    """
+    if isinstance(trig, UnderlyingMoveTrigger):
+        move = abs(es_bar - es_entry)
+        thresh = (
+            trig.amount
+            if trig.unit == "points"
+            else trig.amount / 100.0 * es_entry
+        )
+        if move >= thresh:
+            return move if trig.unit == "points" else move / es_entry * 100.0
+        return None
+    if isinstance(trig, SigmaMoveTrigger):
+        if sigma_bar is None or sigma_bar <= 0.0:
+            return None
+        move = abs(es_bar - es_entry)
+        if move >= trig.n * sigma_bar:
+            return move / sigma_bar  # realized sigmas
+        return None
+    if isinstance(trig, NetDeltaTrigger):
+        if abs(net_delta) >= trig.threshold:
+            return abs(net_delta)
+        return None
+    if isinstance(trig, PnlTrigger):
+        if trig.unit == "points":
+            p = pnl_pts
+        elif trig.unit == "percent":
+            p = pnl_pts / p_entry * 100.0 if p_entry else 0.0
+        else:  # "usd"
+            p = pnl_pts * multiplier
+        if trig.direction == "profit":
+            fired = p >= trig.amount
+        elif trig.direction == "loss":
+            fired = p <= -trig.amount
+        else:  # "both"
+            fired = abs(p) >= trig.amount
+        return p if fired else None
+    return None
+
+
+def find_trigger_fire(
+    *,
+    triggers: tuple | list,
+    es_bars: list[IntradayBar],
+    call_marks: list[IntradayBar],
+    put_marks: list[IntradayBar],
+    on_ts: datetime,
+    exit_ts: datetime,
+    es_entry: float,
+    p_entry: float,
+    iv_entry: float | None,
+    strike: float,
+    expiry_utc: datetime,
+    side_sign: int,
+    rate: float,
+    multiplier: float,
+    hedge_enabled: bool,
+    interval_minutes: float,
+    delta_band: float,
+    call_fallback: float,
+    put_fallback: float,
+    kernel: PricingKernel,
+) -> ExitTrigger | None:
+    """Walk the ES bar cadence over the hold ``(on_ts, exit_ts]`` and return the
+    FIRST (type, ts, value) at which ANY enabled trigger fires, else ``None``.
+
+    Reuses the hedge loop's cadence: carried-forward option marks, no
+    look-ahead, and a mirror of the hedge accounting so the ``pnl`` trigger sees
+    the hedge MTM realized to each bar. ``sigma_bar`` shrinks intraday
+    (``ES_entry * IV_entry * sqrt(T_bar)``). At a single bar the triggers are
+    tested in list order; the first to fire wins.
+    """
+    if not triggers or es_entry <= 0.0:
+        return None
+
+    # Path mirrors ``_run_hedge``: the entry anchor, then interior ES bars, then
+    # the exit_ts endpoint (tentative off used only for the rehedge cadence).
+    off_bar = _es_at(es_bars, exit_ts)
+    off_price = off_bar.price if off_bar else es_entry
+    path: list[tuple[datetime, float]] = [(on_ts, es_entry)]
+    for bar in es_bars:
+        if on_ts < bar.ts < exit_ts:
+            path.append((bar.ts, bar.price))
+    path.append((exit_ts, off_price))
+
+    hedged_qty = 0.0
+    last_rehedge_ts = on_ts
+    cum_hedge_pnl = 0.0  # hedge MTM realized reaching the current point
+    for i, (ts, es_price) in enumerate(path):
+        cm = last_known_at_or_before(call_marks, ts)
+        pm = last_known_at_or_before(put_marks, ts)
+        call_mark = cm.price if cm else call_fallback
+        put_mark = pm.price if pm else put_fallback
+        t_years = _year_fraction(ts, expiry_utc)
+        net_delta = net_straddle_delta(
+            kernel, es_price, strike, t_years, call_mark, put_mark, side_sign, rate
+        )
+
+        # Evaluate triggers at every bar strictly after entry (window is OPEN at
+        # on_ts). cum_hedge_pnl excludes the forward segment, so it is exactly
+        # the hedge MTM "so far" at this bar.
+        if i > 0:
+            option_mtm_pts = side_sign * ((call_mark + put_mark) - p_entry)
+            pnl_pts = option_mtm_pts + cum_hedge_pnl
+            sigma_bar = (
+                es_entry * iv_entry * math.sqrt(t_years)
+                if iv_entry is not None
+                else None
+            )
+            for trig in triggers:
+                val = _eval_trigger(
+                    trig,
+                    es_bar=es_price,
+                    es_entry=es_entry,
+                    net_delta=net_delta,
+                    pnl_pts=pnl_pts,
+                    p_entry=p_entry,
+                    sigma_bar=sigma_bar,
+                    multiplier=multiplier,
+                )
+                if val is not None:
+                    return ExitTrigger(
+                        type=_TRIGGER_TYPE[type(trig)], ts=ts, value=val
+                    )
+
+        # Mirror the hedge cadence so cum_hedge_pnl tracks the real hedge. The
+        # "< exit_ts" guard matches _run_hedge's "never rehedge at off_ts".
+        is_entry = i == 0
+        if hedge_enabled:
+            residual = net_delta + hedged_qty
+            interval_hit = (ts - last_rehedge_ts).total_seconds() >= (
+                interval_minutes * 60.0
+            )
+            band_hit = abs(residual) > delta_band
+            if is_entry or (ts < exit_ts and (interval_hit or band_hit)):
+                hedged_qty = -net_delta
+                last_rehedge_ts = ts
+        if i + 1 < len(path) and hedge_enabled:
+            next_price = path[i + 1][1]
+            cum_hedge_pnl += hedged_qty * (next_price - es_price)
+
+    return None
+
+
+def _triggered_leg_exit(
+    marks: list[IntradayBar], fire_ts: datetime, tolerance_minutes: float
+) -> tuple[IntradayBar | None, bool]:
+    """A TRIGGERED exit BYPASSES exit.conditions: sell each leg at its nearest
+    bar within the exit snap tolerance (``met=True``), else the nearest bar at
+    all (``met=False`` — a degraded fill). ``bar`` is ``None`` only if the leg
+    has no marks (cannot happen once its entry filled)."""
+    within = snap_nearest(marks, fire_ts, tolerance_minutes)
+    if within is not None:
+        return within, True
+    return snap_nearest(marks, fire_ts, None), False
+
+
+# --------------------------------------------------------------------------- #
 # Per-day simulation (pure)
 # --------------------------------------------------------------------------- #
 def _es_at(es_bars: list[IntradayBar], ts: datetime) -> IntradayBar | None:
@@ -428,6 +643,7 @@ def simulate_day(
     exit_tol: float,
     entry_conditions: tuple | list = (),
     exit_conditions: tuple | list = (),
+    exit_triggers: tuple | list = (),
     tick_size: float = ES_OPTION_TICK_SIZE,
     hedge_enabled: bool,
     interval_minutes: float,
@@ -486,15 +702,59 @@ def simulate_day(
             strike=strike,
         )
 
+    # Both-on window opens at the LATER of the two independent leg entries.
+    straddle_on_ts = max(c_entry.ts, p_entry.ts)
+    es_on = _es_at(es_bars, straddle_on_ts)
+    expiry_utc = _expiry_utc(expiry, tz)
+
+    # --- Early-exit TRIGGERS (v3): may close the straddle before exit.time #
+    exit_trigger: ExitTrigger | None = None
+    if exit_triggers and es_on is not None and straddle_on_ts < exit_ts:
+        p_entry_prem = c_entry.price + p_entry.price
+        t_entry = _year_fraction(straddle_on_ts, expiry_utc)
+        iv_entry = entry_atm_iv(
+            kernel, es_on.price, strike, t_entry,
+            c_entry.price, p_entry.price, rate,
+        )
+        exit_trigger = find_trigger_fire(
+            triggers=exit_triggers,
+            es_bars=es_bars,
+            call_marks=call_marks,
+            put_marks=put_marks,
+            on_ts=straddle_on_ts,
+            exit_ts=exit_ts,
+            es_entry=es_on.price,
+            p_entry=p_entry_prem,
+            iv_entry=iv_entry,
+            strike=strike,
+            expiry_utc=expiry_utc,
+            side_sign=side_sign,
+            rate=rate,
+            multiplier=multiplier,
+            hedge_enabled=hedge_enabled,
+            interval_minutes=interval_minutes,
+            delta_band=delta_band,
+            call_fallback=c_entry.price,
+            put_fallback=p_entry.price,
+            kernel=kernel,
+        )
+
     # --- INDEPENDENT per-leg EXIT (must close) -------------------------- #
-    c_exit, c_met = scan_leg_exit(
-        call_marks, es_bars, exit_ts, exit_tol,
-        exit_leg_conds, exit_move, es_ref, tick_size,
-    )
-    p_exit, p_met = scan_leg_exit(
-        put_marks, es_bars, exit_ts, exit_tol,
-        exit_leg_conds, exit_move, es_ref, tick_size,
-    )
+    if exit_trigger is not None:
+        # A TRIGGERED exit closes the WHOLE straddle at the trigger time, each
+        # leg at its nearest available bar (snap tolerance) else nearest
+        # fallback — BYPASSING exit.conditions (stop/target: exit regardless).
+        c_exit, c_met = _triggered_leg_exit(call_marks, exit_trigger.ts, exit_tol)
+        p_exit, p_met = _triggered_leg_exit(put_marks, exit_trigger.ts, exit_tol)
+    else:
+        c_exit, c_met = scan_leg_exit(
+            call_marks, es_bars, exit_ts, exit_tol,
+            exit_leg_conds, exit_move, es_ref, tick_size,
+        )
+        p_exit, p_met = scan_leg_exit(
+            put_marks, es_bars, exit_ts, exit_tol,
+            exit_leg_conds, exit_move, es_ref, tick_size,
+        )
     # A leg that entered has marks, so nearest-fallback always returns a bar.
     if c_exit is None or p_exit is None:  # pragma: no cover - defensive
         return DayResult(
@@ -510,7 +770,6 @@ def simulate_day(
     put_pnl = side_sign * (p_exit.price - p_entry.price)
     option_pnl_pts = call_pnl + put_pnl
 
-    straddle_on_ts = max(c_entry.ts, p_entry.ts)
     straddle_off_ts = min(c_exit.ts, p_exit.ts)
 
     legs = StraddleLegs(
@@ -527,7 +786,6 @@ def simulate_day(
     )
 
     # Straddle-level summary: ts = both-on boundary, price = call+put fills.
-    es_on = _es_at(es_bars, straddle_on_ts)
     es_off = _es_at(es_bars, straddle_off_ts)
     entry_snap = MarkSnapshot(
         straddle_on_ts,
@@ -541,7 +799,6 @@ def simulate_day(
     )
 
     # --- Delta hedge over the BOTH-ON window ---------------------------- #
-    expiry_utc = _expiry_utc(expiry, tz)
     hedge_trades: list[HedgeTrade] = []
     hedge_pnl_pts = 0.0
     if hedge_enabled and straddle_off_ts > straddle_on_ts and es_on and es_off:
@@ -584,6 +841,7 @@ def simulate_day(
         legs=legs,
         straddle_on_ts=straddle_on_ts,
         straddle_off_ts=straddle_off_ts,
+        exit_trigger=exit_trigger,
     )
 
 

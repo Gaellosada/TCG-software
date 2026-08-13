@@ -30,6 +30,10 @@ from tcg.types.intraday import (
     MaxUnderlyingMoveCond,
     MinPremiumCond,
     MinQuoteSizeCond,
+    NetDeltaTrigger,
+    PnlTrigger,
+    SigmaMoveTrigger,
+    UnderlyingMoveTrigger,
 )
 
 
@@ -215,3 +219,88 @@ def test_pick_expiry_ndte():
     exps = [date(2025, 2, 3), date(2025, 2, 10), date(2025, 2, 20)]
     assert _pick_expiry(exps, date(2025, 2, 3), "NDTE", 5) == date(2025, 2, 10)
     assert _pick_expiry(exps, date(2025, 2, 4), "NDTE", 0) == date(2025, 2, 10)
+
+
+# --------------------------------------------------------------------------- #
+# v3 — Early-exit TRIGGERS (exit module only)
+# --------------------------------------------------------------------------- #
+def test_exit_triggers_all_types_accepted():
+    m = EntryExitModule(triggers=[
+        {"type": "underlying_move", "amount": 15, "unit": "points"},
+        {"type": "sigma_move", "n": 1.0},
+        {"type": "net_delta", "threshold": 0.3},
+        {"type": "pnl", "amount": 500, "unit": "usd", "direction": "both"},
+    ])
+    assert len(m.triggers) == 4
+
+
+def test_bad_trigger_params_rejected():
+    for bad in (
+        {"type": "underlying_move", "amount": 0},
+        {"type": "underlying_move", "amount": -1},
+        {"type": "sigma_move", "n": 0},
+        {"type": "sigma_move", "n": -2.0},
+        {"type": "net_delta", "threshold": 0},
+        {"type": "net_delta", "threshold": -0.1},
+        {"type": "pnl", "amount": 0, "unit": "usd", "direction": "both"},
+        {"type": "pnl", "amount": -5, "unit": "usd", "direction": "both"},
+    ):
+        with pytest.raises(ValidationError):
+            EntryExitModule(triggers=[bad])
+
+
+def test_bad_trigger_enums_rejected():
+    with pytest.raises(ValidationError):
+        EntryExitModule(triggers=[{"type": "underlying_move", "amount": 15, "unit": "ticks"}])
+    with pytest.raises(ValidationError):
+        EntryExitModule(triggers=[{"type": "pnl", "amount": 500, "unit": "usd", "direction": "sideways"}])
+    with pytest.raises(ValidationError):
+        EntryExitModule(triggers=[{"type": "pnl", "amount": 500, "unit": "furlongs", "direction": "both"}])
+    with pytest.raises(ValidationError):
+        EntryExitModule(triggers=[{"type": "totally_unknown_trigger", "x": 1}])
+
+
+def test_entry_triggers_rejected():
+    # Triggers are EXIT-only; entry (global or per-day) must reject them.
+    with pytest.raises(ValidationError):
+        _req(entry={"time": "10:00", "triggers": [{"type": "net_delta", "threshold": 0.3}]})
+    with pytest.raises(ValidationError):
+        _req(custom_days=[{
+            "date": "2025-02-04",
+            "entry": {"triggers": [{"type": "net_delta", "threshold": 0.3}]},
+        }])
+
+
+def test_exit_triggers_carried_into_plan():
+    plans = resolve_day_plans(_req(exit={
+        "time": "15:45",
+        "triggers": [{"type": "underlying_move", "amount": 15, "unit": "points"}],
+    }))
+    assert plans[0].exit_triggers == [UnderlyingMoveTrigger(amount=15.0, unit="points")]
+
+
+def test_exit_trigger_per_day_override_and_inherit():
+    plans = resolve_day_plans(_req(custom_days=[{
+        "date": "2025-02-04",
+        "exit": {"triggers": [{"type": "net_delta", "threshold": 0.3}]},
+    }]))
+    d4 = next(p for p in plans if p.date_int == 20250204)
+    assert d4.exit_triggers == [NetDeltaTrigger(threshold=0.3)]
+    # Untouched day inherits the global (empty) trigger list.
+    d3 = next(p for p in plans if p.date_int == 20250203)
+    assert d3.exit_triggers == []
+
+
+def test_all_trigger_types_convert_to_engine_dataclasses():
+    plans = resolve_day_plans(_req(exit={"time": "15:45", "triggers": [
+        {"type": "underlying_move", "amount": 15, "unit": "percent"},
+        {"type": "sigma_move", "n": 2.0},
+        {"type": "net_delta", "threshold": 0.5},
+        {"type": "pnl", "amount": 300, "unit": "points", "direction": "loss"},
+    ]}))
+    assert plans[0].exit_triggers == [
+        UnderlyingMoveTrigger(amount=15.0, unit="percent"),
+        SigmaMoveTrigger(n=2.0),
+        NetDeltaTrigger(threshold=0.5),
+        PnlTrigger(amount=300.0, unit="points", direction="loss"),
+    ]

@@ -48,6 +48,8 @@ const RUN_RESPONSE = {
       },
       straddle_on_ts: '2025-02-03T15:03:00Z', straddle_off_ts: '2025-02-03T20:44:00Z',
       hedge_trades: [{ ts: '2025-02-03T15:15:00Z', underlying: 5855.0, net_delta: 0.42, hedge_qty: -0.42 }],
+      // v3 early-exit trigger — this day closed early on a sigma_move.
+      exit_trigger: { type: 'sigma_move', ts: '2025-02-03T19:12:00Z', value: 1.0 },
       pnl: { option_pnl_pts: -4.25, hedge_pnl_pts: 3.1, total_pnl_pts: -1.15, total_pnl_usd: -57.5 },
     },
     {
@@ -507,5 +509,97 @@ describe('IntradayBacktestPage', () => {
     expect(screen.queryByTestId('days-grid')).toBeNull();
     expect(screen.queryByTestId('run-progress')).toBeNull();
     expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // v3 — early-exit TRIGGERS on the EXIT module (DESIGN.md "Early-exit
+  // TRIGGERS on the exit module (PINNED)"). Triggers are EXIT-ONLY.
+  // -------------------------------------------------------------------------
+  it('shows the Triggers builder on the EXIT module only (not entry)', async () => {
+    await renderReady();
+    // Exit module has the triggers builder + empty hint.
+    expect(screen.getByTestId('exit-triggers-block')).toBeTruthy();
+    expect(screen.getByTestId('exit-add-trigger')).toBeTruthy();
+    expect(screen.getByTestId('exit-triggers-empty')).toBeTruthy();
+    // Entry module has NONE.
+    expect(screen.queryByTestId('entry-triggers-block')).toBeNull();
+    expect(screen.queryByTestId('entry-add-trigger')).toBeNull();
+  });
+
+  it('adding each trigger type reveals its type-specific params', async () => {
+    await renderReady();
+
+    // underlying_move → amount + unit.
+    fireEvent.change(screen.getByTestId('exit-add-trigger'), { target: { value: 'underlying_move' } });
+    expect(screen.getByTestId('exit-trigger-underlying_move')).toBeTruthy();
+    expect(screen.getByLabelText('exit underlying_move amount')).toBeTruthy();
+    expect(screen.getByLabelText('exit underlying_move unit')).toBeTruthy();
+
+    // sigma_move → n.
+    fireEvent.change(screen.getByTestId('exit-add-trigger'), { target: { value: 'sigma_move' } });
+    expect(screen.getByLabelText('exit sigma_move n')).toBeTruthy();
+
+    // net_delta → threshold.
+    fireEvent.change(screen.getByTestId('exit-add-trigger'), { target: { value: 'net_delta' } });
+    expect(screen.getByLabelText('exit net_delta threshold')).toBeTruthy();
+
+    // pnl → amount + unit + direction.
+    fireEvent.change(screen.getByTestId('exit-add-trigger'), { target: { value: 'pnl' } });
+    expect(screen.getByLabelText('exit pnl amount')).toBeTruthy();
+    expect(screen.getByLabelText('exit pnl unit')).toBeTruthy();
+    expect(screen.getByLabelText('exit pnl direction')).toBeTruthy();
+
+    // Removing the underlying_move row drops just that trigger.
+    fireEvent.click(screen.getByLabelText('Remove Underlying move trigger'));
+    expect(screen.queryByTestId('exit-trigger-underlying_move')).toBeNull();
+    expect(screen.getByTestId('exit-trigger-pnl')).toBeTruthy();
+  });
+
+  it('serializes exit.triggers to the PINNED shapes and leaves entry with none', async () => {
+    await renderReady();
+
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2025-02-01' } });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-03-31' } });
+
+    // sigma_move (n) + a directional pnl (amount + unit + direction).
+    fireEvent.change(screen.getByTestId('exit-add-trigger'), { target: { value: 'sigma_move' } });
+    fireEvent.change(screen.getByLabelText('exit sigma_move n'), { target: { value: '1.5' } });
+    fireEvent.change(screen.getByTestId('exit-add-trigger'), { target: { value: 'pnl' } });
+    fireEvent.change(screen.getByLabelText('exit pnl amount'), { target: { value: '750' } });
+    fireEvent.change(screen.getByLabelText('exit pnl unit'), { target: { value: 'usd' } });
+    fireEvent.change(screen.getByLabelText('exit pnl direction'), { target: { value: 'loss' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(lastRunBody).not.toBeNull());
+
+    // Exit carries the pinned trigger shapes.
+    expect(Array.isArray(lastRunBody.exit.triggers)).toBe(true);
+    expect(lastRunBody.exit.triggers).toContainEqual({ type: 'sigma_move', n: 1.5 });
+    expect(lastRunBody.exit.triggers).toContainEqual({
+      type: 'pnl', amount: 750, unit: 'usd', direction: 'loss',
+    });
+    // Entry has no triggers key — triggers are exit-only.
+    expect(lastRunBody.entry.triggers).toBeUndefined();
+  });
+
+  it('renders the firing-trigger marker + tooltip for a day with exit_trigger', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
+
+    const traded = document.querySelector('[data-testid="day-cell"][data-date="2025-02-03"]');
+    // Marker present + type surfaced on the cell.
+    expect(traded.getAttribute('data-exit-trigger')).toBe('sigma_move');
+    expect(traded.querySelector('[data-testid="trigger-marker"]')).toBeTruthy();
+    // Tooltip names the firing trigger + its time.
+    const title = traded.getAttribute('title');
+    expect(title).toMatch(/exited early/i);
+    expect(title).toMatch(/sigma_move/);
+    expect(title).toMatch(/19:12Z/);
+
+    // A normal time-exit day (exit_trigger null/absent) has no marker.
+    const excluded = document.querySelector('[data-testid="day-cell"][data-date="2025-02-17"]');
+    expect(excluded.querySelector('[data-testid="trigger-marker"]')).toBeNull();
+    expect(excluded.getAttribute('data-exit-trigger')).toBeNull();
   });
 });

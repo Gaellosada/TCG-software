@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, Union
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tcg.data._sql.intraday_v2 import IntradayV2Reader
 from tcg.engine.intraday_backtest import (
@@ -44,6 +44,10 @@ from tcg.types.intraday import (
     MaxUnderlyingMoveCond,
     MinPremiumCond,
     MinQuoteSizeCond,
+    NetDeltaTrigger,
+    PnlTrigger,
+    SigmaMoveTrigger,
+    UnderlyingMoveTrigger,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,13 +121,73 @@ def _to_engine_conditions(conds: list) -> list:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Early-exit TRIGGERS (v3). A discriminated union on ``type``; attached to the
+# EXIT module only (entry has none — enforced by a RunRequest validator). The
+# FIRST trigger to fire closes the straddle early; time exit is the backstop.
+# Params validated positive; unknown type/unit/direction -> 422.
+# --------------------------------------------------------------------------- #
+class UnderlyingMoveTriggerModel(BaseModel):
+    type: Literal["underlying_move"]
+    amount: float = Field(gt=0)
+    unit: Literal["points", "percent"] = "points"
+
+
+class SigmaMoveTriggerModel(BaseModel):
+    type: Literal["sigma_move"]
+    n: float = Field(gt=0)
+
+
+class NetDeltaTriggerModel(BaseModel):
+    type: Literal["net_delta"]
+    threshold: float = Field(gt=0)
+
+
+class PnlTriggerModel(BaseModel):
+    type: Literal["pnl"]
+    amount: float = Field(gt=0)
+    unit: Literal["points", "percent", "usd"] = "usd"
+    direction: Literal["profit", "loss", "both"] = "both"
+
+
+Trigger = Annotated[
+    Union[
+        UnderlyingMoveTriggerModel,
+        SigmaMoveTriggerModel,
+        NetDeltaTriggerModel,
+        PnlTriggerModel,
+    ],
+    Field(discriminator="type"),
+]
+
+
+def _to_engine_triggers(triggers: list) -> list:
+    """Mirror validated Pydantic triggers into engine dataclasses."""
+    out: list = []
+    for t in triggers:
+        if isinstance(t, UnderlyingMoveTriggerModel):
+            out.append(UnderlyingMoveTrigger(amount=t.amount, unit=t.unit))
+        elif isinstance(t, SigmaMoveTriggerModel):
+            out.append(SigmaMoveTrigger(n=t.n))
+        elif isinstance(t, NetDeltaTriggerModel):
+            out.append(NetDeltaTrigger(threshold=t.threshold))
+        elif isinstance(t, PnlTriggerModel):
+            out.append(PnlTrigger(amount=t.amount, unit=t.unit, direction=t.direction))
+    return out
+
+
 class EntryExitModule(BaseModel):
     """A full entry- or exit-rule module: time + its own snap tolerance + an
-    AND-ed list of conditions (the 4 discriminated types)."""
+    AND-ed list of conditions (the 4 discriminated types).
+
+    ``triggers`` (v3) are EXIT-only early-exit rules; a RunRequest validator
+    rejects non-empty entry triggers so they can never be silently ignored.
+    """
 
     time: str = "10:00"
     snap_tolerance_minutes: float = Field(default=10.0, gt=0)
     conditions: list[Condition] = Field(default_factory=list)
+    triggers: list[Trigger] = Field(default_factory=list)
 
     @field_validator("time")
     @classmethod
@@ -139,6 +203,7 @@ class EntryExitOverride(BaseModel):
     time: str | None = None
     snap_tolerance_minutes: float | None = Field(default=None, gt=0)
     conditions: list[Condition] | None = None
+    triggers: list[Trigger] | None = None
 
     @field_validator("time")
     @classmethod
@@ -180,6 +245,19 @@ class RunRequest(BaseModel):
     # Unified per-date control (exclude + full per-day override).
     custom_days: list[CustomDay] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _no_entry_triggers(self) -> "RunRequest":
+        """Triggers are EXIT-only (DESIGN v3): reject them on any entry module so
+        they can never be silently ignored."""
+        if self.entry.triggers:
+            raise ValueError("entry module does not support triggers (exit-only)")
+        for cd in self.custom_days:
+            if cd.entry is not None and cd.entry.triggers:
+                raise ValueError(
+                    f"custom_days[{cd.date}].entry does not support triggers (exit-only)"
+                )
+        return self
+
 
 @dataclass
 class DayPlan:
@@ -193,7 +271,8 @@ class DayPlan:
     exit_tol: float
     entry_conditions: list  # engine condition dataclasses
     exit_conditions: list
-    excluded: bool
+    exit_triggers: list = field(default_factory=list)  # engine trigger dataclasses
+    excluded: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -246,8 +325,8 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
     while d <= end:
         if d.weekday() < 5:  # Mon-Fri
             e_ov, x_ov = overrides.get(d, (None, None))
-            e_time, e_tol, e_conds = _resolve_module(req.entry, e_ov)
-            x_time, x_tol, x_conds = _resolve_module(req.exit, x_ov)
+            e_time, e_tol, e_conds, _e_trigs = _resolve_module(req.entry, e_ov)
+            x_time, x_tol, x_conds, x_trigs = _resolve_module(req.exit, x_ov)
             entry_ts = resolve_et_to_utc(d, e_time, _TZ)
             exit_ts = resolve_et_to_utc(d, x_time, _TZ)
             if exit_ts <= entry_ts:
@@ -265,6 +344,7 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
                     exit_tol=x_tol,
                     entry_conditions=_to_engine_conditions(e_conds),
                     exit_conditions=_to_engine_conditions(x_conds),
+                    exit_triggers=_to_engine_triggers(x_trigs),
                     excluded=d in excluded,
                 )
             )
@@ -276,13 +356,14 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
 
 def _resolve_module(
     base: EntryExitModule, ov: EntryExitOverride | None
-) -> tuple[str, float, list]:
+) -> tuple[str, float, list, list]:
     """Merge a global module with an optional per-day partial override.
 
     Any override field that is present wins; absent fields inherit ``base``.
+    Returns ``(time, snap_tol, conditions, triggers)``.
     """
     if ov is None:
-        return base.time, base.snap_tolerance_minutes, base.conditions
+        return base.time, base.snap_tolerance_minutes, base.conditions, base.triggers
     time_ = ov.time if ov.time is not None else base.time
     tol = (
         ov.snap_tolerance_minutes
@@ -290,7 +371,8 @@ def _resolve_module(
         else base.snap_tolerance_minutes
     )
     conds = ov.conditions if ov.conditions is not None else base.conditions
-    return time_, tol, conds
+    trigs = ov.triggers if ov.triggers is not None else base.triggers
+    return time_, tol, conds, trigs
 
 
 def _pick_expiry(all_exps: list[date], day: date, mode: str, dte: int) -> date | None:
@@ -334,6 +416,15 @@ def _serialize_day(r: DayResult) -> dict[str, Any]:
         "legs": None,
         "straddle_on_ts": _iso(r.straddle_on_ts) if r.straddle_on_ts else None,
         "straddle_off_ts": _iso(r.straddle_off_ts) if r.straddle_off_ts else None,
+        "exit_trigger": (
+            {
+                "type": r.exit_trigger.type,
+                "ts": _iso(r.exit_trigger.ts),
+                "value": r.exit_trigger.value,
+            }
+            if r.exit_trigger
+            else None
+        ),
     }
     if r.legs:
         out["legs"] = {
@@ -498,6 +589,7 @@ async def _process_day(
         exit_tol=plan.exit_tol,
         entry_conditions=plan.entry_conditions,
         exit_conditions=plan.exit_conditions,
+        exit_triggers=plan.exit_triggers,
         tick_size=tick_size,
         hedge_enabled=req.hedge.enabled,
         interval_minutes=req.hedge.interval_minutes,

@@ -96,6 +96,68 @@ class MaxUnderlyingMoveCond:
     ref: str = "day_open"
 
 
+# --------------------------------------------------------------------------- #
+# Early-exit TRIGGERS (v3). Attached to the EXIT module only. Each closes the
+# straddle EARLY (before ``exit.time``); the FIRST to fire wins (OR). Engine-
+# level, dependency-free dataclasses the API mirrors from its discriminated-union
+# Pydantic trigger models. Move / delta / sigma thresholds are ABSOLUTE (fire in
+# either direction); only ``pnl`` is directional.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class UnderlyingMoveTrigger:
+    """Fire if ``abs(ES_bar - ES_entry) >= amount`` (``unit="points"``) or
+    ``>= amount/100 * ES_entry`` (``unit="percent"``). ``ES_entry`` = ES at
+    ``straddle_on_ts``."""
+
+    amount: float
+    unit: str = "points"  # "points" | "percent"
+
+
+@dataclass(frozen=True)
+class SigmaMoveTrigger:
+    """Fire if ``abs(ES_bar - ES_entry) >= n * sigma_bar`` where
+    ``sigma_bar = ES_entry * IV_entry * sqrt(T_bar)`` (sigma shrinks intraday as
+    expiry nears). ``IV_entry`` = ATM implied vol backed out of the ENTRY
+    straddle (Black-76 inversion, avg call/put)."""
+
+    n: float
+
+
+@dataclass(frozen=True)
+class NetDeltaTrigger:
+    """Fire if ``abs(pre_hedge_net_straddle_delta(bar)) >= threshold`` (the same
+    net delta the hedge loop computes, BEFORE hedging)."""
+
+    threshold: float
+
+
+@dataclass(frozen=True)
+class PnlTrigger:
+    """Position P&L to the bar = straddle option MTM (side-signed vs entry
+    premium) + hedge MTM so far. ``unit``: points | percent (of entry premium) |
+    usd (x multiplier). ``direction``: profit (``pnl >= +amount``), loss
+    (``pnl <= -amount``), both (``abs(pnl) >= amount``)."""
+
+    amount: float
+    unit: str = "usd"  # "points" | "percent" | "usd"
+    direction: str = "both"  # "profit" | "loss" | "both"
+
+
+@dataclass(frozen=True)
+class ExitTrigger:
+    """The firing trigger that closed a day EARLY (``None`` on a time exit).
+
+    ``value`` is the observed quantity that crossed the threshold, in the
+    trigger's own terms: underlying_move -> the move (points or percent per its
+    unit); sigma_move -> realized sigmas (``move/sigma_bar``); net_delta ->
+    ``abs(net_delta)``; pnl -> the signed P&L in the trigger's unit.
+    """
+
+    type: str
+    ts: datetime
+    value: float
+
+
 @dataclass(frozen=True)
 class MarkSnapshot:
     """Straddle marks at a single instant (entry or exit)."""
@@ -176,6 +238,8 @@ class DayResult:
     legs: StraddleLegs | None = None
     straddle_on_ts: datetime | None = None
     straddle_off_ts: datetime | None = None
+    # v3: the early-exit trigger that fired (``None`` => time exit / no trigger).
+    exit_trigger: ExitTrigger | None = None
 
 
 @dataclass(frozen=True)

@@ -36,6 +36,10 @@ from tcg.types.intraday import (
     MaxUnderlyingMoveCond,
     MinPremiumCond,
     MinQuoteSizeCond,
+    NetDeltaTrigger,
+    PnlTrigger,
+    SigmaMoveTrigger,
+    UnderlyingMoveTrigger,
 )
 
 UTC = timezone.utc
@@ -489,3 +493,260 @@ def test_aggregate_counts_and_winrate():
     assert agg.n_days == 3 and agg.n_traded == 2 and agg.n_skipped == 1
     assert 0.0 <= agg.win_rate <= 1.0
     assert len(agg.equity_curve) == 2
+
+
+# --------------------------------------------------------------------------- #
+# v3 — Early-exit TRIGGERS
+# --------------------------------------------------------------------------- #
+class _PinnedVolKernel:
+    """IV pinned to 0.2 (so IV_entry is deterministic); delta 0 (net_delta
+    inert) — isolates the sigma_move path."""
+
+    def implied_vol(self, price, F, K, T, r, flag):
+        return 0.2
+
+    def delta(self, F, K, T, r, sigma, flag):
+        return 0.0
+
+
+class _MoneynessKernel:
+    """Delta rises linearly with (F-K): long-straddle net delta ~ 2*(F-K)/50."""
+
+    def implied_vol(self, price, F, K, T, r, flag):
+        return 0.2
+
+    def delta(self, F, K, T, r, sigma, flag):
+        m = (F - K) / 50.0
+        d = max(-1.0, min(1.0, 0.5 + m))
+        return d if flag == "c" else d - 1.0
+
+
+def test_trigger_underlying_move_points_closes_early():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    # Flat 5000 then a +20 jump at minute 5 (>= 15pt threshold).
+    es = _bars(entry, [5000.0] * 5 + [5020.0] * 26)
+    res = simulate_day(**_day(
+        es_bars=es,
+        exit_triggers=[UnderlyingMoveTrigger(amount=15.0, unit="points")],
+    ))
+    assert res.status == "ok"
+    assert res.exit_trigger is not None
+    assert res.exit_trigger.type == "underlying_move"
+    assert res.exit_trigger.ts == entry + timedelta(minutes=5)
+    assert res.exit_trigger.value == pytest.approx(20.0)
+    # Whole straddle closed at the trigger bar (nearest per leg).
+    assert res.straddle_off_ts == entry + timedelta(minutes=5)
+    assert res.legs.call.exit_ts == entry + timedelta(minutes=5)
+    assert res.legs.put.exit_ts == entry + timedelta(minutes=5)
+
+
+def test_trigger_underlying_move_percent_unit():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    # 0.3% of 5000 = 15pt; a +20 jump at minute 4 fires. value in percent.
+    es = _bars(entry, [5000.0] * 4 + [5020.0] * 27)
+    res = simulate_day(**_day(
+        es_bars=es,
+        exit_triggers=[UnderlyingMoveTrigger(amount=0.3, unit="percent")],
+    ))
+    assert res.exit_trigger is not None
+    assert res.exit_trigger.ts == entry + timedelta(minutes=4)
+    assert res.exit_trigger.value == pytest.approx(20.0 / 5000.0 * 100.0)
+
+
+def test_trigger_sigma_move_shrinks_intraday():
+    # 0DTE: sigma_bar = 5000*0.2*sqrt(T_bar) shrinks toward the 16:00 expiry.
+    # A fixed +15 move is BELOW sigma early (~26pt) and only fires once sigma
+    # has decayed below it later in the session.
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "15:45")
+    n = int((exit_ - entry).total_seconds() // 60) + 1
+    es = _bars(entry, [5000.0] + [5015.0] * (n - 1))  # +15 from minute 1
+    marks = _bars(entry, [30.0] * n)
+    kw = dict(
+        date_int=20250303, side="long", strike=5000.0, expiry=day,  # 0DTE
+        es_bars=es, call_marks=marks, put_marks=marks,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge_enabled=False, interval_minutes=15.0, delta_band=0.1,
+        kernel=_PinnedVolKernel(),
+        exit_triggers=[SigmaMoveTrigger(n=1.0)],
+    )
+    res = simulate_day(**kw)
+    assert res.exit_trigger is not None and res.exit_trigger.type == "sigma_move"
+    # Did NOT fire at minute 1 (sigma still > 15); fired only after it shrank.
+    assert res.exit_trigger.ts > entry + timedelta(minutes=30)
+
+
+def test_trigger_sigma_move_big_move_fires_immediately():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "15:45")
+    n = int((exit_ - entry).total_seconds() // 60) + 1
+    es = _bars(entry, [5000.0] + [5200.0] * (n - 1))  # +200 >> sigma_entry
+    marks = _bars(entry, [30.0] * n)
+    res = simulate_day(
+        date_int=20250303, side="long", strike=5000.0, expiry=day,
+        es_bars=es, call_marks=marks, put_marks=marks,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge_enabled=False, interval_minutes=15.0, delta_band=0.1,
+        kernel=_PinnedVolKernel(), exit_triggers=[SigmaMoveTrigger(n=1.0)],
+    )
+    assert res.exit_trigger is not None
+    assert res.exit_trigger.ts == entry + timedelta(minutes=1)
+
+
+def test_trigger_net_delta_fires_when_delta_grows():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    # ES steps +5/min: net delta ~2*(F-5000)/50 crosses 0.3 at F=5010 (minute 2).
+    es = _bars(entry, [5000.0 + 5.0 * i for i in range(31)])
+    marks = _bars(entry, [30.0] * 31)
+    res = simulate_day(**_day(
+        es_bars=es, call_marks=marks, put_marks=marks,
+        kernel=_MoneynessKernel(),
+        exit_triggers=[NetDeltaTrigger(threshold=0.3)],
+    ))
+    assert res.exit_trigger is not None and res.exit_trigger.type == "net_delta"
+    assert res.exit_trigger.ts == entry + timedelta(minutes=2)
+    assert res.exit_trigger.value == pytest.approx(0.4)
+
+
+def _pnl_base():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:20")
+    n = 21
+    es = _bars(entry, [5000.0] * n)
+    put = _bars(entry, [30.0] * n)  # P_entry = 60
+    base = dict(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, put_marks=put, entry_ts=entry, exit_ts=exit_,
+        entry_tol=10.0, exit_tol=10.0, hedge_enabled=False,
+        interval_minutes=15.0, delta_band=0.1,
+    )
+    return base, entry, n
+
+
+def test_trigger_pnl_profit_vs_loss_vs_both():
+    base, entry, n = _pnl_base()
+    up = _bars(entry, [30.0] * 3 + [50.0] * (n - 3))    # straddle +20 => +1000usd
+    dn = _bars(entry, [30.0] * 3 + [10.0] * (n - 3))    # straddle -20 => -1000usd
+
+    # profit: fires on the up move at minute 3, value = +1000 usd.
+    r = simulate_day(call_marks=up, exit_triggers=[
+        PnlTrigger(amount=500, unit="usd", direction="profit")], **base)
+    assert r.exit_trigger is not None and r.exit_trigger.type == "pnl"
+    assert r.exit_trigger.ts == entry + timedelta(minutes=3)
+    assert r.exit_trigger.value == pytest.approx(1000.0)
+
+    # profit direction never fires on an up move's loss trigger -> time exit.
+    r = simulate_day(call_marks=up, exit_triggers=[
+        PnlTrigger(amount=500, unit="usd", direction="loss")], **base)
+    assert r.exit_trigger is None
+
+    # loss: fires on the down move, value = -1000 usd (signed).
+    r = simulate_day(call_marks=dn, exit_triggers=[
+        PnlTrigger(amount=500, unit="usd", direction="loss")], **base)
+    assert r.exit_trigger is not None
+    assert r.exit_trigger.value == pytest.approx(-1000.0)
+
+    # both: fires on the down move too.
+    r = simulate_day(call_marks=dn, exit_triggers=[
+        PnlTrigger(amount=500, unit="usd", direction="both")], **base)
+    assert r.exit_trigger is not None
+    assert r.exit_trigger.ts == entry + timedelta(minutes=3)
+
+
+def test_trigger_pnl_percent_and_points_units():
+    base, entry, n = _pnl_base()
+    up = _bars(entry, [30.0] * 3 + [50.0] * (n - 3))  # +20 pts on 60 premium
+    # points: +20 >= 15 fires; value in points.
+    r = simulate_day(call_marks=up, exit_triggers=[
+        PnlTrigger(amount=15, unit="points", direction="profit")], **base)
+    assert r.exit_trigger is not None
+    assert r.exit_trigger.value == pytest.approx(20.0)
+    # percent of P_entry (60): 20/60*100 = 33.3% >= 30% fires.
+    r = simulate_day(call_marks=up, exit_triggers=[
+        PnlTrigger(amount=30, unit="percent", direction="profit")], **base)
+    assert r.exit_trigger is not None
+    assert r.exit_trigger.value == pytest.approx(20.0 / 60.0 * 100.0)
+
+
+def test_first_of_several_triggers_wins_earliest_bar():
+    # pnl fires at minute 3; underlying_move at minute 5 -> earliest (pnl) wins.
+    base, entry, n = _pnl_base()
+    up = _bars(entry, [30.0] * 3 + [50.0] * (n - 3))
+    es = _bars(entry, [5000.0] * 5 + [5030.0] * (n - 5))  # +30 move at minute 5
+    base = dict(base)
+    base["es_bars"] = es
+    r = simulate_day(call_marks=up, exit_triggers=[
+        UnderlyingMoveTrigger(amount=15.0, unit="points"),
+        PnlTrigger(amount=500, unit="usd", direction="profit"),
+    ], **base)
+    assert r.exit_trigger is not None and r.exit_trigger.type == "pnl"
+    assert r.exit_trigger.ts == entry + timedelta(minutes=3)
+
+
+def test_same_bar_tie_resolves_by_list_order():
+    # Both fire at minute 3; list order decides: underlying_move listed first.
+    base, entry, n = _pnl_base()
+    up = _bars(entry, [30.0] * 3 + [50.0] * (n - 3))       # pnl at minute 3
+    es = _bars(entry, [5000.0] * 3 + [5030.0] * (n - 3))   # +30 move at minute 3
+    base = dict(base)
+    base["es_bars"] = es
+    r = simulate_day(call_marks=up, exit_triggers=[
+        UnderlyingMoveTrigger(amount=15.0, unit="points"),
+        PnlTrigger(amount=500, unit="usd", direction="profit"),
+    ], **base)
+    assert r.exit_trigger is not None and r.exit_trigger.type == "underlying_move"
+    assert r.exit_trigger.ts == entry + timedelta(minutes=3)
+
+
+def test_triggered_exit_bypasses_exit_conditions():
+    # Impossible exit condition would force a not-met fallback on a time exit;
+    # a TRIGGERED exit ignores conditions and fills cleanly at the trigger bar.
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    es = _bars(entry, [5000.0] * 5 + [5020.0] * 26)
+    res = simulate_day(**_day(
+        es_bars=es,
+        exit_conditions=[MinPremiumCond(points=999.0)],
+        exit_triggers=[UnderlyingMoveTrigger(amount=15.0, unit="points")],
+    ))
+    assert res.status == "ok"
+    assert res.exit_trigger is not None
+    assert res.straddle_off_ts == entry + timedelta(minutes=5)
+    # Bypassed conditions -> clean fill within tolerance, not a degraded fallback.
+    assert res.legs.call.exit_conditions_met is True
+    assert res.legs.put.exit_conditions_met is True
+
+
+def test_no_trigger_fire_falls_back_to_time_exit_unchanged():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:30")
+    es = _bars(entry, [5000.0] * 5 + [5020.0] * 26)
+    calls = _bars(entry, [30.0] * 31)
+    puts = _bars(entry, [30.0] * 31)
+    common = dict(
+        es_bars=es, call_marks=calls, put_marks=puts,
+        hedge_enabled=True, interval_minutes=5.0, delta_band=0.2,
+    )
+    # A never-firing trigger must produce the SAME result as no triggers at all.
+    baseline = simulate_day(**_day(**common))
+    with_trig = simulate_day(**_day(
+        exit_triggers=[UnderlyingMoveTrigger(amount=99999.0, unit="points")],
+        **common,
+    ))
+    assert with_trig.exit_trigger is None
+    assert with_trig.straddle_off_ts == baseline.straddle_off_ts == exit_
+    assert with_trig.pnl.total_pnl_usd == pytest.approx(baseline.pnl.total_pnl_usd)
+
+
+def test_no_triggers_field_is_v2_time_exit():
+    # The v2 path (no exit_triggers arg) is unchanged: exit at exit.time.
+    res = simulate_day(**_day())
+    assert res.exit_trigger is None
+    assert res.status == "ok"

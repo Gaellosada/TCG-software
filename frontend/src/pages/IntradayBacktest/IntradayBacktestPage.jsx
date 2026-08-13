@@ -183,6 +183,13 @@ function legSummary(name, leg) {
   return `${name}: ${inTxt} → ${outTxt} (${met})`;
 }
 
+// One-line early-exit summary for the day tooltip (v3). `exit_trigger` is the
+// firing trigger { type, ts, value } or null (null = normal time exit).
+function triggerSummary(trig) {
+  if (!trig || !trig.type) return null;
+  return `exited early: ${trig.type} @ ${tsTime(trig.ts)}`;
+}
+
 // Full detail for a cell's tooltip — preserves everything the old table row
 // showed (status, strike, option/hedge P&L, USD, skip reason).
 function cellTitle(iso, data) {
@@ -208,6 +215,8 @@ function cellTitle(iso, data) {
     // arrival so the leg-timing gap is visible.
     legs ? legSummary('call', legs.call) : null,
     legs ? legSummary('put', legs.put) : null,
+    // Early-exit trigger (v3) — which trigger fired, and when.
+    triggerSummary(data.exit_trigger),
   ].filter(Boolean);
   return parts.join('  •  ');
 }
@@ -573,6 +582,7 @@ export default function IntradayBacktestPage() {
               idPrefix="exit"
               value={exit}
               onChange={setExit}
+              showTriggers
             />
           </div>
         </div>
@@ -663,6 +673,7 @@ export default function IntradayBacktestPage() {
                           idPrefix={`cd-${c.date}-exit`}
                           value={c.exit}
                           partial
+                          showTriggers
                           onChange={(next) => updateCustomDay(c.date, { exit: next })}
                         />
                       </div>
@@ -837,17 +848,33 @@ export default function IntradayBacktestPage() {
                     const noTrade = outcome === 'skipped' || excluded || unmet;
                     const tagText = excluded ? 'no trade' : unmet ? 'no entry' : 'skipped';
                     const pnl = slot.data.pnl || null;
+                    // Early-exit trigger (v3): a traded day that closed on a
+                    // trigger carries a small marker + a data attribute.
+                    const trig = slot.data.exit_trigger || null;
                     return (
                       <div
                         key={slot.iso}
-                        className={`${styles.dayCell} ${OUTCOME_CLASS[outcome] || ''}`}
+                        className={`${styles.dayCell} ${OUTCOME_CLASS[outcome] || ''} ${trig ? styles.cellTriggered : ''}`}
                         data-testid="day-cell"
                         data-date={slot.iso}
                         data-status={slot.data.status}
                         data-outcome={outcome}
+                        data-exit-trigger={trig ? trig.type : undefined}
                         title={cellTitle(slot.iso, slot.data)}
                       >
-                        <span className={styles.dom}>{slot.dom}</span>
+                        <span className={styles.domRow}>
+                          {trig && !noTrade && (
+                            <span
+                              className={styles.triggerBadge}
+                              data-testid="trigger-marker"
+                              aria-label={`early exit: ${trig.type}`}
+                              title={`exited early on ${trig.type}`}
+                            >
+                              ⚡
+                            </span>
+                          )}
+                          <span className={styles.dom}>{slot.dom}</span>
+                        </span>
                         {noTrade ? (
                           <span className={styles.cellTag}>
                             {tagText}

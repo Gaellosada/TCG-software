@@ -4,6 +4,11 @@ import ConditionEditor, {
   defaultCondition,
   serializeCondition,
 } from './ConditionEditor';
+import TriggerEditor, {
+  TRIGGER_TYPES,
+  defaultTrigger,
+  serializeTrigger,
+} from './TriggerEditor';
 
 // ---------------------------------------------------------------------------
 // EntryExitModule — one reusable "rule module" for either the Entry or the Exit
@@ -31,22 +36,30 @@ export const SNAP_HELP = 'Intraday option quotes are sparse. If your exact '
 export function defaultEntryModule() {
   return { time: '10:00', snap_tolerance_minutes: 10, conditions: [] };
 }
+// The exit module additionally owns an early-exit `triggers` array (DESIGN.md
+// v3). Entry has none — triggers are exit-only.
 export function defaultExitModule() {
-  return { time: '15:45', snap_tolerance_minutes: 10, conditions: [] };
+  return { time: '15:45', snap_tolerance_minutes: 10, conditions: [], triggers: [] };
 }
 // A blank partial override (all fields inherit until the user sets them).
 export function emptyPartialModule() {
   return { time: '', snap_tolerance_minutes: '', conditions: [] };
 }
 
-// Serialize a full module to the PINNED wire shape.
+// Serialize a full module to the PINNED wire shape. `triggers` is emitted only
+// when the module carries a triggers array (the exit module) — entry stays
+// unchanged (no triggers key).
 export function serializeModule(mod) {
   const m = mod || {};
-  return {
+  const out = {
     time: m.time,
     snap_tolerance_minutes: Number(m.snap_tolerance_minutes),
     conditions: (m.conditions || []).map(serializeCondition),
   };
+  if (Array.isArray(m.triggers)) {
+    out.triggers = m.triggers.map(serializeTrigger);
+  }
+  return out;
 }
 
 // Serialize a PARTIAL override: only include fields the user actually set. If
@@ -62,6 +75,11 @@ export function serializePartialModule(mod) {
   if (mod.conditions && mod.conditions.length) {
     out.conditions = mod.conditions.map(serializeCondition);
   }
+  // Per-day exit overrides may carry early-exit triggers (partial): only send
+  // them when the user actually built some.
+  if (mod.triggers && mod.triggers.length) {
+    out.triggers = mod.triggers.map(serializeTrigger);
+  }
   return Object.keys(out).length ? out : null;
 }
 
@@ -71,9 +89,11 @@ export default function EntryExitModule({
   value,
   onChange,
   partial = false,
+  showTriggers = false,
 }) {
   const v = value || {};
   const conditions = v.conditions || [];
+  const triggers = v.triggers || [];
   const set = (patch) => onChange({ ...v, ...patch });
 
   const addCondition = (type) => {
@@ -85,6 +105,19 @@ export default function EntryExitModule({
   };
   const removeCondition = (i) => {
     set({ conditions: conditions.filter((_, idx) => idx !== i) });
+  };
+
+  // Early-exit triggers (exit-only, DESIGN.md v3). Mirror the conditions
+  // handlers but on the module's `triggers` array.
+  const addTrigger = (type) => {
+    if (!type) return;
+    set({ triggers: [...triggers, defaultTrigger(type)] });
+  };
+  const updateTrigger = (i, next) => {
+    set({ triggers: triggers.map((t, idx) => (idx === i ? next : t)) });
+  };
+  const removeTrigger = (i) => {
+    set({ triggers: triggers.filter((_, idx) => idx !== i) });
   };
 
   return (
@@ -165,6 +198,53 @@ export default function EntryExitModule({
           </div>
         )}
       </div>
+
+      {/* Early-exit Triggers builder — EXIT module only (DESIGN.md v3). Mirrors
+          the Conditions builder: an "Add trigger" dropdown → the chosen type's
+          param inputs, each removable. Triggers close the straddle EARLY (first
+          to fire wins); the time exit remains the backstop. */}
+      {showTriggers && (
+        <div className={styles.conditionsBlock} data-testid={`${idPrefix}-triggers-block`}>
+          <div className={styles.conditionsHeader}>
+            <span className={styles.conditionsTitle}>
+              Triggers (early exit){partial ? ' (override)' : ''}
+            </span>
+            <select
+              className={styles.addCondition}
+              data-testid={`${idPrefix}-add-trigger`}
+              aria-label={`${title} add trigger`}
+              value=""
+              onChange={(e) => addTrigger(e.target.value)}
+            >
+              <option value="" disabled>Add trigger…</option>
+              {TRIGGER_TYPES.map((t) => (
+                <option key={t.type} value={t.type}>{t.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {triggers.length === 0 ? (
+            <p
+              className={styles.conditionsEmpty}
+              data-testid={`${idPrefix}-triggers-empty`}
+            >
+              No triggers — the straddle is held until the exit time.
+            </p>
+          ) : (
+            <div className={styles.conditionsList} data-testid={`${idPrefix}-triggers`}>
+              {triggers.map((t, i) => (
+                <TriggerEditor
+                  key={t._id || i}
+                  idPrefix={idPrefix}
+                  trigger={t}
+                  onChange={(next) => updateTrigger(i, next)}
+                  onRemove={() => removeTrigger(i)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
