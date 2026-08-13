@@ -112,6 +112,175 @@
 }
 
 /* ---------------------------------------------------------------------------
+ * Entry / Exit rule modules (v2) + Conditions builder.
+ * ------------------------------------------------------------------------- */
+.modulesRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.moduleColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.moduleHeading {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-primary);
+}
+
+.module {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+}
+
+.moduleFields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.6rem 0.8rem;
+}
+
+.conditionsBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border-top: 1px solid var(--border-primary);
+  padding-top: 0.6rem;
+}
+
+.conditionsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.conditionsTitle {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.addCondition {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.addCondition:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.conditionsEmpty {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.conditionsList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.conditionRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.conditionLabel {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  align-self: center;
+  min-width: 6rem;
+}
+
+.conditionParams {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.paramField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.paramField > span {
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+}
+
+.paramField input,
+.paramField select {
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.8rem;
+  max-width: 6.5rem;
+}
+
+.paramField input:focus,
+.paramField select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Per-custom-day header row + collapsible entry/exit override area. */
+.customDayHead {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.customDayOverride {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.8rem;
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+/* ---------------------------------------------------------------------------
  * Custom days — unified per-date rows (exclude or override entry/exit times).
  * ------------------------------------------------------------------------- */
 .customDaysList {
@@ -125,9 +294,9 @@
 
 .customDayRow {
   display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
   padding: 0.35rem 0.5rem;
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
@@ -467,6 +636,17 @@
 }
 .cellExcluded .cellTag { color: var(--text-muted); }
 .cellExcluded .dom { color: var(--text-secondary); }
+
+/* Entry conditions unmet (v2) — a distinct skip: cool dashed tone, separate
+ * from the warm data-gap "skipped" and the neutral "excluded" cell. */
+.cellUnmet {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text-muted);
+}
+.cellUnmet .cellTag { color: var(--accent); }
+.cellUnmet .dom { color: var(--text-secondary); }
 
 .chartBox {
   height: 340px;

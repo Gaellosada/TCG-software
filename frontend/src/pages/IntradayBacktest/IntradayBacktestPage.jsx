@@ -7,6 +7,13 @@ import {
   startIntradayBacktest,
   getIntradayBacktestProgress,
 } from '../../api/intradayBacktest';
+import EntryExitModule, {
+  defaultEntryModule,
+  defaultExitModule,
+  emptyPartialModule,
+  serializeModule,
+  serializePartialModule,
+} from './EntryExitModule';
 import styles from './IntradayBacktestPage.module.css';
 
 // Progress poll cadence (ms). Kept small so the "X / N days" readout tracks the
@@ -30,18 +37,18 @@ const POLL_INTERVAL_MS = 400;
 // component so CSV export + theming come for free.
 // ---------------------------------------------------------------------------
 
+// The flat entry_time / exit_time / snap_tolerance_minutes are gone (DESIGN.md
+// v2). Entry and Exit are now full "rule modules" held in their own state; the
+// form keeps only the scalar params below.
 const DEFAULT_FORM = {
   start_date: '',
   end_date: '',
-  entry_time: '10:00',
-  exit_time: '15:45',
   expiry_mode: '0DTE',
   dte: 0,
   straddle_side: 'long',
   hedge_enabled: true,
   interval_minutes: 15,
   delta_band: 0.10,
-  snap_tolerance_minutes: 10,
 };
 
 function clampToWindow(value, win) {
@@ -57,13 +64,6 @@ function signClass(v) {
   if (v < 0) return styles.negative;
   return '';
 }
-
-// In-app help for the snap-tolerance field (Gael copy). Surfaced via an ⓘ
-// affordance next to the label, matching the app's tooltip pattern.
-const SNAP_HELP = 'Intraday option quotes are sparse. If your exact entry/exit '
-  + 'minute has no quote, the engine uses the nearest one within this many '
-  + 'minutes; if none exists in that window, the day is skipped. Higher = fewer '
-  + 'skipped days but looser fills; lower = tighter timing but more skips.';
 
 // In-app help for the hedge interval + delta band fields. Copy mirrors what the
 // engine actually does (tcg/engine/intraday_backtest.py simulate_day): the
@@ -143,6 +143,11 @@ function dayOutcome(data) {
   // data-gap "skipped". The backend tags it status="excluded"; we also accept
   // skip_reason="excluded" for robustness against wire variance.
   if (data.status === 'excluded' || data.skip_reason === 'excluded') return 'excluded';
+  // Entry conditions never qualified (v2): a distinct skip outcome from a raw
+  // data gap. Accept it on either status or skip_reason.
+  if (data.status === 'entry_conditions_unmet' || data.skip_reason === 'entry_conditions_unmet') {
+    return 'unmet';
+  }
   if (data.status === 'skipped') return 'skipped';
   const usd = data.pnl ? data.pnl.total_pnl_usd : null;
   if (typeof usd === 'number' && Number.isFinite(usd)) {
@@ -158,7 +163,25 @@ const OUTCOME_CLASS = {
   flat: styles.cellFlat,
   skipped: styles.cellSkipped,
   excluded: styles.cellExcluded,
+  unmet: styles.cellUnmet,
 };
+
+// Short HH:MM (UTC) extracted from an ISO timestamp for the compact tooltip.
+function tsTime(ts) {
+  if (!ts) return '—';
+  const m = /T(\d{2}:\d{2})/.exec(String(ts));
+  return m ? `${m[1]}Z` : String(ts);
+}
+
+// One-line per-leg fill summary for the day tooltip (entry/exit ts + price and
+// whether the exit conditions were actually met vs a nearest-bar fallback).
+function legSummary(name, leg) {
+  if (!leg) return null;
+  const inTxt = `in ${tsTime(leg.entry_ts)} @${formatNumber(leg.entry_price)}`;
+  const outTxt = `out ${tsTime(leg.exit_ts)} @${formatNumber(leg.exit_price)}`;
+  const met = leg.exit_conditions_met === false ? 'exit=fallback' : 'exit=ok';
+  return `${name}: ${inTxt} → ${outTxt} (${met})`;
+}
 
 // Full detail for a cell's tooltip — preserves everything the old table row
 // showed (status, strike, option/hedge P&L, USD, skip reason).
@@ -167,16 +190,24 @@ function cellTitle(iso, data) {
   if (data.status === 'excluded' || data.skip_reason === 'excluded') {
     return `${iso} — excluded (no trade)`;
   }
+  if (data.status === 'entry_conditions_unmet' || data.skip_reason === 'entry_conditions_unmet') {
+    return `${iso} — skipped: entry_conditions_unmet (no bar met the entry conditions in the snap window)`;
+  }
   if (data.status === 'skipped') {
     return `${iso} — skipped: ${data.skip_reason || 'skipped'}`;
   }
   const p = data.pnl || {};
+  const legs = data.legs || null;
   const parts = [
     `${iso} — ${data.status}`,
     data.strike != null ? `strike ${formatNumber(data.strike, 0)}` : null,
     p.option_pnl_pts != null ? `option ${formatNumber(p.option_pnl_pts)} pts` : null,
     p.hedge_pnl_pts != null ? `hedge ${formatNumber(p.hedge_pnl_pts)} pts` : null,
     p.total_pnl_usd != null ? `Day P&L ${formatCurrency(p.total_pnl_usd)}` : null,
+    // Per-leg fills (v2 independent legs) — surfaces the asymmetric quote
+    // arrival so the leg-timing gap is visible.
+    legs ? legSummary('call', legs.call) : null,
+    legs ? legSummary('put', legs.put) : null,
   ].filter(Boolean);
   return parts.join('  •  ');
 }
@@ -186,9 +217,14 @@ export default function IntradayBacktestPage() {
   const [metaError, setMetaError] = useState(null);
 
   const [form, setForm] = useState(DEFAULT_FORM);
+  // Entry & Exit rule modules (v2): each = time + own snap tolerance + a
+  // conditions array. Held separately from the scalar form fields.
+  const [entry, setEntry] = useState(defaultEntryModule);
+  const [exit, setExit] = useState(defaultExitModule);
   // Unified "Custom days" control (supersedes the old exception_dates +
-  // date_overrides). Each row fully describes one date: exclude it, or override
-  // its entry/exit times. Shape: { date, exclude, entry_time, exit_time }.
+  // date_overrides). Each row: exclude the day, OR expand to override entry
+  // and/or exit via the SAME EntryExitModule (partial — only set fields sent).
+  // Shape: { date, exclude, expanded, entry:{partial}, exit:{partial} }.
   const [customDays, setCustomDays] = useState([]);
   const [customDayDraft, setCustomDayDraft] = useState('');
 
@@ -240,8 +276,8 @@ export default function IntradayBacktestPage() {
   }, []);
 
   // Add a custom-day row for the drafted date. New rows default to "not
-  // excluded" and seed their times from the current default entry/exit so the
-  // user only has to change what differs.
+  // excluded", collapsed, with blank (inherit) partial entry/exit overrides —
+  // the user expands to override only what differs.
   const addCustomDay = useCallback(() => {
     const d = customDayDraft;
     if (!d) return;
@@ -250,13 +286,14 @@ export default function IntradayBacktestPage() {
       const row = {
         date: d,
         exclude: false,
-        entry_time: form.entry_time,
-        exit_time: form.exit_time,
+        expanded: false,
+        entry: emptyPartialModule(),
+        exit: emptyPartialModule(),
       };
       return [...prev, row].sort((a, b) => a.date.localeCompare(b.date));
     });
     setCustomDayDraft('');
-  }, [customDayDraft, form.entry_time, form.exit_time]);
+  }, [customDayDraft]);
 
   const updateCustomDay = useCallback((date, patch) => {
     setCustomDays((prev) => prev.map((c) => (c.date === date ? { ...c, ...patch } : c)));
@@ -266,12 +303,13 @@ export default function IntradayBacktestPage() {
     setCustomDays((prev) => prev.filter((c) => c.date !== date));
   }, []);
 
-  // Build the PINNED request payload (DESIGN.md).
+  // Build the PINNED v2 request payload (DESIGN.md). Entry/exit are objects
+  // { time, snap_tolerance_minutes, conditions:[{type,...}] }; custom_days carry
+  // full per-day overrides (excluded rows: date+exclude; override rows: date +
+  // any partial entry/exit the user set).
   const buildPayload = useCallback(() => ({
     start_date: form.start_date,
     end_date: form.end_date,
-    entry_time: form.entry_time,
-    exit_time: form.exit_time,
     expiry_mode: form.expiry_mode,
     dte: Number(form.dte) || 0,
     straddle_side: form.straddle_side,
@@ -280,21 +318,28 @@ export default function IntradayBacktestPage() {
       interval_minutes: Number(form.interval_minutes),
       delta_band: Number(form.delta_band),
     },
-    snap_tolerance_minutes: Number(form.snap_tolerance_minutes),
-    // Unified custom-days payload (DESIGN.md PIN): excluded rows carry only the
-    // date; override rows carry their entry/exit times.
-    custom_days: customDays.map((c) => (c.exclude
-      ? { date: c.date, exclude: true }
-      : { date: c.date, exclude: false, entry_time: c.entry_time, exit_time: c.exit_time })),
-  }), [form, customDays]);
+    entry: serializeModule(entry),
+    exit: serializeModule(exit),
+    custom_days: customDays.map((c) => {
+      if (c.exclude) return { date: c.date, exclude: true };
+      const out = { date: c.date };
+      const e = serializePartialModule(c.entry);
+      const x = serializePartialModule(c.exit);
+      if (e) out.entry = e;
+      if (x) out.exit = x;
+      return out;
+    }),
+  }), [form, entry, exit, customDays]);
 
   const runDisabledReason = useMemo(() => {
     if (running) return 'Running…';
     if (!form.start_date || !form.end_date) return 'Pick a date range';
     if (form.end_date < form.start_date) return 'End date is before start date';
-    if (form.exit_time <= form.entry_time) return 'Exit time must be after entry time';
+    if (entry.time && exit.time && exit.time <= entry.time) {
+      return 'Exit time must be after entry time';
+    }
     return null;
-  }, [running, form]);
+  }, [running, form, entry.time, exit.time]);
 
   // Async run: start a background job, then poll its progress until done/error.
   // Validation failures (400) surface synchronously from the start call.
@@ -413,26 +458,6 @@ export default function IntradayBacktestPage() {
             />
           </label>
 
-          {/* Entry / exit times (ET). */}
-          <label className={styles.field}>
-            <span>Entry time (ET)</span>
-            <input
-              type="time"
-              aria-label="Entry time (ET)"
-              value={form.entry_time}
-              onChange={(e) => setField('entry_time', e.target.value)}
-            />
-          </label>
-          <label className={styles.field}>
-            <span>Exit time (ET)</span>
-            <input
-              type="time"
-              aria-label="Exit time (ET)"
-              value={form.exit_time}
-              onChange={(e) => setField('exit_time', e.target.value)}
-            />
-          </label>
-
           {/* Expiry mode + DTE. */}
           <label className={styles.field}>
             <span>Expiry mode</span>
@@ -470,29 +495,6 @@ export default function IntradayBacktestPage() {
               <option value="long">Long (pay premium)</option>
               <option value="short">Short (collect premium)</option>
             </select>
-          </label>
-
-          {/* Snap tolerance. */}
-          <label className={styles.field}>
-            <span className={styles.labelRow}>
-              Snap tolerance (min)
-              <span
-                className={styles.help}
-                data-testid="snap-help"
-                role="img"
-                aria-label={SNAP_HELP}
-                title={SNAP_HELP}
-              >
-                ⓘ
-              </span>
-            </span>
-            <input
-              type="number"
-              min={0}
-              aria-label="Snap tolerance (minutes)"
-              value={form.snap_tolerance_minutes}
-              onChange={(e) => setField('snap_tolerance_minutes', e.target.value)}
-            />
           </label>
 
           {/* Delta hedge. */}
@@ -552,10 +554,34 @@ export default function IntradayBacktestPage() {
           </label>
         </div>
 
+        {/* Entry & Exit rule modules (v2): time + own snap tolerance + a
+            Conditions builder. Reusable EntryExitModule component. */}
+        <div className={styles.modulesRow} data-testid="entry-exit-modules">
+          <div className={styles.moduleColumn}>
+            <div className={styles.moduleHeading}>Entry rule</div>
+            <EntryExitModule
+              title="Entry"
+              idPrefix="entry"
+              value={entry}
+              onChange={setEntry}
+            />
+          </div>
+          <div className={styles.moduleColumn}>
+            <div className={styles.moduleHeading}>Exit rule</div>
+            <EntryExitModule
+              title="Exit"
+              idPrefix="exit"
+              value={exit}
+              onChange={setExit}
+            />
+          </div>
+        </div>
+
         {/* Custom days — one unified control. Add a date, then per row either
-            exclude it (no trade) or override its entry/exit times. */}
+            exclude it (no trade) or expand to override entry/exit via the SAME
+            EntryExitModule (partial). */}
         <div className={styles.field} style={{ marginTop: '1rem' }}>
-          <span className={styles.fieldLabel}>Custom days (exclude or override times)</span>
+          <span className={styles.fieldLabel}>Custom days (exclude or override entry/exit)</span>
           <div className={styles.inlineRow}>
             <input
               type="date"
@@ -583,42 +609,65 @@ export default function IntradayBacktestPage() {
                   className={styles.customDayRow}
                   data-testid={`custom-day-row-${c.date}`}
                 >
-                  <span className={styles.customDayDate}>{c.date}</span>
-                  <label className={styles.customDayExclude}>
-                    <input
-                      type="checkbox"
-                      aria-label={`Exclude ${c.date}`}
-                      checked={c.exclude}
-                      onChange={(e) => updateCustomDay(c.date, { exclude: e.target.checked })}
-                    />
-                    <span>Exclude (don&apos;t trade)</span>
-                  </label>
-                  <input
-                    type="time"
-                    aria-label={`Entry time for ${c.date}`}
-                    className={styles.customDayTime}
-                    value={c.entry_time}
-                    disabled={c.exclude}
-                    onChange={(e) => updateCustomDay(c.date, { entry_time: e.target.value })}
-                  />
-                  <span className={styles.customDayDash} aria-hidden="true">–</span>
-                  <input
-                    type="time"
-                    aria-label={`Exit time for ${c.date}`}
-                    className={styles.customDayTime}
-                    value={c.exit_time}
-                    disabled={c.exclude}
-                    onChange={(e) => updateCustomDay(c.date, { exit_time: e.target.value })}
-                  />
-                  <span className={styles.customDayEt} aria-hidden="true">ET</span>
-                  <button
-                    type="button"
-                    className={styles.chipRemove}
-                    aria-label={`Remove custom day ${c.date}`}
-                    onClick={() => removeCustomDay(c.date)}
-                  >
-                    ×
-                  </button>
+                  <div className={styles.customDayHead}>
+                    <span className={styles.customDayDate}>{c.date}</span>
+                    <label className={styles.customDayExclude}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Exclude ${c.date}`}
+                        checked={c.exclude}
+                        onChange={(e) => updateCustomDay(c.date, { exclude: e.target.checked })}
+                      />
+                      <span>Exclude (don&apos;t trade)</span>
+                    </label>
+                    {!c.exclude && (
+                      <button
+                        type="button"
+                        className={styles.smallBtn}
+                        data-testid={`custom-day-toggle-${c.date}`}
+                        aria-expanded={Boolean(c.expanded)}
+                        aria-label={`${c.expanded ? 'Hide' : 'Override'} entry/exit for ${c.date}`}
+                        onClick={() => updateCustomDay(c.date, { expanded: !c.expanded })}
+                      >
+                        {c.expanded ? 'Hide override ▾' : 'Override entry/exit ▸'}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className={styles.chipRemove}
+                      aria-label={`Remove custom day ${c.date}`}
+                      onClick={() => removeCustomDay(c.date)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  {!c.exclude && c.expanded && (
+                    <div
+                      className={styles.customDayOverride}
+                      data-testid={`custom-day-override-${c.date}`}
+                    >
+                      <div className={styles.moduleColumn}>
+                        <div className={styles.moduleHeading}>Entry override</div>
+                        <EntryExitModule
+                          title={`Entry ${c.date}`}
+                          idPrefix={`cd-${c.date}-entry`}
+                          value={c.entry}
+                          partial
+                          onChange={(next) => updateCustomDay(c.date, { entry: next })}
+                        />
+                      </div>
+                      <div className={styles.moduleColumn}>
+                        <div className={styles.moduleHeading}>Exit override</div>
+                        <EntryExitModule
+                          title={`Exit ${c.date}`}
+                          idPrefix={`cd-${c.date}-exit`}
+                          value={c.exit}
+                          partial
+                          onChange={(next) => updateCustomDay(c.date, { exit: next })}
+                        />
+                      </div>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -784,7 +833,9 @@ export default function IntradayBacktestPage() {
                     }
                     const outcome = dayOutcome(slot.data);
                     const excluded = outcome === 'excluded';
-                    const noTrade = outcome === 'skipped' || excluded;
+                    const unmet = outcome === 'unmet';
+                    const noTrade = outcome === 'skipped' || excluded || unmet;
+                    const tagText = excluded ? 'no trade' : unmet ? 'no entry' : 'skipped';
                     const pnl = slot.data.pnl || null;
                     return (
                       <div
@@ -799,7 +850,7 @@ export default function IntradayBacktestPage() {
                         <span className={styles.dom}>{slot.dom}</span>
                         {noTrade ? (
                           <span className={styles.cellTag}>
-                            {excluded ? 'no trade' : 'skipped'}
+                            {tagText}
                           </span>
                         ) : (
                           <span className={styles.cellPnl}>

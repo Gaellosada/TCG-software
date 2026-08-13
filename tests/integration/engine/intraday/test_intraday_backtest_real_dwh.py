@@ -64,15 +64,18 @@ async def test_es_future_intraday_bars_present(reader):
 
 
 async def test_run_backtest_end_to_end(reader):
+    # v2 request shape: entry/exit rule MODULES (time + snap tolerance +
+    # conditions). A light max_spread condition exercises the conditional path
+    # end-to-end on real bbba quotes without over-filtering thin strikes.
     req = RunRequest(
         start_date=_START,
         end_date=_END,
-        entry_time="10:00",
-        exit_time="15:00",
+        entry={"time": "10:00", "snap_tolerance_minutes": 30.0,
+               "conditions": [{"type": "max_spread", "pct": 50.0, "min_ticks": 4}]},
+        exit={"time": "15:00", "snap_tolerance_minutes": 30.0},
         expiry_mode="NDTE",
         dte=0,
         straddle_side="long",
-        snap_tolerance_minutes=30.0,
     )
     result = await run_backtest(reader, req)
 
@@ -81,9 +84,6 @@ async def test_run_backtest_end_to_end(reader):
     assert result["aggregate"]["n_days"] == 2
 
     ok_days = [d for d in days if d["status"] == "ok"]
-    # At least one day should trade on real marks; if the front strikes were
-    # too thin at the chosen times both may skip — surface that loudly rather
-    # than passing vacuously.
     assert ok_days, (
         "no day traded on real marks; days="
         + ", ".join(f"{d['date']}:{d['status']}/{d['skip_reason']}" for d in days)
@@ -96,3 +96,9 @@ async def test_run_backtest_end_to_end(reader):
     assert d0["pnl"]["total_pnl_usd"] == pytest.approx(
         d0["pnl"]["total_pnl_pts"] * 50.0
     )
+    # v2 response additions: independent legs + both-on window bounds.
+    assert d0["legs"]["call"]["entry_ts"] and d0["legs"]["put"]["entry_ts"]
+    assert d0["straddle_on_ts"] and d0["straddle_off_ts"]
+    # option P&L reconciles with the two per-leg pnl_pts.
+    leg_sum = d0["legs"]["call"]["pnl_pts"] + d0["legs"]["put"]["pnl_pts"]
+    assert d0["pnl"]["option_pnl_pts"] == pytest.approx(leg_sum)

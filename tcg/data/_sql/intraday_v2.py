@@ -19,7 +19,12 @@ from datetime import date, datetime
 
 from tcg.data._sql.connection import DwhConnectionPool, to_float
 from tcg.types.errors import DataAccessError
-from tcg.types.intraday import IntradayBar, WINDOW_MAX_DATE, WINDOW_MIN_DATE
+from tcg.types.intraday import (
+    ES_OPTION_TICK_SIZE,
+    IntradayBar,
+    WINDOW_MAX_DATE,
+    WINDOW_MIN_DATE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,19 @@ class IntradayV2Reader:
         gotchas forbid) — the window is a fixed property of the loaded feed.
         """
         return WINDOW_MIN_DATE, WINDOW_MAX_DATE
+
+    async def get_option_tick_size(self) -> float:
+        """Minimum price increment (index points) for the ES option complex.
+
+        Sourced from a dwh min-increment column **if one existed** — but a
+        scan of ``information_schema.columns`` for ``tcg_instruments_v2``
+        (contract / object / serie) found NO tick / increment / min_move
+        column. So the documented CME ES-option constant is used
+        (:data:`ES_OPTION_TICK_SIZE` = 0.05 index pts). See PROBLEMS.md. This
+        method is the single sourcing point: if such a column is added later,
+        wire the read here with zero call-site change.
+        """
+        return ES_OPTION_TICK_SIZE
 
     async def resolve_future_object_id(self) -> int | None:
         """Object id of the ES future (``FUT_SP_500``), or ``None``."""
@@ -182,18 +200,25 @@ class IntradayV2Reader:
     async def fetch_option_1m(
         self, contract_id: int, start_ts: datetime, end_ts: datetime
     ) -> list[IntradayBar]:
-        """One contract's 1m marks over ``[start_ts, end_ts)``: bbba mid, else close.
+        """One contract's 1m marks over ``[start_ts, end_ts)``.
 
         Merges the ``fact_bbba`` (top-of-book) and ``fact_bar`` (trade) 1m events
-        into a single event-ordered mark series. Per event: mid =
-        ``(best_bid+best_ask)/2`` when both present, else fall back to the bar
-        close (recon §3). ``ts`` constant-bounded on both reads.
+        into a single event-ordered mark series. Per event, the returned
+        :class:`IntradayBar` carries:
+
+        * ``price`` — the MARK: two-sided bbba mid ``(best_bid+best_ask)/2`` when
+          both sides present, else the bar close (recon §3).
+        * ``bid`` / ``ask`` / ``bid_size`` / ``ask_size`` — the top-of-book at a
+          two-sided bbba event; **all ``None`` on a last-trade-only bar** (no
+          two-sided quote — the fields the ``max_spread`` / ``min_quote_size``
+          conditions require). ``ts`` constant-bounded on both reads.
         """
         try:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        f"""SELECT f.ts, f.best_bid_value, f.best_ask_value
+                        f"""SELECT f.ts, f.best_bid_value, f.best_ask_value,
+                                   f.best_bid_volume, f.best_ask_volume
                             FROM {V2_SCHEMA}.serie s
                             JOIN {V2_SCHEMA}.fact_bbba f ON f.serie_id = s.serie_id
                             WHERE s.contract_id = %s
@@ -219,19 +244,26 @@ class IntradayV2Reader:
                 f"v2 intraday error fetching option contract {contract_id}: {exc}"
             ) from exc
 
-        # ts -> mark. bbba mid takes precedence; bar close fills only where no
-        # two-sided quote exists at that ts.
-        marks: dict[datetime, float] = {}
+        # ts -> IntradayBar. bar close seeds a last-trade-only mark (quote fields
+        # None); a two-sided bbba event OVERRIDES with mid + full top-of-book.
+        marks: dict[datetime, IntradayBar] = {}
         for r in bar_rows:
             close = to_float(r["close"])
             if close is not None and close > 0:
-                marks[r["ts"]] = close
+                marks[r["ts"]] = IntradayBar(ts=r["ts"], price=close)
         for r in bbba_rows:
             bid = to_float(r["best_bid_value"])
             ask = to_float(r["best_ask_value"])
             if bid is not None and ask is not None and bid > 0 and ask > 0:
-                marks[r["ts"]] = (bid + ask) / 2.0
-        return [IntradayBar(ts=ts, price=marks[ts]) for ts in sorted(marks)]
+                marks[r["ts"]] = IntradayBar(
+                    ts=r["ts"],
+                    price=(bid + ask) / 2.0,
+                    bid=bid,
+                    ask=ask,
+                    bid_size=to_float(r["best_bid_volume"]),
+                    ask_size=to_float(r["best_ask_volume"]),
+                )
+        return [marks[ts] for ts in sorted(marks)]
 
     # ------------------------------------------------------------------ #
     async def _fetch_one(self, sql: str, params: tuple) -> dict | None:

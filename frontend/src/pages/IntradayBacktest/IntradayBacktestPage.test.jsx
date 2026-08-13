@@ -20,7 +20,8 @@ vi.mock('../../components/Chart', () => ({
 import IntradayBacktestPage from './IntradayBacktestPage';
 
 // ---------------------------------------------------------------------------
-// PINNED contract fixtures (DESIGN.md).
+// PINNED v2 contract fixtures (DESIGN.md — "Conditional entry/exit modules +
+// independent legs").
 // ---------------------------------------------------------------------------
 const META = {
   window: { min_date: '2025-01-01', max_date: '2026-07-31' },
@@ -38,22 +39,26 @@ const RUN_RESPONSE = {
     {
       date: '2025-02-03', status: 'ok', skip_reason: null,
       expiry: '2025-02-03', strike: 5850.0,
-      entry: { ts: '2025-02-03T15:00:00Z', underlying: 5851.2, call_mid: 18.5, put_mid: 17.25, straddle_price: 35.75 },
-      exit: { ts: '2025-02-03T20:45:00Z', underlying: 5860.0, call_mid: 22.0, put_mid: 9.5, straddle_price: 31.5 },
+      entry: { ts: '2025-02-03T15:03:00Z', underlying: 5851.2, call_mid: 18.5, put_mid: 17.25, straddle_price: 35.75 },
+      exit: { ts: '2025-02-03T20:44:00Z', underlying: 5860.0, call_mid: 22.0, put_mid: 9.5, straddle_price: 31.5 },
+      // v2 independent-leg detail — the two legs fill minutes apart.
+      legs: {
+        call: { entry_ts: '2025-02-03T15:03:00Z', entry_price: 18.5, exit_ts: '2025-02-03T20:45:00Z', exit_price: 22.0, exit_conditions_met: true, pnl_pts: 3.5 },
+        put: { entry_ts: '2025-02-03T15:01:00Z', entry_price: 17.25, exit_ts: '2025-02-03T20:44:00Z', exit_price: 9.5, exit_conditions_met: false, pnl_pts: -7.75 },
+      },
+      straddle_on_ts: '2025-02-03T15:03:00Z', straddle_off_ts: '2025-02-03T20:44:00Z',
       hedge_trades: [{ ts: '2025-02-03T15:15:00Z', underlying: 5855.0, net_delta: 0.42, hedge_qty: -0.42 }],
       pnl: { option_pnl_pts: -4.25, hedge_pnl_pts: 3.1, total_pnl_pts: -1.15, total_pnl_usd: -57.5 },
     },
     {
-      // User-excluded day — backend now tags status "excluded" (PIN contract).
+      // User-excluded day.
       date: '2025-02-17', status: 'excluded', skip_reason: 'excluded',
-      expiry: null, strike: null, entry: null, exit: null, hedge_trades: [],
-      pnl: null,
+      expiry: null, strike: null, entry: null, exit: null, hedge_trades: [], pnl: null,
     },
     {
       // Data-gap skip — distinct from an exclusion.
       date: '2025-02-20', status: 'skipped', skip_reason: 'no_quote_within_tolerance',
-      expiry: null, strike: null, entry: null, exit: null, hedge_trades: [],
-      pnl: null,
+      expiry: null, strike: null, entry: null, exit: null, hedge_trades: [], pnl: null,
     },
   ],
   aggregate: {
@@ -66,11 +71,8 @@ const RUN_RESPONSE = {
 };
 
 // ---------------------------------------------------------------------------
-// Global fetch mock. The run now uses the ASYNC flow:
-//   POST /run-async → { job_id }  then poll  GET /progress/{job_id}.
-// Captures the POST /run-async body so we can assert the payload matches the
-// pinned request schema, and returns a configurable progress sequence
-// (default: one 'running' snapshot, then 'done' carrying the pinned result).
+// Global fetch mock. Async flow: POST /run-async → { job_id }, then poll
+// GET /progress/{job_id}. Captures the POST body to assert the pinned request.
 // ---------------------------------------------------------------------------
 let lastRunBody = null;
 let progressSeq = null;
@@ -125,49 +127,74 @@ async function renderReady() {
 }
 
 describe('IntradayBacktestPage', () => {
-  it('renders all controls (entry/exit ET, expiry mode, side, hedge, snap, custom days)', async () => {
+  it('renders all controls incl. the Entry/Exit rule modules', async () => {
     await renderReady();
-    // Times labelled ET
+    // Entry & Exit rule modules present, each with its own time + snap tolerance.
+    expect(screen.getByTestId('entry-module')).toBeTruthy();
+    expect(screen.getByTestId('exit-module')).toBeTruthy();
     expect(screen.getByLabelText('Entry time (ET)')).toBeTruthy();
     expect(screen.getByLabelText('Exit time (ET)')).toBeTruthy();
+    // Each module owns a snap tolerance (two total).
+    expect(screen.getAllByLabelText(/snap tolerance/i).length).toBe(2);
+    // Each module owns an "Add condition" dropdown.
+    expect(screen.getByTestId('entry-add-condition')).toBeTruthy();
+    expect(screen.getByTestId('exit-add-condition')).toBeTruthy();
+    // Times labelled ET.
     expect(screen.getAllByText(/ET/).length).toBeGreaterThan(0);
-    // Expiry mode + side
+    // Expiry mode + side.
     expect(screen.getByLabelText(/expiry mode/i)).toBeTruthy();
     expect(screen.getByLabelText(/straddle side/i)).toBeTruthy();
-    // Hedge controls
+    // Hedge controls.
     expect(screen.getByLabelText(/delta.?hedge/i)).toBeTruthy();
     expect(screen.getByLabelText(/interval/i)).toBeTruthy();
     expect(screen.getByLabelText(/delta band/i)).toBeTruthy();
-    // Snap tolerance
-    expect(screen.getByLabelText(/snap tolerance/i)).toBeTruthy();
-    // Unified custom-days add control
+    // Unified custom-days add control.
     expect(screen.getByTestId('add-custom-day')).toBeTruthy();
-    // Run button
+    // Run button.
     expect(screen.getByRole('button', { name: /run backtest/i })).toBeTruthy();
   });
 
-  it('shows in-app help for the snap-tolerance field', async () => {
+  it('adding a condition via the dropdown renders that condition\'s param inputs', async () => {
     await renderReady();
-    const help = screen.getByTestId('snap-help');
-    // The ⓘ affordance carries the sparse-quote explanation (title + aria-label).
+    // No condition rows initially — the empty hint shows instead.
+    expect(screen.getByTestId('entry-conditions-empty')).toBeTruthy();
+
+    // Pick max_spread from the entry dropdown → its pct + min_ticks inputs appear.
+    fireEvent.change(screen.getByTestId('entry-add-condition'), { target: { value: 'max_spread' } });
+    expect(screen.getByTestId('entry-condition-max_spread')).toBeTruthy();
+    expect(screen.getByLabelText('entry max_spread pct')).toBeTruthy();
+    expect(screen.getByLabelText('entry max_spread min ticks')).toBeTruthy();
+
+    // Pick min_quote_size → its size input appears alongside.
+    fireEvent.change(screen.getByTestId('entry-add-condition'), { target: { value: 'min_quote_size' } });
+    expect(screen.getByTestId('entry-condition-min_quote_size')).toBeTruthy();
+    expect(screen.getByLabelText('entry min_quote_size size')).toBeTruthy();
+
+    // Removing the max_spread row drops just that condition.
+    fireEvent.click(screen.getByLabelText('Remove Max spread condition'));
+    expect(screen.queryByTestId('entry-condition-max_spread')).toBeNull();
+    expect(screen.getByTestId('entry-condition-min_quote_size')).toBeTruthy();
+  });
+
+  it('shows in-app snap-tolerance help on each module', async () => {
+    await renderReady();
+    const help = screen.getByTestId('entry-snap-help');
     expect(help.getAttribute('title')).toMatch(/nearest one within this many minutes/i);
     expect(help.getAttribute('title')).toMatch(/the day is skipped/i);
     expect(help.getAttribute('aria-label')).toMatch(/quotes are sparse/i);
+    // Exit module carries the same help copy.
+    expect(screen.getByTestId('exit-snap-help').getAttribute('title')).toMatch(/quotes are sparse/i);
   });
 
   it('shows in-app help for the hedge interval and delta band fields', async () => {
     await renderReady();
 
-    // Hedge interval ⓘ — fixed-clock rehedge cadence.
     const intervalHelp = screen.getByTestId('hedge-interval-help');
-    expect(intervalHelp.getAttribute('title')).toBeTruthy();
     expect(intervalHelp.getAttribute('title')).toMatch(/fixed clock/i);
     expect(intervalHelp.getAttribute('title')).toMatch(/delta-neutral/i);
     expect(intervalHelp.getAttribute('aria-label')).toMatch(/re-hedged with the ES future/i);
 
-    // Delta band ⓘ — open (unhedged) net delta threshold, OR-triggered.
     const bandHelp = screen.getByTestId('delta-band-help');
-    expect(bandHelp.getAttribute('title')).toBeTruthy();
     expect(bandHelp.getAttribute('title')).toMatch(/open \(unhedged\) net delta/i);
     expect(bandHelp.getAttribute('title')).toMatch(/whichever fires first/i);
     expect(bandHelp.getAttribute('aria-label')).toMatch(/ES-future-equivalent units/i);
@@ -183,42 +210,52 @@ describe('IntradayBacktestPage', () => {
     expect(end.getAttribute('max')).toBe('2026-07-31');
   });
 
-  it('submits a contract-shaped payload on Run', async () => {
+  it('submits the PINNED v2 payload — entry/exit objects with conditions + full custom_days', async () => {
     const fetchFn = installFetch();
     await renderReady();
 
-    // Configure a couple of fields so we assert real values flow through.
     fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2025-02-01' } });
     fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-03-31' } });
     fireEvent.change(screen.getByLabelText('Entry time (ET)'), { target: { value: '10:00' } });
     fireEvent.change(screen.getByLabelText('Exit time (ET)'), { target: { value: '15:45' } });
     fireEvent.change(screen.getByLabelText(/straddle side/i), { target: { value: 'short' } });
 
-    // Add an EXCLUDED custom day: add the row, then toggle Exclude on.
+    // Build a global ENTRY conditions list: a max_spread AND another type.
+    fireEvent.change(screen.getByTestId('entry-add-condition'), { target: { value: 'max_spread' } });
+    fireEvent.change(screen.getByLabelText('entry max_spread pct'), { target: { value: '4' } });
+    fireEvent.change(screen.getByLabelText('entry max_spread min ticks'), { target: { value: '2' } });
+    fireEvent.change(screen.getByTestId('entry-add-condition'), { target: { value: 'min_quote_size' } });
+    fireEvent.change(screen.getByLabelText('entry min_quote_size size'), { target: { value: '25' } });
+
+    // An EXIT condition too (min_premium).
+    fireEvent.change(screen.getByTestId('exit-add-condition'), { target: { value: 'min_premium' } });
+    fireEvent.change(screen.getByLabelText('exit min_premium points'), { target: { value: '0.75' } });
+
+    // EXCLUDED custom day.
     fireEvent.change(screen.getByTestId('custom-day-input'), { target: { value: '2025-02-17' } });
     fireEvent.click(screen.getByTestId('add-custom-day'));
     fireEvent.click(screen.getByLabelText('Exclude 2025-02-17'));
 
-    // Add an OVERRIDE custom day: add the row, then set custom entry/exit times.
+    // OVERRIDE custom day: add, expand, override entry + exit (partial).
     fireEvent.change(screen.getByTestId('custom-day-input'), { target: { value: '2025-02-14' } });
     fireEvent.click(screen.getByTestId('add-custom-day'));
-    fireEvent.change(screen.getByLabelText('Entry time for 2025-02-14'), { target: { value: '11:00' } });
-    fireEvent.change(screen.getByLabelText('Exit time for 2025-02-14'), { target: { value: '14:00' } });
+    fireEvent.click(screen.getByTestId('custom-day-toggle-2025-02-14'));
+    fireEvent.change(screen.getByLabelText('Entry 2025-02-14 time (ET)'), { target: { value: '11:00' } });
+    fireEvent.change(screen.getByLabelText('Exit 2025-02-14 time (ET)'), { target: { value: '14:00' } });
+    // A per-day override condition too.
+    fireEvent.change(screen.getByTestId('cd-2025-02-14-entry-add-condition'), { target: { value: 'min_premium' } });
+    fireEvent.change(screen.getByLabelText('cd-2025-02-14-entry min_premium points'), { target: { value: '1.25' } });
 
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
-
     await waitFor(() => expect(lastRunBody).not.toBeNull());
 
-    // Assert the run POST went to the async endpoint.
     const runCall = fetchFn.mock.calls.find((c) => String(c[0]).endsWith('/intraday-backtest/run-async'));
     expect(runCall).toBeTruthy();
     expect(runCall[1].method).toBe('POST');
 
-    // Assert body matches the PINNED request schema shape + values.
+    // Scalars.
     expect(lastRunBody.start_date).toBe('2025-02-01');
     expect(lastRunBody.end_date).toBe('2025-03-31');
-    expect(lastRunBody.entry_time).toBe('10:00');
-    expect(lastRunBody.exit_time).toBe('15:45');
     expect(lastRunBody.expiry_mode).toBe('0DTE');
     expect(typeof lastRunBody.dte).toBe('number');
     expect(lastRunBody.straddle_side).toBe('short');
@@ -227,35 +264,50 @@ describe('IntradayBacktestPage', () => {
       interval_minutes: expect.any(Number),
       delta_band: expect.any(Number),
     });
-    expect(typeof lastRunBody.snap_tolerance_minutes).toBe('number');
 
-    // Unified custom_days replaces exception_dates + date_overrides entirely.
+    // Old flat fields are gone.
+    expect(lastRunBody.entry_time).toBeUndefined();
+    expect(lastRunBody.exit_time).toBeUndefined();
+    expect(lastRunBody.snap_tolerance_minutes).toBeUndefined();
     expect(lastRunBody.exception_dates).toBeUndefined();
     expect(lastRunBody.date_overrides).toBeUndefined();
+
+    // ENTRY module object (time + own snap tolerance + conditions array).
+    expect(lastRunBody.entry.time).toBe('10:00');
+    expect(typeof lastRunBody.entry.snap_tolerance_minutes).toBe('number');
+    expect(Array.isArray(lastRunBody.entry.conditions)).toBe(true);
+    expect(lastRunBody.entry.conditions).toContainEqual({ type: 'max_spread', pct: 4, min_ticks: 2 });
+    expect(lastRunBody.entry.conditions).toContainEqual({ type: 'min_quote_size', size: 25 });
+
+    // EXIT module object.
+    expect(lastRunBody.exit.time).toBe('15:45');
+    expect(typeof lastRunBody.exit.snap_tolerance_minutes).toBe('number');
+    expect(lastRunBody.exit.conditions).toContainEqual({ type: 'min_premium', points: 0.75 });
+
+    // custom_days: an excluded day + a full per-day override.
     expect(Array.isArray(lastRunBody.custom_days)).toBe(true);
-    // Excluded row: date + exclude only (PIN shape).
     expect(lastRunBody.custom_days).toContainEqual({ date: '2025-02-17', exclude: true });
-    // Override row: date + exclude:false + entry/exit times (PIN shape).
-    expect(lastRunBody.custom_days).toContainEqual({
-      date: '2025-02-14', exclude: false, entry_time: '11:00', exit_time: '14:00',
-    });
+    const override = lastRunBody.custom_days.find((c) => c.date === '2025-02-14');
+    expect(override).toBeTruthy();
+    expect(override.exclude).toBeUndefined(); // not excluded — no exclude key
+    expect(override.entry.time).toBe('11:00');
+    expect(override.entry.conditions).toContainEqual({ type: 'min_premium', points: 1.25 });
+    expect(override.exit.time).toBe('14:00');
+    // snap tolerance was never set on the override → omitted (partial).
+    expect(override.entry.snap_tolerance_minutes).toBeUndefined();
   });
 
-  it('disables the time inputs on a custom day when Exclude is toggled on', async () => {
+  it('hides the per-day override toggle when a custom day is excluded', async () => {
     await renderReady();
     fireEvent.change(screen.getByTestId('custom-day-input'), { target: { value: '2025-02-17' } });
     fireEvent.click(screen.getByTestId('add-custom-day'));
 
-    const entry = screen.getByLabelText('Entry time for 2025-02-17');
-    const exit = screen.getByLabelText('Exit time for 2025-02-17');
-    // Not excluded yet → times editable.
-    expect(entry.disabled).toBe(false);
-    expect(exit.disabled).toBe(false);
+    // Not excluded → the override affordance is available.
+    expect(screen.getByTestId('custom-day-toggle-2025-02-17')).toBeTruthy();
 
-    // Toggle Exclude → the day won't be entered, so the time inputs are disabled.
+    // Toggle Exclude → the day won't be traded, so no entry/exit override.
     fireEvent.click(screen.getByLabelText('Exclude 2025-02-17'));
-    expect(entry.disabled).toBe(true);
-    expect(exit.disabled).toBe(true);
+    expect(screen.queryByTestId('custom-day-toggle-2025-02-17')).toBeNull();
   });
 
   it('renders the days calendar grid, aggregate stats and the equity chart after Run', async () => {
@@ -264,32 +316,40 @@ describe('IntradayBacktestPage', () => {
 
     await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
 
-    // One cell per day in the pinned response (3 days).
     expect(screen.getAllByTestId('day-cell').length).toBe(3);
-
-    // The month the days fall in is labelled (all three are February 2025).
     expect(screen.getByText('February 2025')).toBeTruthy();
 
-    // The traded day cell carries its date, a P&L (dollar) figure and its full
-    // detail (strike) in the tooltip — nothing the table showed is lost.
     const traded = document.querySelector('[data-testid="day-cell"][data-date="2025-02-03"]');
     expect(traded).toBeTruthy();
-    expect(traded.textContent).toMatch(/\$/); // Day P&L shown compactly
-    expect(traded.textContent).toMatch(/3\b/); // day-of-month number
-    expect(traded.getAttribute('title')).toMatch(/5,?850/); // strike surfaced in detail
-
-    // Loss day is colour-coded as a loss.
+    expect(traded.textContent).toMatch(/\$/);
+    expect(traded.textContent).toMatch(/3\b/);
+    expect(traded.getAttribute('title')).toMatch(/5,?850/);
     expect(traded.getAttribute('data-outcome')).toBe('loss');
 
-    // Aggregate stats surfaced.
     const agg = screen.getByTestId('aggregate-stats');
     expect(agg.textContent).toMatch(/Sharpe/i);
     expect(agg.textContent).toMatch(/-0\.8/);
 
-    // Equity chart rendered via the shared Chart (stubbed).
     const chart = screen.getByTestId('chart');
     expect(chart.getAttribute('data-points')).toBe('1');
     expect(chart.getAttribute('data-last')).toBe('-57.5');
+  });
+
+  it('surfaces per-leg fill detail in the day tooltip (independent legs)', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
+
+    const traded = document.querySelector('[data-testid="day-cell"][data-date="2025-02-03"]');
+    const title = traded.getAttribute('title');
+    // Both legs surfaced with their own fill times/prices.
+    expect(title).toMatch(/call:/);
+    expect(title).toMatch(/put:/);
+    expect(title).toMatch(/15:03Z/); // call entry ts (differs from put's 15:01Z)
+    expect(title).toMatch(/15:01Z/); // put entry ts
+    // The put's exit fell back (exit_conditions_met=false) — surfaced.
+    expect(title).toMatch(/exit=fallback/);
+    expect(title).toMatch(/exit=ok/);
   });
 
   it('visibly flags data-gap skipped days with their skip_reason in the grid', async () => {
@@ -299,12 +359,35 @@ describe('IntradayBacktestPage', () => {
 
     const grid = screen.getByTestId('days-grid');
     const skipped = grid.querySelectorAll('[data-outcome="skipped"]');
-    // Only the data-gap day is "skipped"; the user-excluded day is a separate
-    // outcome (asserted in its own test).
     expect(skipped.length).toBe(1);
-    // Skipped cells are visually distinct (not coloured as profit/loss) and
-    // expose their reason in the tooltip so no information is lost.
     expect(skipped[0].getAttribute('title')).toMatch(/no_quote_within_tolerance/);
+  });
+
+  it('renders an entry_conditions_unmet day as a distinct outcome', async () => {
+    const UNMET = {
+      ...RUN_RESPONSE,
+      days: [
+        {
+          date: '2025-02-05', status: 'skipped', skip_reason: 'entry_conditions_unmet',
+          expiry: null, strike: null, entry: null, exit: null, hedge_trades: [], pnl: null,
+        },
+      ],
+    };
+    installFetch({ progress: [{ status: 'done', days_done: 1, total_days: 1, result: UNMET, error: null }] });
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
+
+    const grid = screen.getByTestId('days-grid');
+    const unmet = grid.querySelectorAll('[data-outcome="unmet"]');
+    expect(unmet.length).toBe(1);
+    const cell = unmet[0];
+    // Distinct from a plain "skipped" data gap.
+    expect(cell.getAttribute('data-outcome')).not.toBe('skipped');
+    expect(cell.textContent).toMatch(/no entry/i);
+    expect(cell.getAttribute('title')).toMatch(/entry_conditions_unmet/);
+    // Not coloured as the warm data-gap "skipped" cell.
+    expect(cell.className).not.toMatch(/cellSkipped/);
   });
 
   it('renders an excluded day as a distinct excluded cell (not a data-gap skip)', async () => {
@@ -316,19 +399,14 @@ describe('IntradayBacktestPage', () => {
     const excluded = grid.querySelectorAll('[data-outcome="excluded"]');
     expect(excluded.length).toBe(1);
     const cell = excluded[0];
-    // Tagged as a no-trade day, visually separate from a "skipped" data gap.
     expect(cell.textContent).toMatch(/no trade/i);
     expect(cell.textContent).not.toMatch(/skipped/i);
-    // Detail preserved in the tooltip.
     expect(cell.getAttribute('title')).toMatch(/excluded/i);
-    // It is the excluded date, not the data-gap one.
     expect(cell.getAttribute('data-date')).toBe('2025-02-17');
-    // And it carries a distinct class from the warm dashed "skipped" cell.
     expect(cell.className).not.toMatch(/cellSkipped/);
   });
 
   it('groups days into one calendar block per month and colours profit vs loss', async () => {
-    // Custom multi-month fixture: Feb (loss) + March (profit) + a March skip.
     const MULTI = {
       ...RUN_RESPONSE,
       days: [
@@ -353,17 +431,14 @@ describe('IntradayBacktestPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
     await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
 
-    // Two month blocks with their headers.
     expect(screen.getAllByTestId('month-block').length).toBe(2);
     expect(screen.getByText('February 2025')).toBeTruthy();
     expect(screen.getByText('March 2025')).toBeTruthy();
 
-    // Profit day is coloured as profit, loss day as loss.
     const profit = document.querySelector('[data-testid="day-cell"][data-date="2025-03-03"]');
     const loss = document.querySelector('[data-testid="day-cell"][data-date="2025-02-28"]');
     expect(profit.getAttribute('data-outcome')).toBe('profit');
     expect(loss.getAttribute('data-outcome')).toBe('loss');
-    // Profit/loss carry the themed colour classes.
     expect(profit.className).toMatch(/\S/);
     expect(loss.className).toMatch(/\S/);
   });
@@ -376,8 +451,6 @@ describe('IntradayBacktestPage', () => {
   });
 
   it('shows live "X / N days" progress and disables Run while the job runs', async () => {
-    // Keep the job in a 'running' state so the progress UI stays mounted long
-    // enough to assert (first + subsequent polls both report running).
     installFetch({
       progress: [
         { status: 'running', days_done: 1, total_days: 3, result: null, error: null },
@@ -389,15 +462,11 @@ describe('IntradayBacktestPage', () => {
     const runBtn = screen.getByRole('button', { name: /run/i });
     fireEvent.click(runBtn);
 
-    // Run button disabled during the run.
     await waitFor(() => expect(runBtn.disabled).toBe(true), { timeout: 3000 });
-
-    // Live progress text "X / N days" (after the first poll lands real counts).
     await waitFor(
       () => expect(screen.getByTestId('run-progress').textContent).toMatch(/[12] \/ 3 days/),
       { timeout: 3000 },
     );
-    // Progress bar fill reflects days_done/total_days.
     const fill = screen.getByTestId('run-progress-fill');
     expect(fill.style.width).toMatch(/^(33\.|66\.)/);
   });
@@ -406,12 +475,9 @@ describe('IntradayBacktestPage', () => {
     await renderReady();
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
 
-    // The pinned RUN_RESPONSE (delivered in the 'done' progress payload) renders.
     await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
     expect(screen.getAllByTestId('day-cell').length).toBe(3);
-    // Progress indicator is gone once done.
     expect(screen.queryByTestId('run-progress')).toBeNull();
-    // Run button re-enabled.
     expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
   });
 
@@ -420,9 +486,6 @@ describe('IntradayBacktestPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
     await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
 
-    // Every result card (aggregate, equity, days) carries the non-shrink class
-    // so it keeps its natural height and the scroll container scrolls rather
-    // than the cards flex-shrinking to zero (the reported layout break).
     const cards = document.querySelectorAll('[data-result-card="true"]');
     expect(cards.length).toBeGreaterThanOrEqual(3);
     cards.forEach((c) => expect(c.className).toMatch(/resultCard/));
@@ -441,7 +504,6 @@ describe('IntradayBacktestPage', () => {
       () => expect(screen.getByRole('alert').textContent).toMatch(/boom: dwh unreachable/),
       { timeout: 3000 },
     );
-    // No results, progress cleared, Run re-enabled.
     expect(screen.queryByTestId('days-grid')).toBeNull();
     expect(screen.queryByTestId('run-progress')).toBeNull();
     expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);

@@ -19,7 +19,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
@@ -35,10 +35,15 @@ from tcg.engine.intraday_backtest import (
 )
 from tcg.types.intraday import (
     ES_MULTIPLIER,
+    ES_OPTION_TICK_SIZE,
     WINDOW_MAX_DATE,
     WINDOW_MIN_DATE,
     AggregateResult,
     DayResult,
+    MaxSpreadCond,
+    MaxUnderlyingMoveCond,
+    MinPremiumCond,
+    MinQuoteSizeCond,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +52,8 @@ router = APIRouter(prefix="/api/intraday-backtest", tags=["intraday-backtest"])
 
 _TZ = "America/New_York"
 _EXPIRY_MODES = ["0DTE", "NDTE"]
+# Session open (ET) used as the max_underlying_move "day_open" reference anchor.
+_SESSION_OPEN_ET = "09:30"
 
 
 # --------------------------------------------------------------------------- #
@@ -58,43 +65,119 @@ class HedgeConfig(BaseModel):
     delta_band: float = Field(default=0.10, ge=0)
 
 
+# --------------------------------------------------------------------------- #
+# Conditional entry/exit modules (v2). Conditions are a discriminated union on
+# ``type``; an unknown ``type`` (or ``ref``) is rejected by pydantic as 422.
+# --------------------------------------------------------------------------- #
+class MaxSpreadCondition(BaseModel):
+    type: Literal["max_spread"]
+    pct: float = Field(gt=0)
+    min_ticks: float = Field(default=1.0, ge=0)
+
+
+class MinQuoteSizeCondition(BaseModel):
+    type: Literal["min_quote_size"]
+    size: float = Field(gt=0)
+
+
+class MinPremiumCondition(BaseModel):
+    type: Literal["min_premium"]
+    points: float = Field(gt=0)
+
+
+class MaxUnderlyingMoveCondition(BaseModel):
+    type: Literal["max_underlying_move"]
+    pct: float = Field(gt=0)
+    ref: Literal["day_open"] = "day_open"
+
+
+Condition = Annotated[
+    Union[
+        MaxSpreadCondition,
+        MinQuoteSizeCondition,
+        MinPremiumCondition,
+        MaxUnderlyingMoveCondition,
+    ],
+    Field(discriminator="type"),
+]
+
+
+def _to_engine_conditions(conds: list) -> list:
+    """Mirror validated Pydantic conditions into engine dataclasses."""
+    out: list = []
+    for c in conds:
+        if isinstance(c, MaxSpreadCondition):
+            out.append(MaxSpreadCond(pct=c.pct, min_ticks=c.min_ticks))
+        elif isinstance(c, MinQuoteSizeCondition):
+            out.append(MinQuoteSizeCond(size=c.size))
+        elif isinstance(c, MinPremiumCondition):
+            out.append(MinPremiumCond(points=c.points))
+        elif isinstance(c, MaxUnderlyingMoveCondition):
+            out.append(MaxUnderlyingMoveCond(pct=c.pct, ref=c.ref))
+    return out
+
+
+class EntryExitModule(BaseModel):
+    """A full entry- or exit-rule module: time + its own snap tolerance + an
+    AND-ed list of conditions (the 4 discriminated types)."""
+
+    time: str = "10:00"
+    snap_tolerance_minutes: float = Field(default=10.0, gt=0)
+    conditions: list[Condition] = Field(default_factory=list)
+
+    @field_validator("time")
+    @classmethod
+    def _valid_time(cls, v: str) -> str:
+        parse_hhmm(v)  # raises ValueError -> 422 on bad "HH:MM"
+        return v
+
+
+class EntryExitOverride(BaseModel):
+    """A PARTIAL entry/exit module for a ``custom_days`` per-date override: any
+    field present overrides the global module for that day; absent inherits."""
+
+    time: str | None = None
+    snap_tolerance_minutes: float | None = Field(default=None, gt=0)
+    conditions: list[Condition] | None = None
+
+    @field_validator("time")
+    @classmethod
+    def _valid_time(cls, v: str | None) -> str | None:
+        if v is not None:
+            parse_hhmm(v)
+        return v
+
+
 class CustomDay(BaseModel):
-    """A single per-date control (unified exclude + time-override).
+    """A single per-date control (unified exclude + full per-day override).
 
     ``exclude=True`` -> the day is NOT traded; it is still emitted in the
-    response ``days`` array with status ``"excluded"`` so the calendar can show
-    it as an intentionally-skipped day. When ``exclude=True`` any ``entry_time``
-    / ``exit_time`` are ignored (no conflict). When ``exclude=False`` a present
-    ``entry_time`` / ``exit_time`` overrides the request default for that date;
-    a missing side falls back to the request default.
+    response ``days`` array with status ``"excluded"`` (calendar shows it as an
+    intentional skip). ``exclude`` WINS over any override. Otherwise a present
+    ``entry`` / ``exit`` partial module overrides the global module for that
+    date, field by field; absent fields inherit the global default.
     """
 
     date: str
     exclude: bool = False
-    entry_time: str | None = None
-    exit_time: str | None = None
-
-    @field_validator("entry_time", "exit_time")
-    @classmethod
-    def _valid_hhmm(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        parse_hhmm(v)  # raises ValueError -> 422 on bad "HH:MM"
-        return v
+    entry: EntryExitOverride | None = None
+    exit: EntryExitOverride | None = None
 
 
 class RunRequest(BaseModel):
     start_date: str
     end_date: str
-    entry_time: str = "10:00"
-    exit_time: str = "15:45"
+    # v2: entry/exit are rule MODULES (time + snap tolerance + conditions),
+    # superseding the flat entry_time / exit_time / snap_tolerance_minutes.
+    entry: EntryExitModule = Field(default_factory=EntryExitModule)
+    exit: EntryExitModule = Field(
+        default_factory=lambda: EntryExitModule(time="15:45")
+    )
     expiry_mode: Literal["0DTE", "NDTE"] = "0DTE"
     dte: int = Field(default=0, ge=0)
     straddle_side: Literal["long", "short"] = "long"
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
-    snap_tolerance_minutes: float = Field(default=10.0, gt=0)
-    # Unified per-date control: SUPERSEDES the old exception_dates +
-    # date_overrides pair (see DESIGN.md §API contract).
+    # Unified per-date control (exclude + full per-day override).
     custom_days: list[CustomDay] = Field(default_factory=list)
 
 
@@ -106,6 +189,10 @@ class DayPlan:
     date_int: int
     entry_ts: datetime  # UTC
     exit_ts: datetime  # UTC
+    entry_tol: float
+    exit_tol: float
+    entry_conditions: list  # engine condition dataclasses
+    exit_conditions: list
     excluded: bool
 
 
@@ -140,36 +227,33 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
             ),
         )
 
-    # Fold custom_days into an excluded-set + a per-date time-override map.
-    # exclude:true wins (times ignored); otherwise a present entry/exit_time
-    # overrides the default for that date (a missing side falls back below).
+    # Fold custom_days into an excluded-set + a per-date override map.
+    # exclude:true wins (override ignored); otherwise the present entry/exit
+    # partial module overrides the global module for that date, field by field.
     excluded: set[date] = set()
-    overrides: dict[date, tuple[str | None, str | None]] = {}
+    overrides: dict[date, tuple[EntryExitOverride | None, EntryExitOverride | None]] = {}
     for cd in req.custom_days:
         cd_date = _parse_date(cd.date, "custom_days")
         if cd.exclude:
             excluded.add(cd_date)
             continue
-        if cd.entry_time is not None or cd.exit_time is not None:
-            overrides[cd_date] = (cd.entry_time, cd.exit_time)
+        if cd.entry is not None or cd.exit is not None:
+            overrides[cd_date] = (cd.entry, cd.exit)
 
     plans: list[DayPlan] = []
     d = start
     one = timedelta(days=1)
     while d <= end:
         if d.weekday() < 5:  # Mon-Fri
-            ov = overrides.get(d)
-            if ov is None:
-                entry_time, exit_time = req.entry_time, req.exit_time
-            else:
-                entry_time = ov[0] if ov[0] is not None else req.entry_time
-                exit_time = ov[1] if ov[1] is not None else req.exit_time
-            entry_ts = resolve_et_to_utc(d, entry_time, _TZ)
-            exit_ts = resolve_et_to_utc(d, exit_time, _TZ)
+            e_ov, x_ov = overrides.get(d, (None, None))
+            e_time, e_tol, e_conds = _resolve_module(req.entry, e_ov)
+            x_time, x_tol, x_conds = _resolve_module(req.exit, x_ov)
+            entry_ts = resolve_et_to_utc(d, e_time, _TZ)
+            exit_ts = resolve_et_to_utc(d, x_time, _TZ)
             if exit_ts <= entry_ts:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"{d.isoformat()}: exit_time must be after entry_time",
+                    detail=f"{d.isoformat()}: exit time must be after entry time",
                 )
             plans.append(
                 DayPlan(
@@ -177,6 +261,10 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
                     date_int=d.year * 10000 + d.month * 100 + d.day,
                     entry_ts=entry_ts,
                     exit_ts=exit_ts,
+                    entry_tol=e_tol,
+                    exit_tol=x_tol,
+                    entry_conditions=_to_engine_conditions(e_conds),
+                    exit_conditions=_to_engine_conditions(x_conds),
                     excluded=d in excluded,
                 )
             )
@@ -184,6 +272,25 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
     if not plans:
         raise HTTPException(status_code=400, detail="no trading days in range")
     return plans
+
+
+def _resolve_module(
+    base: EntryExitModule, ov: EntryExitOverride | None
+) -> tuple[str, float, list]:
+    """Merge a global module with an optional per-day partial override.
+
+    Any override field that is present wins; absent fields inherit ``base``.
+    """
+    if ov is None:
+        return base.time, base.snap_tolerance_minutes, base.conditions
+    time_ = ov.time if ov.time is not None else base.time
+    tol = (
+        ov.snap_tolerance_minutes
+        if ov.snap_tolerance_minutes is not None
+        else base.snap_tolerance_minutes
+    )
+    conds = ov.conditions if ov.conditions is not None else base.conditions
+    return time_, tol, conds
 
 
 def _pick_expiry(all_exps: list[date], day: date, mode: str, dte: int) -> date | None:
@@ -202,6 +309,17 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _serialize_leg(leg: Any) -> dict[str, Any]:
+    return {
+        "entry_ts": _iso(leg.entry_ts),
+        "entry_price": leg.entry_price,
+        "exit_ts": _iso(leg.exit_ts),
+        "exit_price": leg.exit_price,
+        "exit_conditions_met": leg.exit_conditions_met,
+        "pnl_pts": leg.pnl_pts,
+    }
+
+
 def _serialize_day(r: DayResult) -> dict[str, Any]:
     out: dict[str, Any] = {
         "date": _int_to_iso(r.date),
@@ -213,7 +331,15 @@ def _serialize_day(r: DayResult) -> dict[str, Any]:
         "exit": None,
         "hedge_trades": [],
         "pnl": None,
+        "legs": None,
+        "straddle_on_ts": _iso(r.straddle_on_ts) if r.straddle_on_ts else None,
+        "straddle_off_ts": _iso(r.straddle_off_ts) if r.straddle_off_ts else None,
     }
+    if r.legs:
+        out["legs"] = {
+            "call": _serialize_leg(r.legs.call),
+            "put": _serialize_leg(r.legs.put),
+        }
     if r.entry:
         out["entry"] = {
             "ts": _iso(r.entry.ts),
@@ -280,6 +406,7 @@ def _warnings(results: list[DayResult]) -> list[str]:
     # intentional — they never generate a warning here.
     labels = {
         "no_quote_within_tolerance": "no quote within tolerance",
+        "entry_conditions_unmet": "entry conditions unmet",
         "no_expiry": "no matching expiry",
         "no_contract": "no ATM contract",
     }
@@ -308,18 +435,23 @@ async def _process_day(
     plan: DayPlan,
     all_exps: list[date],
     exp_to_objs: dict[date, list[int]],
-    pad: timedelta,
-    tol: float,
+    tick_size: float,
 ) -> DayResult:
     """Fetch marks + simulate a single (non-excluded) trading day (async I/O)."""
     expiry = _pick_expiry(all_exps, plan.day, req.expiry_mode, req.dte)
     if expiry is None:
         return DayResult(date=plan.date_int, status="skipped", skip_reason="no_expiry")
 
-    win_start = plan.entry_ts - pad
-    win_end = plan.exit_ts + pad
+    # Window: from the session open (09:30 ET, the max_underlying_move day-open
+    # reference) or entry, whichever is earlier, out to the exit-scan horizon
+    # (exit target + its snap tolerance) — plus a small buffer both sides.
+    buf = timedelta(minutes=2.0)
+    session_open = resolve_et_to_utc(plan.day, _SESSION_OPEN_ET, _TZ)
+    win_start = min(plan.entry_ts, session_open) - buf
+    win_end = plan.exit_ts + timedelta(minutes=plan.exit_tol) + buf
     es_bars = await reader.fetch_es_future_1m(win_start, win_end, on_or_after=plan.day)
-    es1 = snap_nearest(es_bars, plan.entry_ts, tol)
+    # ATM reference: ES nearest the entry target within the entry tolerance.
+    es1 = snap_nearest(es_bars, plan.entry_ts, plan.entry_tol)
     if es1 is None:
         return DayResult(
             date=plan.date_int,
@@ -350,6 +482,7 @@ async def _process_day(
     _oid, strike, call_id, put_id = chosen
     call_marks = await reader.fetch_option_1m(call_id, win_start, win_end)
     put_marks = await reader.fetch_option_1m(put_id, win_start, win_end)
+    es_day_open = es_bars[0].price if es_bars else None
 
     return simulate_day(
         date_int=plan.date_int,
@@ -361,10 +494,15 @@ async def _process_day(
         put_marks=put_marks,
         entry_ts=plan.entry_ts,
         exit_ts=plan.exit_ts,
-        snap_tolerance_minutes=tol,
+        entry_tol=plan.entry_tol,
+        exit_tol=plan.exit_tol,
+        entry_conditions=plan.entry_conditions,
+        exit_conditions=plan.exit_conditions,
+        tick_size=tick_size,
         hedge_enabled=req.hedge.enabled,
         interval_minutes=req.hedge.interval_minutes,
         delta_band=req.hedge.delta_band,
+        es_day_open=es_day_open,
         multiplier=ES_MULTIPLIER,
     )
 
@@ -394,8 +532,8 @@ async def run_backtest(
         exp_to_objs.setdefault(exp, []).append(oid)
     all_exps = sorted(exp_to_objs)
 
-    tol = req.snap_tolerance_minutes
-    pad = timedelta(minutes=tol + 2.0)
+    # Tick size for the max_spread 1-tick floor (sourced once per run).
+    tick_size = await reader.get_option_tick_size()
 
     results: list[DayResult] = []
     days_done = 0
@@ -410,7 +548,7 @@ async def run_backtest(
             continue
 
         results.append(
-            await _process_day(reader, req, plan, all_exps, exp_to_objs, pad, tol)
+            await _process_day(reader, req, plan, all_exps, exp_to_objs, tick_size)
         )
         days_done += 1
         if progress_cb is not None:

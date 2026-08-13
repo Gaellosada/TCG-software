@@ -159,7 +159,7 @@ def test_validation_400_before_job_creation(
     # exit_time <= entry_time is rejected synchronously by count_trading_days.
     resp = client.post(
         "/api/intraday-backtest/run-async",
-        json=_body(entry_time="15:00", exit_time="10:00"),
+        json=_body(entry={"time": "15:00"}, exit={"time": "10:00"}),
     )
     assert resp.status_code == 400
     assert "job_id" not in resp.json()
@@ -194,6 +194,9 @@ class _FakeReader:
 
     async def list_expirations(self, oids: Any, start: Any) -> list[Any]:
         return []
+
+    async def get_option_tick_size(self) -> float:
+        return 0.05
 
     async def fetch_es_future_1m(self, *a: Any, **k: Any) -> list[Any]:
         return []
