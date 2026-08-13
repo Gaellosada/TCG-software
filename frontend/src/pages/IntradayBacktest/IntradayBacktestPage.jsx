@@ -192,7 +192,7 @@ export default function IntradayBacktestPage() {
         </p>
       </header>
 
-      <Card title="Parameters">
+      <Card title="Parameters" bodyClassName={styles.cardBody}>
         <div className={styles.controlsGrid}>
           {/* Date range — bounded by the /meta window. */}
           <label className={styles.field}>
@@ -447,7 +447,7 @@ export default function IntradayBacktestPage() {
       )}
 
       {agg && (
-        <Card title="Aggregate">
+        <Card title="Aggregate" bodyClassName={styles.cardBody}>
           <div className={styles.statsGrid} data-testid="aggregate-stats">
             <div className={styles.stat}>
               <span className={styles.statLabel}>Days</span>
@@ -492,7 +492,7 @@ export default function IntradayBacktestPage() {
       )}
 
       {equityTraces && (
-        <Card title="Equity curve (cumulative P&L)">
+        <Card title="Equity curve (cumulative P&L)" bodyClassName={styles.cardBody}>
           <div className={styles.chartBox}>
             <Chart
               traces={equityTraces}
@@ -504,7 +504,7 @@ export default function IntradayBacktestPage() {
       )}
 
       {days.length > 0 && (
-        <Card title="Backtest days">
+        <Card title="Backtest days" bodyClassName={styles.cardBody}>
           <div className={styles.tableWrap}>
             <table className={styles.daysTable} data-testid="days-table">
               <thead>

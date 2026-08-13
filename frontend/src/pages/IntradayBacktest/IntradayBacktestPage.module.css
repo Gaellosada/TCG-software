@@ -1,18 +1,29 @@
 .page {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   gap: 1rem;
+  padding: 24px 32px 48px;
 }
 
 .pageHeader h1 {
   margin: 0 0 0.25rem;
   font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text-primary);
 }
 
 .pageHeader p {
   margin: 0;
-  color: var(--text-muted, #888);
+  color: var(--text-secondary);
   font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.cardBody {
+  padding: 16px;
 }
 
 .controlsGrid {
@@ -30,24 +41,41 @@
 
 .field > span,
 .field > .fieldLabel {
-  color: var(--text-muted, #888);
+  color: var(--text-secondary);
   font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .field input,
 .field select {
   padding: 0.4rem 0.5rem;
-  border: 1px solid var(--border-color, #333);
-  border-radius: 6px;
-  background: var(--surface, #1a1a1a);
-  color: var(--text, #eee);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
   font: inherit;
+  font-size: 0.85rem;
+}
+
+.field input:focus,
+.field select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.field input:disabled,
+.field select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .inlineRow {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .checkboxRow {
@@ -57,6 +85,7 @@
 
 .checkboxRow input {
   width: auto;
+  accent-color: var(--accent);
 }
 
 .exceptionList {
@@ -74,63 +103,85 @@
   gap: 0.35rem;
   padding: 0.2rem 0.5rem;
   border-radius: 999px;
-  background: var(--surface-alt, #2a2a2a);
-  border: 1px solid var(--border-color, #333);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
   font-size: 0.8rem;
 }
 
 .chipRemove {
   border: none;
   background: transparent;
-  color: var(--text-muted, #999);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 0.9rem;
   line-height: 1;
   padding: 0;
 }
 
+.chipRemove:hover {
+  color: var(--error);
+}
+
 .runRow {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .runBtn {
-  padding: 0.5rem 1.1rem;
+  padding: 6px 20px;
   border: none;
-  border-radius: 6px;
-  background: var(--accent, #3b82f6);
+  border-radius: var(--radius-md);
+  background: var(--accent);
   color: #fff;
-  font-weight: 600;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
   cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.runBtn:hover:not(:disabled) {
+  opacity: 0.9;
 }
 
 .runBtn:disabled {
-  opacity: 0.55;
-  cursor: default;
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .smallBtn {
   padding: 0.35rem 0.7rem;
-  border: 1px solid var(--border-color, #333);
-  border-radius: 6px;
-  background: var(--surface, #1a1a1a);
-  color: var(--text, #eee);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.8rem;
   cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.smallBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .error {
-  color: var(--danger, #ef4444);
+  color: var(--error);
   font-size: 0.9rem;
 }
 
 .warnings {
   margin: 0;
   padding: 0.6rem 0.8rem;
-  border-radius: 6px;
-  background: color-mix(in srgb, #f59e0b 15%, transparent);
-  border: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
-  color: var(--text, #eee);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent-warm) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-warm) 40%, transparent);
+  color: var(--text-primary);
   font-size: 0.85rem;
 }
 
@@ -155,16 +206,17 @@
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: var(--text-muted, #888);
+  color: var(--text-secondary);
 }
 
 .statValue {
   font-size: 1.1rem;
   font-weight: 600;
+  color: var(--text-primary);
 }
 
-.positive { color: var(--success, #22c55e); }
-.negative { color: var(--danger, #ef4444); }
+.positive { color: var(--success); }
+.negative { color: var(--error); }
 
 .tableWrap {
   overflow-x: auto;
@@ -174,13 +226,22 @@
   width: 100%;
   border-collapse: collapse;
   font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.daysTable th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .daysTable th,
 .daysTable td {
   padding: 0.4rem 0.6rem;
   text-align: right;
-  border-bottom: 1px solid var(--border-color, #2a2a2a);
+  border-bottom: 1px solid var(--border-primary);
 }
 
 .daysTable th:first-child,
@@ -191,7 +252,7 @@
 }
 
 .skippedRow {
-  color: var(--text-muted, #888);
+  color: var(--text-muted);
   font-style: italic;
 }
 
@@ -204,13 +265,13 @@
 }
 
 .statusOk {
-  background: color-mix(in srgb, #22c55e 20%, transparent);
-  color: var(--success, #22c55e);
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
 }
 
 .statusSkipped {
-  background: color-mix(in srgb, #f59e0b 20%, transparent);
-  color: #f59e0b;
+  background: color-mix(in srgb, var(--accent-warm) 18%, transparent);
+  color: var(--accent-warm);
 }
 
 .chartBox {
