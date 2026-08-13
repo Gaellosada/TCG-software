@@ -1,9 +1,17 @@
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import Card from '../../components/Card';
 import Chart from '../../components/Chart';
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/format';
-import { getIntradayBacktestMeta, runIntradayBacktest } from '../../api/intradayBacktest';
+import {
+  getIntradayBacktestMeta,
+  startIntradayBacktest,
+  getIntradayBacktestProgress,
+} from '../../api/intradayBacktest';
 import styles from './IntradayBacktestPage.module.css';
+
+// Progress poll cadence (ms). Kept small so the "X / N days" readout tracks the
+// backend job closely without hammering it.
+const POLL_INTERVAL_MS = 400;
 
 // ---------------------------------------------------------------------------
 // Intraday Options Backtesting page (v1).
@@ -63,6 +71,23 @@ export default function IntradayBacktestPage() {
   const [result, setResult] = useState(null);
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState(null);
+  const [progress, setProgress] = useState(null); // { days_done, total_days }
+
+  // Poll bookkeeping: the active interval id and an in-flight guard so a slow
+  // poll can never overlap the next tick.
+  const pollRef = useRef(null);
+  const inFlightRef = useRef(false);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    inFlightRef.current = false;
+  }, []);
+
+  // Clear any live poll if the page unmounts mid-run.
+  useEffect(() => stopPolling, [stopPolling]);
 
   // Load meta (window / roots) once on mount and seed the default date range.
   useEffect(() => {
@@ -142,18 +167,58 @@ export default function IntradayBacktestPage() {
     return null;
   }, [running, form]);
 
+  // Async run: start a background job, then poll its progress until done/error.
+  // Validation failures (400) surface synchronously from the start call.
   const onRun = useCallback(async () => {
     setRunError(null);
+    setResult(null);
+    setProgress({ days_done: 0, total_days: 0 });
     setRunning(true);
-    try {
-      const res = await runIntradayBacktest(buildPayload());
-      setResult(res);
-    } catch (err) {
+
+    const fail = (err) => {
+      stopPolling();
       setRunError(err && err.message ? err.message : 'Backtest failed.');
-    } finally {
       setRunning(false);
+      setProgress(null);
+    };
+
+    let jobId;
+    try {
+      const started = await startIntradayBacktest(buildPayload());
+      jobId = started && started.job_id;
+    } catch (err) {
+      fail(err);
+      return;
     }
-  }, [buildPayload]);
+    if (!jobId) {
+      fail(new Error('Backtest failed to start.'));
+      return;
+    }
+
+    pollRef.current = setInterval(async () => {
+      if (inFlightRef.current) return; // guard against overlapping polls
+      inFlightRef.current = true;
+      try {
+        const p = await getIntradayBacktestProgress(jobId);
+        setProgress({ days_done: p.days_done, total_days: p.total_days });
+        if (p.status === 'done') {
+          stopPolling();
+          setResult(p.result);
+          setRunning(false);
+          setProgress(null);
+        } else if (p.status === 'error') {
+          stopPolling();
+          setRunError(p.error || 'Backtest failed.');
+          setRunning(false);
+          setProgress(null);
+        }
+      } catch (err) {
+        fail(err);
+      } finally {
+        inFlightRef.current = false;
+      }
+    }, POLL_INTERVAL_MS);
+  }, [buildPayload, stopPolling]);
 
   // Equity-curve trace for the shared Chart (cumulative P&L in USD).
   const equityTraces = useMemo(() => {
@@ -435,6 +500,31 @@ export default function IntradayBacktestPage() {
           )}
           {runError && <span className={styles.error} role="alert">{runError}</span>}
         </div>
+
+        {running && progress && (
+          <div className={styles.progressBox} data-testid="run-progress" role="status">
+            <span className={styles.progressText}>
+              Running… {progress.days_done} / {progress.total_days} days
+            </span>
+            <div
+              className={styles.progressTrack}
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={progress.total_days || 0}
+              aria-valuenow={progress.days_done}
+            >
+              <div
+                className={styles.progressFill}
+                data-testid="run-progress-fill"
+                style={{
+                  width: `${progress.total_days > 0
+                    ? Math.min(100, (progress.days_done / progress.total_days) * 100)
+                    : 0}%`,
+                }}
+              />
+            </div>
+          </div>
+        )}
       </Card>
 
       {warnings.length > 0 && (

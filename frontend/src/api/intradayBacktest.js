@@ -63,3 +63,37 @@ export async function runIntradayBacktest(params, { signal } = {}) {
     rethrowClassified(err);
   }
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/intraday-backtest/run-async
+//   body: the PINNED request schema (identical to /run).
+//   → { job_id } — start a background run; poll progress below.
+// Validation errors (out-of-window, T2<=T1) still 400 synchronously here.
+// ---------------------------------------------------------------------------
+export async function startIntradayBacktest(params, { signal } = {}) {
+  try {
+    return await fetchApi('/intraday-backtest/run-async', {
+      method: 'POST',
+      body: JSON.stringify(params),
+      ...(signal ? { signal } : {}),
+    });
+  } catch (err) {
+    rethrowClassified(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/intraday-backtest/progress/{jobId}
+//   → { status: 'running'|'done'|'error', days_done, total_days,
+//       result: <full /run response when done, else null>, error }
+// ---------------------------------------------------------------------------
+export async function getIntradayBacktestProgress(jobId, { signal } = {}) {
+  try {
+    return await fetchApi(
+      `/intraday-backtest/progress/${encodeURIComponent(jobId)}`,
+      signal ? { signal } : {},
+    );
+  } catch (err) {
+    rethrowClassified(err);
+  }
+}

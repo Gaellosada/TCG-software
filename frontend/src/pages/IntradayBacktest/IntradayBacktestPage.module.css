@@ -175,6 +175,36 @@
   font-size: 0.9rem;
 }
 
+.progressBox {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+  max-width: 420px;
+}
+
+.progressText {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.progressTrack {
+  height: 8px;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
 .warnings {
   margin: 0;
   padding: 0.6rem 0.8rem;

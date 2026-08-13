@@ -13,8 +13,11 @@ mirrors of the engine's frozen dataclasses (types <- data/engine <- core).
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
+import secrets
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -255,10 +258,99 @@ def _warnings(results: list[DayResult]) -> list[str]:
 # --------------------------------------------------------------------------- #
 # Orchestration (async I/O + pure engine)
 # --------------------------------------------------------------------------- #
-async def run_backtest(reader: IntradayV2Reader, req: RunRequest) -> dict[str, Any]:
-    """Full run: resolve days, fetch marks per day, simulate, aggregate."""
+def count_trading_days(req: RunRequest) -> int:
+    """Authoritative progress denominator: resolved weekdays, exceptions removed.
+
+    Validates the request (raises ``HTTPException(400)`` on bad input, exactly
+    like :func:`resolve_day_plans`) so the async endpoint can reject bad
+    requests *before* creating a job, and pins ``total_days`` up front.
+    """
+    return sum(1 for p in resolve_day_plans(req) if not p.excluded)
+
+
+async def _process_day(
+    reader: IntradayV2Reader,
+    req: RunRequest,
+    plan: DayPlan,
+    all_exps: list[date],
+    exp_to_objs: dict[date, list[int]],
+    pad: timedelta,
+    tol: float,
+) -> DayResult:
+    """Fetch marks + simulate a single (non-excluded) trading day (async I/O)."""
+    expiry = _pick_expiry(all_exps, plan.day, req.expiry_mode, req.dte)
+    if expiry is None:
+        return DayResult(date=plan.date_int, status="skipped", skip_reason="no_expiry")
+
+    win_start = plan.entry_ts - pad
+    win_end = plan.exit_ts + pad
+    es_bars = await reader.fetch_es_future_1m(win_start, win_end, on_or_after=plan.day)
+    es1 = snap_nearest(es_bars, plan.entry_ts, tol)
+    if es1 is None:
+        return DayResult(
+            date=plan.date_int,
+            status="skipped",
+            skip_reason="no_quote_within_tolerance",
+            expiry=expiry,
+        )
+
+    chosen: tuple[int, float, int, int] | None = None
+    for oid in exp_to_objs[expiry]:
+        strikes = await reader.list_strikes(oid, expiry)
+        if not strikes:
+            continue
+        strike = select_atm_strike(es1.price, strikes)
+        call_id = await reader.get_option_contract_id(oid, expiry, strike, "call")
+        put_id = await reader.get_option_contract_id(oid, expiry, strike, "put")
+        if call_id is not None and put_id is not None:
+            chosen = (oid, strike, call_id, put_id)
+            break
+    if chosen is None:
+        return DayResult(
+            date=plan.date_int,
+            status="skipped",
+            skip_reason="no_contract",
+            expiry=expiry,
+        )
+
+    _oid, strike, call_id, put_id = chosen
+    call_marks = await reader.fetch_option_1m(call_id, win_start, win_end)
+    put_marks = await reader.fetch_option_1m(put_id, win_start, win_end)
+
+    return simulate_day(
+        date_int=plan.date_int,
+        side=req.straddle_side,
+        strike=strike,
+        expiry=expiry,
+        es_bars=es_bars,
+        call_marks=call_marks,
+        put_marks=put_marks,
+        entry_ts=plan.entry_ts,
+        exit_ts=plan.exit_ts,
+        snap_tolerance_minutes=tol,
+        hedge_enabled=req.hedge.enabled,
+        interval_minutes=req.hedge.interval_minutes,
+        delta_band=req.hedge.delta_band,
+        multiplier=ES_MULTIPLIER,
+    )
+
+
+async def run_backtest(
+    reader: IntradayV2Reader,
+    req: RunRequest,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """Full run: resolve days, fetch marks per day, simulate, aggregate.
+
+    ``progress_cb(days_done, total_days)`` — if given — is invoked once per
+    *non-excluded* trading day as the loop advances (``days_done`` climbs from
+    1 to ``total_days``). Excluded days are appended to the results but never
+    tick progress: ``total_days`` is the exceptions-removed weekday count, the
+    authoritative denominator shared with :func:`count_trading_days`.
+    """
     plans = resolve_day_plans(req)
     start = plans[0].day
+    total_days = sum(1 for p in plans if not p.excluded)
 
     roots = await reader.list_option_roots()
     option_object_ids = [int(r["object_id"]) for r in roots]
@@ -272,6 +364,7 @@ async def run_backtest(reader: IntradayV2Reader, req: RunRequest) -> dict[str, A
     pad = timedelta(minutes=tol + 2.0)
 
     results: list[DayResult] = []
+    days_done = 0
     for plan in plans:
         if plan.excluded:
             results.append(
@@ -279,72 +372,12 @@ async def run_backtest(reader: IntradayV2Reader, req: RunRequest) -> dict[str, A
             )
             continue
 
-        expiry = _pick_expiry(all_exps, plan.day, req.expiry_mode, req.dte)
-        if expiry is None:
-            results.append(
-                DayResult(date=plan.date_int, status="skipped", skip_reason="no_expiry")
-            )
-            continue
-
-        win_start = plan.entry_ts - pad
-        win_end = plan.exit_ts + pad
-        es_bars = await reader.fetch_es_future_1m(win_start, win_end, on_or_after=plan.day)
-        es1 = snap_nearest(es_bars, plan.entry_ts, tol)
-        if es1 is None:
-            results.append(
-                DayResult(
-                    date=plan.date_int,
-                    status="skipped",
-                    skip_reason="no_quote_within_tolerance",
-                    expiry=expiry,
-                )
-            )
-            continue
-
-        chosen: tuple[int, float, int, int] | None = None
-        for oid in exp_to_objs[expiry]:
-            strikes = await reader.list_strikes(oid, expiry)
-            if not strikes:
-                continue
-            strike = select_atm_strike(es1.price, strikes)
-            call_id = await reader.get_option_contract_id(oid, expiry, strike, "call")
-            put_id = await reader.get_option_contract_id(oid, expiry, strike, "put")
-            if call_id is not None and put_id is not None:
-                chosen = (oid, strike, call_id, put_id)
-                break
-        if chosen is None:
-            results.append(
-                DayResult(
-                    date=plan.date_int,
-                    status="skipped",
-                    skip_reason="no_contract",
-                    expiry=expiry,
-                )
-            )
-            continue
-
-        _oid, strike, call_id, put_id = chosen
-        call_marks = await reader.fetch_option_1m(call_id, win_start, win_end)
-        put_marks = await reader.fetch_option_1m(put_id, win_start, win_end)
-
         results.append(
-            simulate_day(
-                date_int=plan.date_int,
-                side=req.straddle_side,
-                strike=strike,
-                expiry=expiry,
-                es_bars=es_bars,
-                call_marks=call_marks,
-                put_marks=put_marks,
-                entry_ts=plan.entry_ts,
-                exit_ts=plan.exit_ts,
-                snap_tolerance_minutes=tol,
-                hedge_enabled=req.hedge.enabled,
-                interval_minutes=req.hedge.interval_minutes,
-                delta_band=req.hedge.delta_band,
-                multiplier=ES_MULTIPLIER,
-            )
+            await _process_day(reader, req, plan, all_exps, exp_to_objs, pad, tol)
         )
+        days_done += 1
+        if progress_cb is not None:
+            progress_cb(days_done, total_days)
 
     aggregate = aggregate_days(results)
     return {
@@ -357,6 +390,63 @@ async def run_backtest(reader: IntradayV2Reader, req: RunRequest) -> dict[str, A
         "aggregate": _serialize_aggregate(aggregate),
         "warnings": _warnings(results),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Async job store (in-memory, single-process — see PROBLEMS.md)
+# --------------------------------------------------------------------------- #
+@dataclass
+class _Job:
+    """A background backtest run and its live progress."""
+
+    status: Literal["running", "done", "error"] = "running"
+    days_done: int = 0
+    total_days: int = 0
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    task: asyncio.Task[Any] | None = field(default=None, repr=False)
+
+
+# Keyed by job_id. Bounded by ``_JOB_CAP``: on each new job we evict finished
+# jobs (oldest first, insertion-ordered dict) once over the cap, so an abandoned
+# ``done``/``error`` job that is never fetched can't grow the store without
+# bound. A successfully fetched ``done``/``error`` job is dropped immediately
+# (see ``get_progress``).
+_JOBS: dict[str, _Job] = {}
+_JOB_CAP = 64
+
+
+def _new_job_id() -> str:
+    # Collision-safe without wall-clock/uuid (keeps tests determinism-friendly).
+    return secrets.token_hex(8)
+
+
+def _prune_jobs() -> None:
+    if len(_JOBS) < _JOB_CAP:
+        return
+    for jid in list(_JOBS):
+        if len(_JOBS) < _JOB_CAP:
+            break
+        if _JOBS[jid].status in ("done", "error"):
+            del _JOBS[jid]
+
+
+async def _run_job(job: _Job, reader: IntradayV2Reader, req: RunRequest) -> None:
+    """Background task body: run the backtest, streaming progress into ``job``."""
+
+    def _cb(done: int, total: int) -> None:
+        job.days_done = done
+        job.total_days = total
+
+    try:
+        result = await run_backtest(reader, req, progress_cb=_cb)
+        job.result = result
+        job.days_done = job.total_days
+        job.status = "done"
+    except Exception as exc:  # noqa: BLE001 - surfaced to the client as error
+        logger.exception("intraday backtest job failed")
+        job.error = str(exc) or exc.__class__.__name__
+        job.status = "error"
 
 
 # --------------------------------------------------------------------------- #
@@ -388,3 +478,45 @@ async def get_meta(request: Request) -> dict[str, Any]:
 async def post_run(request: Request, req: RunRequest) -> dict[str, Any]:
     reader = IntradayV2Reader(request.app.state.dwh_pool)
     return await run_backtest(reader, req)
+
+
+@router.post("/run-async")
+async def post_run_async(request: Request, req: RunRequest) -> dict[str, str]:
+    """Start a backtest as a background job; poll ``/progress/{job_id}``.
+
+    Validation (out-of-window, inverted range, T2<=T1, no trading days) runs
+    synchronously and 400s *before* any job is created — same contract as
+    ``/run``. On success the resolved weekday count pins ``total_days`` up front.
+    """
+    total_days = count_trading_days(req)  # raises HTTPException(400) on bad input
+
+    reader = IntradayV2Reader(request.app.state.dwh_pool)
+    job = _Job(status="running", days_done=0, total_days=total_days)
+    _prune_jobs()
+    job_id = _new_job_id()
+    _JOBS[job_id] = job
+    job.task = asyncio.create_task(_run_job(job, reader, req))
+    return {"job_id": job_id}
+
+
+@router.get("/progress/{job_id}")
+async def get_progress(job_id: str) -> dict[str, Any]:
+    """Live progress for a job. Unknown id → 404.
+
+    A finished job (``done``/``error``) is dropped from the store on this, the
+    first fetch that observes its terminal state — the client polls until then
+    and stops, so the single terminal snapshot returned here is authoritative.
+    """
+    job = _JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"unknown job_id {job_id!r}")
+    snapshot = {
+        "status": job.status,
+        "days_done": job.days_done,
+        "total_days": job.total_days,
+        "result": job.result,
+        "error": job.error,
+    }
+    if job.status in ("done", "error"):
+        _JOBS.pop(job_id, None)
+    return snapshot

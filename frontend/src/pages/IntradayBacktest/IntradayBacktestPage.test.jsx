@@ -64,24 +64,42 @@ const RUN_RESPONSE = {
 };
 
 // ---------------------------------------------------------------------------
-// Global fetch mock. Captures the POST /run body so we can assert the payload
-// matches the pinned request schema.
+// Global fetch mock. The run now uses the ASYNC flow:
+//   POST /run-async → { job_id }  then poll  GET /progress/{job_id}.
+// Captures the POST /run-async body so we can assert the payload matches the
+// pinned request schema, and returns a configurable progress sequence
+// (default: one 'running' snapshot, then 'done' carrying the pinned result).
 // ---------------------------------------------------------------------------
 let lastRunBody = null;
+let progressSeq = null;
+let progressCalls = 0;
+
+const DEFAULT_PROGRESS = [
+  { status: 'running', days_done: 1, total_days: 3, result: null, error: null },
+  { status: 'done', days_done: 3, total_days: 3, result: RUN_RESPONSE, error: null },
+];
 
 function jsonResp(payload) {
   return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) });
 }
 
-function installFetch() {
+function installFetch(opts = {}) {
   lastRunBody = null;
-  const fn = vi.fn((url, opts = {}) => {
-    if (String(url).endsWith('/intraday-backtest/meta')) return jsonResp(META);
-    if (String(url).endsWith('/intraday-backtest/run')) {
-      lastRunBody = JSON.parse(opts.body);
-      return jsonResp(RUN_RESPONSE);
+  progressCalls = 0;
+  progressSeq = opts.progress || DEFAULT_PROGRESS;
+  const fn = vi.fn((url, options = {}) => {
+    const u = String(url);
+    if (u.endsWith('/intraday-backtest/meta')) return jsonResp(META);
+    if (u.endsWith('/intraday-backtest/run-async')) {
+      lastRunBody = JSON.parse(options.body);
+      return jsonResp({ job_id: 'job-123' });
     }
-    return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    if (u.includes('/intraday-backtest/progress/')) {
+      const idx = Math.min(progressCalls, progressSeq.length - 1);
+      progressCalls += 1;
+      return jsonResp(progressSeq[idx]);
+    }
+    return Promise.reject(new Error(`unexpected fetch: ${u}`));
   });
   vi.stubGlobal('fetch', fn);
   return fn;
@@ -155,8 +173,8 @@ describe('IntradayBacktestPage', () => {
 
     await waitFor(() => expect(lastRunBody).not.toBeNull());
 
-    // Assert the run POST went to the right endpoint.
-    const runCall = fetchFn.mock.calls.find((c) => String(c[0]).endsWith('/intraday-backtest/run'));
+    // Assert the run POST went to the async endpoint.
+    const runCall = fetchFn.mock.calls.find((c) => String(c[0]).endsWith('/intraday-backtest/run-async'));
     expect(runCall).toBeTruthy();
     expect(runCall[1].method).toBe('POST');
 
@@ -182,7 +200,7 @@ describe('IntradayBacktestPage', () => {
     await renderReady();
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
 
-    await waitFor(() => expect(screen.getByTestId('days-table')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('days-table')).toBeTruthy(), { timeout: 3000 });
 
     // Days rows present (3 days).
     expect(screen.getAllByTestId('day-row').length).toBe(3);
@@ -203,7 +221,7 @@ describe('IntradayBacktestPage', () => {
   it('visibly flags skipped days with their skip_reason', async () => {
     await renderReady();
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
-    await waitFor(() => expect(screen.getByTestId('days-table')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('days-table')).toBeTruthy(), { timeout: 3000 });
 
     const table = screen.getByTestId('days-table');
     const skipped = table.querySelectorAll('[data-skipped="true"]');
@@ -216,7 +234,66 @@ describe('IntradayBacktestPage', () => {
   it('surfaces the warnings array', async () => {
     await renderReady();
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
-    await waitFor(() => expect(screen.getByTestId('warnings')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('warnings')).toBeTruthy(), { timeout: 3000 });
     expect(screen.getByTestId('warnings').textContent).toMatch(/2 days skipped/);
+  });
+
+  it('shows live "X / N days" progress and disables Run while the job runs', async () => {
+    // Keep the job in a 'running' state so the progress UI stays mounted long
+    // enough to assert (first + subsequent polls both report running).
+    installFetch({
+      progress: [
+        { status: 'running', days_done: 1, total_days: 3, result: null, error: null },
+        { status: 'running', days_done: 2, total_days: 3, result: null, error: null },
+      ],
+    });
+    await renderReady();
+
+    const runBtn = screen.getByRole('button', { name: /run/i });
+    fireEvent.click(runBtn);
+
+    // Run button disabled during the run.
+    await waitFor(() => expect(runBtn.disabled).toBe(true), { timeout: 3000 });
+
+    // Live progress text "X / N days" (after the first poll lands real counts).
+    await waitFor(
+      () => expect(screen.getByTestId('run-progress').textContent).toMatch(/[12] \/ 3 days/),
+      { timeout: 3000 },
+    );
+    // Progress bar fill reflects days_done/total_days.
+    const fill = screen.getByTestId('run-progress-fill');
+    expect(fill.style.width).toMatch(/^(33\.|66\.)/);
+  });
+
+  it('renders results once the job reports done', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+
+    // The pinned RUN_RESPONSE (delivered in the 'done' progress payload) renders.
+    await waitFor(() => expect(screen.getByTestId('days-table')).toBeTruthy(), { timeout: 3000 });
+    expect(screen.getAllByTestId('day-row').length).toBe(3);
+    // Progress indicator is gone once done.
+    expect(screen.queryByTestId('run-progress')).toBeNull();
+    // Run button re-enabled.
+    expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
+  });
+
+  it('surfaces an error when the job reports status "error"', async () => {
+    installFetch({
+      progress: [
+        { status: 'error', days_done: 0, total_days: 3, result: null, error: 'boom: dwh unreachable' },
+      ],
+    });
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+
+    await waitFor(
+      () => expect(screen.getByRole('alert').textContent).toMatch(/boom: dwh unreachable/),
+      { timeout: 3000 },
+    );
+    // No results, progress cleared, Run re-enabled.
+    expect(screen.queryByTestId('days-table')).toBeNull();
+    expect(screen.queryByTestId('run-progress')).toBeNull();
+    expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
   });
 });
