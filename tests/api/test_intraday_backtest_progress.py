@@ -177,3 +177,55 @@ def test_out_of_window_400_before_job_creation(
     )
     assert resp.status_code == 400
     assert fake_run["called"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# run_backtest orchestration: excluded days are emitted (status "excluded"),
+# not processed, not counted as traded, and never tick progress — while
+# progress still reaches total_days (the non-excluded weekday count). Uses a
+# fake reader with no expiries so every processed day skips (no_expiry); the
+# point under test is the excluded/processed split, not the trading path.
+# --------------------------------------------------------------------------- #
+class _FakeReader:
+    """Minimal IntradayV2Reader stub: no roots/expiries -> processed days skip."""
+
+    async def list_option_roots(self) -> list[dict[str, Any]]:
+        return []
+
+    async def list_expirations(self, oids: Any, start: Any) -> list[Any]:
+        return []
+
+    async def fetch_es_future_1m(self, *a: Any, **k: Any) -> list[Any]:
+        return []
+
+
+async def test_run_backtest_emits_excluded_day_and_reaches_total() -> None:
+    # Mon 2025-02-03 .. Fri 2025-02-07 => 5 weekdays; exclude 02-05 => 4 processed.
+    req = ib.RunRequest(
+        start_date="2025-02-03",
+        end_date="2025-02-07",
+        custom_days=[ib.CustomDay(date="2025-02-05", exclude=True)],
+    )
+    ticks: list[tuple[int, int]] = []
+    result = await ib.run_backtest(
+        _FakeReader(), req, progress_cb=lambda done, total: ticks.append((done, total))
+    )
+
+    days = result["days"]
+    assert len(days) == 5, "all weekdays emitted, excluded included"
+
+    excluded = [d for d in days if d["date"] == "2025-02-05"]
+    assert len(excluded) == 1
+    exday = excluded[0]
+    # DISTINCT status "excluded" (not "skipped") so the calendar can flag it.
+    assert exday["status"] == "excluded"
+    assert exday["skip_reason"] == "excluded"
+    assert exday["pnl"] is None  # never processed / not traded
+
+    # Aggregate: excluded day is not traded.
+    assert result["aggregate"]["n_days"] == 5
+    assert result["aggregate"]["n_traded"] == 0
+
+    # Progress ticked once per PROCESSED day (4), reaching total_days=4, and the
+    # excluded day never ticked.
+    assert ticks == [(1, 4), (2, 4), (3, 4), (4, 4)]

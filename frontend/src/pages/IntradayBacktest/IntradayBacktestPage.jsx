@@ -58,6 +58,13 @@ function signClass(v) {
   return '';
 }
 
+// In-app help for the snap-tolerance field (Gael copy). Surfaced via an ⓘ
+// affordance next to the label, matching the app's tooltip pattern.
+const SNAP_HELP = 'Intraday option quotes are sparse. If your exact entry/exit '
+  + 'minute has no quote, the engine uses the nearest one within this many '
+  + 'minutes; if none exists in that window, the day is skipped. Higher = fewer '
+  + 'skipped days but looser fills; lower = tighter timing but more skips.';
+
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
 
 // Compact USD for the tight calendar cells: whole dollars with a sign, e.g.
@@ -115,6 +122,10 @@ function groupDaysByMonth(days) {
 
 function dayOutcome(data) {
   if (!data) return 'gap';
+  // Excluded (user opted the day out) is a distinct, neutral outcome — not a
+  // data-gap "skipped". The backend tags it status="excluded"; we also accept
+  // skip_reason="excluded" for robustness against wire variance.
+  if (data.status === 'excluded' || data.skip_reason === 'excluded') return 'excluded';
   if (data.status === 'skipped') return 'skipped';
   const usd = data.pnl ? data.pnl.total_pnl_usd : null;
   if (typeof usd === 'number' && Number.isFinite(usd)) {
@@ -129,12 +140,16 @@ const OUTCOME_CLASS = {
   loss: styles.cellLoss,
   flat: styles.cellFlat,
   skipped: styles.cellSkipped,
+  excluded: styles.cellExcluded,
 };
 
 // Full detail for a cell's tooltip — preserves everything the old table row
 // showed (status, strike, option/hedge P&L, USD, skip reason).
 function cellTitle(iso, data) {
   if (!data) return `${iso} — no data (non-trading day)`;
+  if (data.status === 'excluded' || data.skip_reason === 'excluded') {
+    return `${iso} — excluded (no trade)`;
+  }
   if (data.status === 'skipped') {
     return `${iso} — skipped: ${data.skip_reason || 'skipped'}`;
   }
@@ -154,10 +169,11 @@ export default function IntradayBacktestPage() {
   const [metaError, setMetaError] = useState(null);
 
   const [form, setForm] = useState(DEFAULT_FORM);
-  const [exceptionDates, setExceptionDates] = useState([]);
-  const [exceptionDraft, setExceptionDraft] = useState('');
-  const [overrides, setOverrides] = useState([]);
-  const [overrideDraft, setOverrideDraft] = useState({ date: '', entry_time: '', exit_time: '' });
+  // Unified "Custom days" control (supersedes the old exception_dates +
+  // date_overrides). Each row fully describes one date: exclude it, or override
+  // its entry/exit times. Shape: { date, exclude, entry_time, exit_time }.
+  const [customDays, setCustomDays] = useState([]);
+  const [customDayDraft, setCustomDayDraft] = useState('');
 
   const [result, setResult] = useState(null);
   const [running, setRunning] = useState(false);
@@ -206,27 +222,31 @@ export default function IntradayBacktestPage() {
     setForm((f) => ({ ...f, [key]: value }));
   }, []);
 
-  const addException = useCallback(() => {
-    const d = exceptionDraft;
+  // Add a custom-day row for the drafted date. New rows default to "not
+  // excluded" and seed their times from the current default entry/exit so the
+  // user only has to change what differs.
+  const addCustomDay = useCallback(() => {
+    const d = customDayDraft;
     if (!d) return;
-    setExceptionDates((prev) => (prev.includes(d) ? prev : [...prev, d].sort()));
-    setExceptionDraft('');
-  }, [exceptionDraft]);
+    setCustomDays((prev) => {
+      if (prev.some((c) => c.date === d)) return prev; // no duplicates
+      const row = {
+        date: d,
+        exclude: false,
+        entry_time: form.entry_time,
+        exit_time: form.exit_time,
+      };
+      return [...prev, row].sort((a, b) => a.date.localeCompare(b.date));
+    });
+    setCustomDayDraft('');
+  }, [customDayDraft, form.entry_time, form.exit_time]);
 
-  const removeException = useCallback((d) => {
-    setExceptionDates((prev) => prev.filter((x) => x !== d));
+  const updateCustomDay = useCallback((date, patch) => {
+    setCustomDays((prev) => prev.map((c) => (c.date === date ? { ...c, ...patch } : c)));
   }, []);
 
-  const addOverride = useCallback(() => {
-    const { date, entry_time, exit_time } = overrideDraft;
-    if (!date || !entry_time || !exit_time) return;
-    setOverrides((prev) => [...prev.filter((o) => o.date !== date), { date, entry_time, exit_time }]
-      .sort((a, b) => a.date.localeCompare(b.date)));
-    setOverrideDraft({ date: '', entry_time: '', exit_time: '' });
-  }, [overrideDraft]);
-
-  const removeOverride = useCallback((date) => {
-    setOverrides((prev) => prev.filter((o) => o.date !== date));
+  const removeCustomDay = useCallback((date) => {
+    setCustomDays((prev) => prev.filter((c) => c.date !== date));
   }, []);
 
   // Build the PINNED request payload (DESIGN.md).
@@ -244,11 +264,12 @@ export default function IntradayBacktestPage() {
       delta_band: Number(form.delta_band),
     },
     snap_tolerance_minutes: Number(form.snap_tolerance_minutes),
-    exception_dates: exceptionDates,
-    date_overrides: overrides.map((o) => ({
-      date: o.date, entry_time: o.entry_time, exit_time: o.exit_time,
-    })),
-  }), [form, exceptionDates, overrides]);
+    // Unified custom-days payload (DESIGN.md PIN): excluded rows carry only the
+    // date; override rows carry their entry/exit times.
+    custom_days: customDays.map((c) => (c.exclude
+      ? { date: c.date, exclude: true }
+      : { date: c.date, exclude: false, entry_time: c.entry_time, exit_time: c.exit_time })),
+  }), [form, customDays]);
 
   const runDisabledReason = useMemo(() => {
     if (running) return 'Running…';
@@ -436,7 +457,18 @@ export default function IntradayBacktestPage() {
 
           {/* Snap tolerance. */}
           <label className={styles.field}>
-            <span>Snap tolerance (min)</span>
+            <span className={styles.labelRow}>
+              Snap tolerance (min)
+              <span
+                className={styles.help}
+                data-testid="snap-help"
+                role="img"
+                aria-label={SNAP_HELP}
+                title={SNAP_HELP}
+              >
+                ⓘ
+              </span>
+            </span>
             <input
               type="number"
               min={0}
@@ -481,93 +513,70 @@ export default function IntradayBacktestPage() {
           </label>
         </div>
 
-        {/* Exception dates (skip specific days). */}
+        {/* Custom days — one unified control. Add a date, then per row either
+            exclude it (no trade) or override its entry/exit times. */}
         <div className={styles.field} style={{ marginTop: '1rem' }}>
-          <span className={styles.fieldLabel}>Exception dates (excluded)</span>
+          <span className={styles.fieldLabel}>Custom days (exclude or override times)</span>
           <div className={styles.inlineRow}>
             <input
               type="date"
-              aria-label="Exception date"
-              data-testid="exception-date-input"
+              aria-label="Custom day date"
+              data-testid="custom-day-input"
               min={win ? win.min_date : undefined}
               max={win ? win.max_date : undefined}
-              value={exceptionDraft}
-              onChange={(e) => setExceptionDraft(e.target.value)}
+              value={customDayDraft}
+              onChange={(e) => setCustomDayDraft(e.target.value)}
             />
             <button
               type="button"
               className={styles.smallBtn}
-              data-testid="add-exception"
-              onClick={addException}
+              data-testid="add-custom-day"
+              onClick={addCustomDay}
             >
-              Add exception
+              Add custom day
             </button>
           </div>
-          {exceptionDates.length > 0 && (
-            <ul className={styles.exceptionList} data-testid="exception-list">
-              {exceptionDates.map((d) => (
-                <li key={d} className={styles.exceptionChip} data-testid="exception-chip">
-                  {d}
+          {customDays.length > 0 && (
+            <ul className={styles.customDaysList} data-testid="custom-days-list">
+              {customDays.map((c) => (
+                <li
+                  key={c.date}
+                  className={styles.customDayRow}
+                  data-testid={`custom-day-row-${c.date}`}
+                >
+                  <span className={styles.customDayDate}>{c.date}</span>
+                  <label className={styles.customDayExclude}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Exclude ${c.date}`}
+                      checked={c.exclude}
+                      onChange={(e) => updateCustomDay(c.date, { exclude: e.target.checked })}
+                    />
+                    <span>Exclude (don&apos;t trade)</span>
+                  </label>
+                  <input
+                    type="time"
+                    aria-label={`Entry time for ${c.date}`}
+                    className={styles.customDayTime}
+                    value={c.entry_time}
+                    disabled={c.exclude}
+                    onChange={(e) => updateCustomDay(c.date, { entry_time: e.target.value })}
+                  />
+                  <span className={styles.customDayDash} aria-hidden="true">–</span>
+                  <input
+                    type="time"
+                    aria-label={`Exit time for ${c.date}`}
+                    className={styles.customDayTime}
+                    value={c.exit_time}
+                    disabled={c.exclude}
+                    onChange={(e) => updateCustomDay(c.date, { exit_time: e.target.value })}
+                  />
+                  <span className={styles.customDayEt} aria-hidden="true">ET</span>
                   <button
                     type="button"
                     className={styles.chipRemove}
-                    aria-label={`Remove exception ${d}`}
-                    onClick={() => removeException(d)}
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        {/* Optional per-date time overrides. */}
-        <div className={styles.field} style={{ marginTop: '1rem' }}>
-          <span className={styles.fieldLabel}>Per-date time overrides (optional)</span>
-          <div className={styles.inlineRow}>
-            <input
-              type="date"
-              aria-label="Override date"
-              data-testid="override-date-input"
-              min={win ? win.min_date : undefined}
-              max={win ? win.max_date : undefined}
-              value={overrideDraft.date}
-              onChange={(e) => setOverrideDraft((o) => ({ ...o, date: e.target.value }))}
-            />
-            <input
-              type="time"
-              aria-label="Override entry time"
-              data-testid="override-entry-input"
-              value={overrideDraft.entry_time}
-              onChange={(e) => setOverrideDraft((o) => ({ ...o, entry_time: e.target.value }))}
-            />
-            <input
-              type="time"
-              aria-label="Override exit time"
-              data-testid="override-exit-input"
-              value={overrideDraft.exit_time}
-              onChange={(e) => setOverrideDraft((o) => ({ ...o, exit_time: e.target.value }))}
-            />
-            <button
-              type="button"
-              className={styles.smallBtn}
-              data-testid="add-override"
-              onClick={addOverride}
-            >
-              Add override
-            </button>
-          </div>
-          {overrides.length > 0 && (
-            <ul className={styles.exceptionList} data-testid="override-list">
-              {overrides.map((o) => (
-                <li key={o.date} className={styles.exceptionChip} data-testid="override-chip">
-                  {o.date}: {o.entry_time}–{o.exit_time} ET
-                  <button
-                    type="button"
-                    className={styles.chipRemove}
-                    aria-label={`Remove override ${o.date}`}
-                    onClick={() => removeOverride(o.date)}
+                    aria-label={`Remove custom day ${c.date}`}
+                    onClick={() => removeCustomDay(c.date)}
                   >
                     ×
                   </button>
@@ -686,8 +695,13 @@ export default function IntradayBacktestPage() {
           data-result-card="true"
         >
           <div className={styles.chartBox}>
+            {/* Fill the fixed-height chartBox so Plotly sizes to it (height:100%
+                resolves against 340px) instead of falling back to its default
+                450px, which the Card's overflow:hidden would clip at the bottom
+                axis. */}
             <Chart
               traces={equityTraces}
+              style={{ width: '100%', height: '100%' }}
               downloadFilename="intraday-backtest-equity"
               layoutOverrides={{ yaxis: { title: 'Cumulative P&L (USD)' } }}
             />
@@ -730,7 +744,8 @@ export default function IntradayBacktestPage() {
                       );
                     }
                     const outcome = dayOutcome(slot.data);
-                    const skipped = outcome === 'skipped';
+                    const excluded = outcome === 'excluded';
+                    const noTrade = outcome === 'skipped' || excluded;
                     const pnl = slot.data.pnl || null;
                     return (
                       <div
@@ -743,8 +758,10 @@ export default function IntradayBacktestPage() {
                         title={cellTitle(slot.iso, slot.data)}
                       >
                         <span className={styles.dom}>{slot.dom}</span>
-                        {skipped ? (
-                          <span className={styles.cellTag}>skipped</span>
+                        {noTrade ? (
+                          <span className={styles.cellTag}>
+                            {excluded ? 'no trade' : 'skipped'}
+                          </span>
                         ) : (
                           <span className={styles.cellPnl}>
                             {pnl ? compactUsd(pnl.total_pnl_usd) : '—'}

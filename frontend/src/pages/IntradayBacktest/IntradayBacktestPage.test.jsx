@@ -44,11 +44,13 @@ const RUN_RESPONSE = {
       pnl: { option_pnl_pts: -4.25, hedge_pnl_pts: 3.1, total_pnl_pts: -1.15, total_pnl_usd: -57.5 },
     },
     {
-      date: '2025-02-17', status: 'skipped', skip_reason: 'excluded',
+      // User-excluded day — backend now tags status "excluded" (PIN contract).
+      date: '2025-02-17', status: 'excluded', skip_reason: 'excluded',
       expiry: null, strike: null, entry: null, exit: null, hedge_trades: [],
       pnl: null,
     },
     {
+      // Data-gap skip — distinct from an exclusion.
       date: '2025-02-20', status: 'skipped', skip_reason: 'no_quote_within_tolerance',
       expiry: null, strike: null, entry: null, exit: null, hedge_trades: [],
       pnl: null,
@@ -123,7 +125,7 @@ async function renderReady() {
 }
 
 describe('IntradayBacktestPage', () => {
-  it('renders all controls (entry/exit ET, expiry mode, side, hedge, snap, exceptions)', async () => {
+  it('renders all controls (entry/exit ET, expiry mode, side, hedge, snap, custom days)', async () => {
     await renderReady();
     // Times labelled ET
     expect(screen.getByLabelText('Entry time (ET)')).toBeTruthy();
@@ -138,10 +140,19 @@ describe('IntradayBacktestPage', () => {
     expect(screen.getByLabelText(/delta band/i)).toBeTruthy();
     // Snap tolerance
     expect(screen.getByLabelText(/snap tolerance/i)).toBeTruthy();
-    // Exception dates add control
-    expect(screen.getByTestId('add-exception')).toBeTruthy();
+    // Unified custom-days add control
+    expect(screen.getByTestId('add-custom-day')).toBeTruthy();
     // Run button
     expect(screen.getByRole('button', { name: /run backtest/i })).toBeTruthy();
+  });
+
+  it('shows in-app help for the snap-tolerance field', async () => {
+    await renderReady();
+    const help = screen.getByTestId('snap-help');
+    // The ⓘ affordance carries the sparse-quote explanation (title + aria-label).
+    expect(help.getAttribute('title')).toMatch(/nearest one within this many minutes/i);
+    expect(help.getAttribute('title')).toMatch(/the day is skipped/i);
+    expect(help.getAttribute('aria-label')).toMatch(/quotes are sparse/i);
   });
 
   it('bounds the date range inputs to the /meta window', async () => {
@@ -165,9 +176,16 @@ describe('IntradayBacktestPage', () => {
     fireEvent.change(screen.getByLabelText('Exit time (ET)'), { target: { value: '15:45' } });
     fireEvent.change(screen.getByLabelText(/straddle side/i), { target: { value: 'short' } });
 
-    // Add an exception date.
-    fireEvent.change(screen.getByTestId('exception-date-input'), { target: { value: '2025-02-17' } });
-    fireEvent.click(screen.getByTestId('add-exception'));
+    // Add an EXCLUDED custom day: add the row, then toggle Exclude on.
+    fireEvent.change(screen.getByTestId('custom-day-input'), { target: { value: '2025-02-17' } });
+    fireEvent.click(screen.getByTestId('add-custom-day'));
+    fireEvent.click(screen.getByLabelText('Exclude 2025-02-17'));
+
+    // Add an OVERRIDE custom day: add the row, then set custom entry/exit times.
+    fireEvent.change(screen.getByTestId('custom-day-input'), { target: { value: '2025-02-14' } });
+    fireEvent.click(screen.getByTestId('add-custom-day'));
+    fireEvent.change(screen.getByLabelText('Entry time for 2025-02-14'), { target: { value: '11:00' } });
+    fireEvent.change(screen.getByLabelText('Exit time for 2025-02-14'), { target: { value: '14:00' } });
 
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
 
@@ -192,8 +210,34 @@ describe('IntradayBacktestPage', () => {
       delta_band: expect.any(Number),
     });
     expect(typeof lastRunBody.snap_tolerance_minutes).toBe('number');
-    expect(lastRunBody.exception_dates).toEqual(['2025-02-17']);
-    expect(Array.isArray(lastRunBody.date_overrides)).toBe(true);
+
+    // Unified custom_days replaces exception_dates + date_overrides entirely.
+    expect(lastRunBody.exception_dates).toBeUndefined();
+    expect(lastRunBody.date_overrides).toBeUndefined();
+    expect(Array.isArray(lastRunBody.custom_days)).toBe(true);
+    // Excluded row: date + exclude only (PIN shape).
+    expect(lastRunBody.custom_days).toContainEqual({ date: '2025-02-17', exclude: true });
+    // Override row: date + exclude:false + entry/exit times (PIN shape).
+    expect(lastRunBody.custom_days).toContainEqual({
+      date: '2025-02-14', exclude: false, entry_time: '11:00', exit_time: '14:00',
+    });
+  });
+
+  it('disables the time inputs on a custom day when Exclude is toggled on', async () => {
+    await renderReady();
+    fireEvent.change(screen.getByTestId('custom-day-input'), { target: { value: '2025-02-17' } });
+    fireEvent.click(screen.getByTestId('add-custom-day'));
+
+    const entry = screen.getByLabelText('Entry time for 2025-02-17');
+    const exit = screen.getByLabelText('Exit time for 2025-02-17');
+    // Not excluded yet → times editable.
+    expect(entry.disabled).toBe(false);
+    expect(exit.disabled).toBe(false);
+
+    // Toggle Exclude → the day won't be entered, so the time inputs are disabled.
+    fireEvent.click(screen.getByLabelText('Exclude 2025-02-17'));
+    expect(entry.disabled).toBe(true);
+    expect(exit.disabled).toBe(true);
   });
 
   it('renders the days calendar grid, aggregate stats and the equity chart after Run', async () => {
@@ -230,19 +274,39 @@ describe('IntradayBacktestPage', () => {
     expect(chart.getAttribute('data-last')).toBe('-57.5');
   });
 
-  it('visibly flags skipped days with their skip_reason in the grid', async () => {
+  it('visibly flags data-gap skipped days with their skip_reason in the grid', async () => {
     await renderReady();
     fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
     await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
 
     const grid = screen.getByTestId('days-grid');
     const skipped = grid.querySelectorAll('[data-outcome="skipped"]');
-    expect(skipped.length).toBe(2);
+    // Only the data-gap day is "skipped"; the user-excluded day is a separate
+    // outcome (asserted in its own test).
+    expect(skipped.length).toBe(1);
     // Skipped cells are visually distinct (not coloured as profit/loss) and
     // expose their reason in the tooltip so no information is lost.
-    const reasons = [...skipped].map((c) => c.getAttribute('title')).join(' ');
-    expect(reasons).toMatch(/excluded/);
-    expect(reasons).toMatch(/no_quote_within_tolerance/);
+    expect(skipped[0].getAttribute('title')).toMatch(/no_quote_within_tolerance/);
+  });
+
+  it('renders an excluded day as a distinct excluded cell (not a data-gap skip)', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 3000 });
+
+    const grid = screen.getByTestId('days-grid');
+    const excluded = grid.querySelectorAll('[data-outcome="excluded"]');
+    expect(excluded.length).toBe(1);
+    const cell = excluded[0];
+    // Tagged as a no-trade day, visually separate from a "skipped" data gap.
+    expect(cell.textContent).toMatch(/no trade/i);
+    expect(cell.textContent).not.toMatch(/skipped/i);
+    // Detail preserved in the tooltip.
+    expect(cell.getAttribute('title')).toMatch(/excluded/i);
+    // It is the excluded date, not the data-gap one.
+    expect(cell.getAttribute('data-date')).toBe('2025-02-17');
+    // And it carries a distinct class from the warm dashed "skipped" cell.
+    expect(cell.className).not.toMatch(/cellSkipped/);
   });
 
   it('groups days into one calendar block per month and colours profit vs loss', async () => {

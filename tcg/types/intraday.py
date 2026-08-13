@@ -70,7 +70,7 @@ class DayResult:
     """Outcome for one trading day (traded or skipped)."""
 
     date: int  # YYYYMMDD
-    status: str  # "ok" | "skipped"
+    status: str  # "ok" | "skipped" | "excluded"
     skip_reason: str | None = None
     expiry: date | None = None
     strike: float | None = None

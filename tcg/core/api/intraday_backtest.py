@@ -22,11 +22,12 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from tcg.data._sql.intraday_v2 import IntradayV2Reader
 from tcg.engine.intraday_backtest import (
     aggregate_days,
+    parse_hhmm,
     resolve_et_to_utc,
     select_atm_strike,
     simulate_day,
@@ -57,10 +58,29 @@ class HedgeConfig(BaseModel):
     delta_band: float = Field(default=0.10, ge=0)
 
 
-class DateOverride(BaseModel):
+class CustomDay(BaseModel):
+    """A single per-date control (unified exclude + time-override).
+
+    ``exclude=True`` -> the day is NOT traded; it is still emitted in the
+    response ``days`` array with status ``"excluded"`` so the calendar can show
+    it as an intentionally-skipped day. When ``exclude=True`` any ``entry_time``
+    / ``exit_time`` are ignored (no conflict). When ``exclude=False`` a present
+    ``entry_time`` / ``exit_time`` overrides the request default for that date;
+    a missing side falls back to the request default.
+    """
+
     date: str
-    entry_time: str
-    exit_time: str
+    exclude: bool = False
+    entry_time: str | None = None
+    exit_time: str | None = None
+
+    @field_validator("entry_time", "exit_time")
+    @classmethod
+    def _valid_hhmm(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        parse_hhmm(v)  # raises ValueError -> 422 on bad "HH:MM"
+        return v
 
 
 class RunRequest(BaseModel):
@@ -73,8 +93,9 @@ class RunRequest(BaseModel):
     straddle_side: Literal["long", "short"] = "long"
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
     snap_tolerance_minutes: float = Field(default=10.0, gt=0)
-    exception_dates: list[str] = Field(default_factory=list)
-    date_overrides: list[DateOverride] = Field(default_factory=list)
+    # Unified per-date control: SUPERSEDES the old exception_dates +
+    # date_overrides pair (see DESIGN.md §API contract).
+    custom_days: list[CustomDay] = Field(default_factory=list)
 
 
 @dataclass
@@ -119,18 +140,30 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
             ),
         )
 
-    excluded = {_parse_date(d, "exception_dates") for d in req.exception_dates}
-    overrides: dict[date, tuple[str, str]] = {
-        _parse_date(o.date, "date_overrides"): (o.entry_time, o.exit_time)
-        for o in req.date_overrides
-    }
+    # Fold custom_days into an excluded-set + a per-date time-override map.
+    # exclude:true wins (times ignored); otherwise a present entry/exit_time
+    # overrides the default for that date (a missing side falls back below).
+    excluded: set[date] = set()
+    overrides: dict[date, tuple[str | None, str | None]] = {}
+    for cd in req.custom_days:
+        cd_date = _parse_date(cd.date, "custom_days")
+        if cd.exclude:
+            excluded.add(cd_date)
+            continue
+        if cd.entry_time is not None or cd.exit_time is not None:
+            overrides[cd_date] = (cd.entry_time, cd.exit_time)
 
     plans: list[DayPlan] = []
     d = start
     one = timedelta(days=1)
     while d <= end:
         if d.weekday() < 5:  # Mon-Fri
-            entry_time, exit_time = overrides.get(d, (req.entry_time, req.exit_time))
+            ov = overrides.get(d)
+            if ov is None:
+                entry_time, exit_time = req.entry_time, req.exit_time
+            else:
+                entry_time = ov[0] if ov[0] is not None else req.entry_time
+                exit_time = ov[1] if ov[1] is not None else req.exit_time
             entry_ts = resolve_et_to_utc(d, entry_time, _TZ)
             exit_ts = resolve_et_to_utc(d, exit_time, _TZ)
             if exit_ts <= entry_ts:
@@ -243,11 +276,12 @@ def _warnings(results: list[DayResult]) -> list[str]:
     for r in results:
         if r.status == "skipped" and r.skip_reason:
             reasons[r.skip_reason] = reasons.get(r.skip_reason, 0) + 1
+    # NB: excluded days carry status "excluded" (not "skipped") and are
+    # intentional — they never generate a warning here.
     labels = {
         "no_quote_within_tolerance": "no quote within tolerance",
         "no_expiry": "no matching expiry",
         "no_contract": "no ATM contract",
-        "excluded": "excluded by date exception",
     }
     return [
         f"{n} day(s) skipped: {labels.get(reason, reason)}"
@@ -367,8 +401,11 @@ async def run_backtest(
     days_done = 0
     for plan in plans:
         if plan.excluded:
+            # DISTINCT status "excluded" (not "skipped"): an intentionally
+            # skipped day the calendar shows as such. Not processed (no dwh
+            # fetch), not part of total_days, never ticks progress.
             results.append(
-                DayResult(date=plan.date_int, status="skipped", skip_reason="excluded")
+                DayResult(date=plan.date_int, status="excluded", skip_reason="excluded")
             )
             continue
 
