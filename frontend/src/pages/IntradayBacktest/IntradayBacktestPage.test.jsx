@@ -155,6 +155,24 @@ describe('IntradayBacktestPage', () => {
     expect(help.getAttribute('aria-label')).toMatch(/quotes are sparse/i);
   });
 
+  it('shows in-app help for the hedge interval and delta band fields', async () => {
+    await renderReady();
+
+    // Hedge interval ⓘ — fixed-clock rehedge cadence.
+    const intervalHelp = screen.getByTestId('hedge-interval-help');
+    expect(intervalHelp.getAttribute('title')).toBeTruthy();
+    expect(intervalHelp.getAttribute('title')).toMatch(/fixed clock/i);
+    expect(intervalHelp.getAttribute('title')).toMatch(/delta-neutral/i);
+    expect(intervalHelp.getAttribute('aria-label')).toMatch(/re-hedged with the ES future/i);
+
+    // Delta band ⓘ — open (unhedged) net delta threshold, OR-triggered.
+    const bandHelp = screen.getByTestId('delta-band-help');
+    expect(bandHelp.getAttribute('title')).toBeTruthy();
+    expect(bandHelp.getAttribute('title')).toMatch(/open \(unhedged\) net delta/i);
+    expect(bandHelp.getAttribute('title')).toMatch(/whichever fires first/i);
+    expect(bandHelp.getAttribute('aria-label')).toMatch(/ES-future-equivalent units/i);
+  });
+
   it('bounds the date range inputs to the /meta window', async () => {
     await renderReady();
     const start = screen.getByLabelText('Start date');

@@ -65,6 +65,23 @@ const SNAP_HELP = 'Intraday option quotes are sparse. If your exact entry/exit '
   + 'minutes; if none exists in that window, the day is skipped. Higher = fewer '
   + 'skipped days but looser fills; lower = tighter timing but more skips.';
 
+// In-app help for the hedge interval + delta band fields. Copy mirrors what the
+// engine actually does (tcg/engine/intraday_backtest.py simulate_day): the
+// straddle's net delta is re-hedged with the ES future on a fixed clock OR when
+// the open (unhedged) net delta breaches the band — whichever fires first.
+const HEDGE_INTERVAL_HELP = "How often the straddle's delta is re-hedged with "
+  + 'the ES future on a fixed clock: every N minutes the position is brought '
+  + 'back toward delta-neutral, no matter how little it has drifted. Smaller = '
+  + 'more frequent hedging (tighter neutrality, more hedge trades); larger = '
+  + 'looser. A rehedge also fires early if the delta drifts past the band.';
+
+const DELTA_BAND_HELP = 'Rehedge as soon as the open (unhedged) net delta drifts '
+  + 'past this threshold, in ES-future-equivalent units (~0–1 for one ATM '
+  + 'straddle), without waiting for the clock. Smaller = react to smaller '
+  + 'moves (tighter neutrality, more trades); larger = tolerate more drift; 0 '
+  + 'rehedges on every bar. Whichever fires first — the timed rehedge or the '
+  + 'band — triggers a rehedge.';
+
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
 
 // Compact USD for the tight calendar cells: whole dollars with a sign, e.g.
@@ -489,7 +506,18 @@ export default function IntradayBacktestPage() {
             <span>Delta-hedge</span>
           </label>
           <label className={styles.field}>
-            <span>Hedge interval (min)</span>
+            <span className={styles.labelRow}>
+              Hedge interval (min)
+              <span
+                className={styles.help}
+                data-testid="hedge-interval-help"
+                role="img"
+                aria-label={HEDGE_INTERVAL_HELP}
+                title={HEDGE_INTERVAL_HELP}
+              >
+                ⓘ
+              </span>
+            </span>
             <input
               type="number"
               min={1}
@@ -500,7 +528,18 @@ export default function IntradayBacktestPage() {
             />
           </label>
           <label className={styles.field}>
-            <span>Delta band</span>
+            <span className={styles.labelRow}>
+              Delta band
+              <span
+                className={styles.help}
+                data-testid="delta-band-help"
+                role="img"
+                aria-label={DELTA_BAND_HELP}
+                title={DELTA_BAND_HELP}
+              >
+                ⓘ
+              </span>
+            </span>
             <input
               type="number"
               step="0.01"
