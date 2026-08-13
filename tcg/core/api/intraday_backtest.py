@@ -40,12 +40,17 @@ from tcg.types.intraday import (
     WINDOW_MIN_DATE,
     AggregateResult,
     DayResult,
+    HedgeSpec,
+    HedgeTargetSpec,
+    HedgeTriggers,
     MaxSpreadCond,
     MaxUnderlyingMoveCond,
     MinPremiumCond,
     MinQuoteSizeCond,
+    MinRehedgeDeltaCond,
     NetDeltaTrigger,
     PnlTrigger,
+    SigmaMoveHedgeTrigger,
     SigmaMoveTrigger,
     UnderlyingMoveTrigger,
 )
@@ -58,15 +63,6 @@ _TZ = "America/New_York"
 _EXPIRY_MODES = ["0DTE", "NDTE"]
 # Session open (ET) used as the max_underlying_move "day_open" reference anchor.
 _SESSION_OPEN_ET = "09:30"
-
-
-# --------------------------------------------------------------------------- #
-# Request models
-# --------------------------------------------------------------------------- #
-class HedgeConfig(BaseModel):
-    enabled: bool = True
-    interval_minutes: float = Field(default=15.0, gt=0)
-    delta_band: float = Field(default=0.10, ge=0)
 
 
 # --------------------------------------------------------------------------- #
@@ -174,6 +170,89 @@ def _to_engine_triggers(triggers: list) -> list:
         elif isinstance(t, PnlTriggerModel):
             out.append(PnlTrigger(amount=t.amount, unit=t.unit, direction=t.direction))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Hedge module (v4). Replaces the flat ``hedge:{enabled,interval_minutes,
+# delta_band}`` with a configurable module: OR-ed rehedge TRIGGERS, AND-ed
+# execution CONDITIONS (on the ES-future bar), and a delta-removal TARGET.
+# The ``max_spread`` / ``min_quote_size`` condition models are reused; a new
+# ``min_rehedge_delta`` completes the hedge-condition union. Unknown instrument /
+# condition type / target mode -> 422. ``band_edge`` requires ``delta_band`` set.
+# --------------------------------------------------------------------------- #
+class MinRehedgeDeltaCondition(BaseModel):
+    type: Literal["min_rehedge_delta"]
+    threshold: float = Field(gt=0)
+
+
+HedgeCondition = Annotated[
+    Union[MaxSpreadCondition, MinQuoteSizeCondition, MinRehedgeDeltaCondition],
+    Field(discriminator="type"),
+]
+
+
+class SigmaMoveHedgeTriggerModel(BaseModel):
+    enabled: bool = False
+    n: float = Field(default=1.0, gt=0)
+
+
+class HedgeTriggersModel(BaseModel):
+    # null/0 -> off (interval); null -> off (band). |drift| >= band; interval elapsed.
+    interval_minutes: float | None = Field(default=15.0, ge=0)
+    delta_band: float | None = Field(default=0.10, ge=0)
+    sigma_move: SigmaMoveHedgeTriggerModel = Field(
+        default_factory=SigmaMoveHedgeTriggerModel
+    )
+
+
+class HedgeTargetModel(BaseModel):
+    mode: Literal["zero", "band_edge", "ratio"] = "zero"
+    ratio: float = Field(default=1.0, gt=0, le=1.0)  # ratio in (0, 1]
+
+
+class HedgeConfig(BaseModel):
+    """The v4 hedge module. ``instrument`` is a ``Literal`` so any value other
+    than ``es_future`` is rejected 422 (the selector exists for future
+    instruments). ``band_edge`` target requires a ``delta_band`` trigger set."""
+
+    enabled: bool = True
+    instrument: Literal["es_future"] = "es_future"
+    triggers: HedgeTriggersModel = Field(default_factory=HedgeTriggersModel)
+    conditions: list[HedgeCondition] = Field(default_factory=list)
+    target: HedgeTargetModel = Field(default_factory=HedgeTargetModel)
+
+    @model_validator(mode="after")
+    def _band_edge_needs_band(self) -> "HedgeConfig":
+        if self.target.mode == "band_edge" and self.triggers.delta_band is None:
+            raise ValueError(
+                "target.mode 'band_edge' requires triggers.delta_band to be set"
+            )
+        return self
+
+
+def _to_engine_hedge(h: HedgeConfig) -> HedgeSpec:
+    """Mirror the validated Pydantic hedge module into the engine dataclass."""
+    conds: list = []
+    for c in h.conditions:
+        if isinstance(c, MaxSpreadCondition):
+            conds.append(MaxSpreadCond(pct=c.pct, min_ticks=c.min_ticks))
+        elif isinstance(c, MinQuoteSizeCondition):
+            conds.append(MinQuoteSizeCond(size=c.size))
+        elif isinstance(c, MinRehedgeDeltaCondition):
+            conds.append(MinRehedgeDeltaCond(threshold=c.threshold))
+    return HedgeSpec(
+        enabled=h.enabled,
+        instrument=h.instrument,
+        triggers=HedgeTriggers(
+            interval_minutes=h.triggers.interval_minutes,
+            delta_band=h.triggers.delta_band,
+            sigma_move=SigmaMoveHedgeTrigger(
+                enabled=h.triggers.sigma_move.enabled, n=h.triggers.sigma_move.n
+            ),
+        ),
+        conditions=tuple(conds),
+        target=HedgeTargetSpec(mode=h.target.mode, ratio=h.target.ratio),
+    )
 
 
 class EntryExitModule(BaseModel):
@@ -527,6 +606,7 @@ async def _process_day(
     all_exps: list[date],
     exp_to_objs: dict[date, list[int]],
     tick_size: float,
+    es_tick: float,
 ) -> DayResult:
     """Fetch marks + simulate a single (non-excluded) trading day (async I/O)."""
     expiry = _pick_expiry(all_exps, plan.day, req.expiry_mode, req.dte)
@@ -591,9 +671,8 @@ async def _process_day(
         exit_conditions=plan.exit_conditions,
         exit_triggers=plan.exit_triggers,
         tick_size=tick_size,
-        hedge_enabled=req.hedge.enabled,
-        interval_minutes=req.hedge.interval_minutes,
-        delta_band=req.hedge.delta_band,
+        hedge=_to_engine_hedge(req.hedge),
+        es_tick=es_tick,
         es_day_open=es_day_open,
         multiplier=ES_MULTIPLIER,
     )
@@ -624,8 +703,10 @@ async def run_backtest(
         exp_to_objs.setdefault(exp, []).append(oid)
     all_exps = sorted(exp_to_objs)
 
-    # Tick size for the max_spread 1-tick floor (sourced once per run).
+    # Tick sizes for the max_spread 1-tick floor (sourced once per run):
+    # option tick for the entry/exit conditions, ES-future tick for the hedge.
     tick_size = await reader.get_option_tick_size()
+    es_tick = await reader.get_es_future_tick_size()
 
     results: list[DayResult] = []
     days_done = 0
@@ -640,7 +721,9 @@ async def run_backtest(
             continue
 
         results.append(
-            await _process_day(reader, req, plan, all_exps, exp_to_objs, tick_size)
+            await _process_day(
+                reader, req, plan, all_exps, exp_to_objs, tick_size, es_tick
+            )
         )
         days_done += 1
         if progress_cb is not None:

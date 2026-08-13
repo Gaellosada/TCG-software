@@ -26,6 +26,12 @@ ES_MULTIPLIER: float = 50.0
 # this documented CME ES-option constant is used. See PROBLEMS.md.
 ES_OPTION_TICK_SIZE: float = 0.05
 
+# Tick size (minimum price increment, index points) for the ES FUTURE — the
+# hedge instrument. CME ES futures trade in 0.25 index-point ticks. Used by the
+# hedge-module ``max_spread`` condition's 1-tick floor on the ES-future bar. A
+# documented constant (same rationale as the option tick: no dwh column exists).
+ES_FUTURE_TICK_SIZE: float = 0.25
+
 
 @dataclass(frozen=True)
 class IntradayBar:
@@ -156,6 +162,78 @@ class ExitTrigger:
     type: str
     ts: datetime
     value: float
+
+
+# --------------------------------------------------------------------------- #
+# Hedge module (v4). The flat ``hedge:{enabled,interval_minutes,delta_band}`` is
+# replaced by a configurable module: OR-ed rehedge TRIGGERS, AND-ed execution
+# CONDITIONS (evaluated on the ES-FUTURE bar), and a TARGET describing how much
+# delta to remove. Engine-level, dependency-free dataclasses the API mirrors from
+# its Pydantic models. ``MaxSpreadCond`` / ``MinQuoteSizeCond`` (above) are reused
+# for the hedge conditions — evaluated against the ES-future bar's quote here.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class MinRehedgeDeltaCond:
+    """Hedge condition. Pass (execute) only if ``abs(delta_to_remove) >=
+    threshold`` — where ``delta_to_remove`` is the change in the ES-future
+    position a rehedge WOULD make. Suppresses churny micro-rehedges."""
+
+    threshold: float
+
+
+@dataclass(frozen=True)
+class SigmaMoveHedgeTrigger:
+    """Rehedge trigger: fire when the ES has moved ``>= n * sigma_bar`` since the
+    last hedge, where ``sigma_bar = ES_ref * IV_entry * sqrt(T_bar)`` and
+    ``ES_ref`` = ES at the last hedge (same sigma machinery as the exit
+    sigma_move trigger). ``enabled=False`` disables it."""
+
+    enabled: bool = False
+    n: float = 1.0
+
+
+@dataclass(frozen=True)
+class HedgeTriggers:
+    """The OR-ed rehedge triggers. A rehedge is CONSIDERED at a bar if ANY
+    enabled trigger fires: ``interval_minutes`` elapsed since the last hedge, OR
+    ``abs(delta drift since last hedge) >= delta_band``, OR the sigma_move
+    trigger. ``interval_minutes``/``delta_band`` = ``None`` (or ``0`` for the
+    interval) disables that trigger."""
+
+    interval_minutes: float | None = 15.0
+    delta_band: float | None = 0.10
+    sigma_move: SigmaMoveHedgeTrigger = field(default_factory=SigmaMoveHedgeTrigger)
+
+
+@dataclass(frozen=True)
+class HedgeTargetSpec:
+    """How much delta a rehedge removes.
+
+    * ``zero``      — ``hedged_qty = -net_delta`` (full hedge; current behavior).
+    * ``band_edge`` — hedge back to the band edge: leave ``sign(net_delta)*
+      delta_band`` of delta on (residual = ±band). Requires ``delta_band`` set.
+    * ``ratio``     — ``hedged_qty = -ratio*net_delta`` (partial; ratio in (0,1]).
+    """
+
+    mode: str = "zero"  # "zero" | "band_edge" | "ratio"
+    ratio: float = 1.0
+
+
+@dataclass(frozen=True)
+class HedgeSpec:
+    """The full hedge module (v4). ``enabled=False`` => no hedge (hedge_pnl=0).
+
+    ``instrument`` is ``es_future`` for v1 (the field exists so more can be added
+    later; the API rejects unknown instruments 422). ``conditions`` is a tuple of
+    ``MaxSpreadCond`` / ``MinQuoteSizeCond`` / ``MinRehedgeDeltaCond`` — a
+    considered rehedge EXECUTES only if ALL pass on the ES-future bar; else it is
+    DEFERRED (reconsidered next bar, last-hedge state unchanged)."""
+
+    enabled: bool = False
+    instrument: str = "es_future"
+    triggers: HedgeTriggers = field(default_factory=HedgeTriggers)
+    conditions: tuple = ()
+    target: HedgeTargetSpec = field(default_factory=HedgeTargetSpec)
 
 
 @dataclass(frozen=True)

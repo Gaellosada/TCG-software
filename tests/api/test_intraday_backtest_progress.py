@@ -198,6 +198,9 @@ class _FakeReader:
     async def get_option_tick_size(self) -> float:
         return 0.05
 
+    async def get_es_future_tick_size(self) -> float:
+        return 0.25
+
     async def fetch_es_future_1m(self, *a: Any, **k: Any) -> list[Any]:
         return []
 

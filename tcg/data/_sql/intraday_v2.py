@@ -20,6 +20,7 @@ from datetime import date, datetime
 from tcg.data._sql.connection import DwhConnectionPool, to_float
 from tcg.types.errors import DataAccessError
 from tcg.types.intraday import (
+    ES_FUTURE_TICK_SIZE,
     ES_OPTION_TICK_SIZE,
     IntradayBar,
     WINDOW_MAX_DATE,
@@ -65,6 +66,17 @@ class IntradayV2Reader:
         wire the read here with zero call-site change.
         """
         return ES_OPTION_TICK_SIZE
+
+    async def get_es_future_tick_size(self) -> float:
+        """Minimum price increment (index points) for the ES FUTURE hedge leg.
+
+        Same sourcing rationale as :meth:`get_option_tick_size` — no dwh
+        min-increment column exists — so the documented CME ES-future constant
+        is used (:data:`ES_FUTURE_TICK_SIZE` = 0.25 index pts). Used by the hedge
+        module's ``max_spread`` 1-tick floor on the ES-future bar. Single
+        sourcing point; wire a real column read here with zero call-site change.
+        """
+        return ES_FUTURE_TICK_SIZE
 
     async def resolve_future_object_id(self) -> int | None:
         """Object id of the ES future (``FUT_SP_500``), or ``None``."""
@@ -156,11 +168,23 @@ class IntradayV2Reader:
     async def fetch_es_future_1m(
         self, start_ts: datetime, end_ts: datetime, on_or_after: date
     ) -> list[IntradayBar]:
-        """Front ES-future 1m close series over ``[start_ts, end_ts)``.
+        """Front ES-future 1m mark series over ``[start_ts, end_ts)``.
 
         Picks the FRONT contract (nearest expiration >= *on_or_after* that has
-        bars in the window) and returns its (ts, close) series — one clean price
-        path for ATM selection and delta hedging. ``ts`` constant-bounded.
+        bars in the window) and MERGES its trade bars (``fact_bar`` close) with
+        its top-of-book quotes (``fact_bbba`` — the ES ``bbo-1m`` grid, mapped to
+        ``serie.type='bbba'``) into one event-ordered series. Per bar the
+        returned :class:`IntradayBar` carries:
+
+        * ``price`` — the MARK: two-sided bbba mid when both sides present, else
+          the trade-bar close (mirrors :meth:`fetch_option_1m`).
+        * ``bid`` / ``ask`` / ``bid_size`` / ``ask_size`` — the ES top-of-book at
+          a two-sided bbba event; **all ``None`` on a trade-only bar** (the
+          fields the hedge ``max_spread`` / ``min_quote_size`` conditions read).
+
+        ``ts`` constant-bounded on both reads (BRIN prune). Caveat: across a
+        quarterly roll the "front" can differ between windows; for one intraday
+        day-window this is the active front month.
         """
         future_id = await self.resolve_future_object_id()
         if future_id is None:
@@ -169,7 +193,7 @@ class IntradayV2Reader:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        f"""SELECT c.expiration, f.ts, f.close
+                        f"""SELECT c.expiration, s.contract_id, f.ts, f.close
                             FROM {V2_SCHEMA}.serie s
                             JOIN {V2_SCHEMA}.contract c ON c.contract_id = s.contract_id
                             JOIN {V2_SCHEMA}.fact_bar f ON f.serie_id = s.serie_id
@@ -181,21 +205,51 @@ class IntradayV2Reader:
                             ORDER BY c.expiration, f.ts""",
                         (future_id, on_or_after, start_ts, end_ts),
                     )
-                    rows = await cur.fetchall()
+                    bar_rows = await cur.fetchall()
+                    if not bar_rows:
+                        return []
+                    # Front contract = smallest expiration present in the window.
+                    front_exp = bar_rows[0]["expiration"]
+                    front_cids = sorted(
+                        {r["contract_id"] for r in bar_rows if r["expiration"] == front_exp}
+                    )
+                    await cur.execute(
+                        f"""SELECT f.ts, f.best_bid_value, f.best_ask_value,
+                                   f.best_bid_volume, f.best_ask_volume
+                            FROM {V2_SCHEMA}.serie s
+                            JOIN {V2_SCHEMA}.fact_bbba f ON f.serie_id = s.serie_id
+                            WHERE s.contract_id = ANY(%s)
+                              AND s.type = 'bbba' AND s.freq = '1m'
+                              AND f.ts >= %s AND f.ts < %s
+                            ORDER BY f.ts""",
+                        (front_cids, start_ts, end_ts),
+                    )
+                    bbba_rows = await cur.fetchall()
         except Exception as exc:  # noqa: BLE001
             raise DataAccessError(f"v2 intraday error fetching ES future: {exc}") from exc
 
-        if not rows:
-            return []
-        # Front contract = the SMALLEST expiration that has bars in the window.
-        # Caveat: across a quarterly roll boundary the "front" can differ between
-        # windows; for a single intraday day-window this is the active front month.
-        front_exp = rows[0]["expiration"]  # smallest expiration present in window
-        return [
-            IntradayBar(ts=r["ts"], price=to_float(r["close"]))
-            for r in rows
-            if r["expiration"] == front_exp and to_float(r["close"]) is not None
-        ]
+        # ts -> IntradayBar. Trade-bar close seeds a quote-less mark; a two-sided
+        # bbba event OVERRIDES with mid + full top-of-book (same merge as options).
+        marks: dict[datetime, IntradayBar] = {}
+        for r in bar_rows:
+            if r["expiration"] != front_exp:
+                continue
+            close = to_float(r["close"])
+            if close is not None and close > 0:
+                marks[r["ts"]] = IntradayBar(ts=r["ts"], price=close)
+        for r in bbba_rows:
+            bid = to_float(r["best_bid_value"])
+            ask = to_float(r["best_ask_value"])
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                marks[r["ts"]] = IntradayBar(
+                    ts=r["ts"],
+                    price=(bid + ask) / 2.0,
+                    bid=bid,
+                    ask=ask,
+                    bid_size=to_float(r["best_bid_volume"]),
+                    ask_size=to_float(r["best_ask_volume"]),
+                )
+        return [marks[ts] for ts in sorted(marks)]
 
     async def fetch_option_1m(
         self, contract_id: int, start_ts: datetime, end_ts: datetime

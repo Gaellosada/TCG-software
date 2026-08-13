@@ -37,7 +37,9 @@ from tcg.types.intraday import (
     EquityPoint,
     ES_MULTIPLIER,
     ES_OPTION_TICK_SIZE,
+    ES_FUTURE_TICK_SIZE,
     ExitTrigger,
+    HedgeSpec,
     HedgeTrade,
     IntradayBar,
     LegResult,
@@ -46,12 +48,16 @@ from tcg.types.intraday import (
     MaxUnderlyingMoveCond,
     MinPremiumCond,
     MinQuoteSizeCond,
+    MinRehedgeDeltaCond,
     NetDeltaTrigger,
     PnlTrigger,
     SigmaMoveTrigger,
     StraddleLegs,
     UnderlyingMoveTrigger,
 )
+
+# A disabled hedge module: the ``simulate_day`` default when no hedge is given.
+_HEDGE_DISABLED = HedgeSpec(enabled=False)
 
 _ET = "America/New_York"
 _TRADING_DAYS_PER_YEAR = 252.0
@@ -443,9 +449,8 @@ def find_trigger_fire(
     side_sign: int,
     rate: float,
     multiplier: float,
-    hedge_enabled: bool,
-    interval_minutes: float,
-    delta_band: float,
+    hedge: HedgeSpec,
+    es_tick: float,
     call_fallback: float,
     put_fallback: float,
     kernel: PricingKernel,
@@ -454,8 +459,9 @@ def find_trigger_fire(
     FIRST (type, ts, value) at which ANY enabled trigger fires, else ``None``.
 
     Reuses the hedge loop's cadence: carried-forward option marks, no
-    look-ahead, and a mirror of the hedge accounting so the ``pnl`` trigger sees
-    the hedge MTM realized to each bar. ``sigma_bar`` shrinks intraday
+    look-ahead, and a mirror of the hedge accounting (the SAME v4 trigger-OR /
+    condition-AND / target helpers as :func:`_run_hedge`) so the ``pnl`` trigger
+    sees the hedge MTM realized to each bar. ``sigma_bar`` shrinks intraday
     (``ES_entry * IV_entry * sqrt(T_bar)``). At a single bar the triggers are
     tested in list order; the first to fire wins.
     """
@@ -466,16 +472,19 @@ def find_trigger_fire(
     # the exit_ts endpoint (tentative off used only for the rehedge cadence).
     off_bar = _es_at(es_bars, exit_ts)
     off_price = off_bar.price if off_bar else es_entry
-    path: list[tuple[datetime, float]] = [(on_ts, es_entry)]
+    path: list[IntradayBar] = [IntradayBar(ts=on_ts, price=es_entry)]
     for bar in es_bars:
         if on_ts < bar.ts < exit_ts:
-            path.append((bar.ts, bar.price))
-    path.append((exit_ts, off_price))
+            path.append(bar)
+    path.append(IntradayBar(ts=exit_ts, price=off_price))
 
     hedged_qty = 0.0
     last_rehedge_ts = on_ts
+    net_delta_last = 0.0
+    es_last = es_entry
     cum_hedge_pnl = 0.0  # hedge MTM realized reaching the current point
-    for i, (ts, es_price) in enumerate(path):
+    for i, es_bar in enumerate(path):
+        ts, es_price = es_bar.ts, es_bar.price
         cm = last_known_at_or_before(call_marks, ts)
         pm = last_known_at_or_before(put_marks, ts)
         call_mark = cm.price if cm else call_fallback
@@ -512,20 +521,42 @@ def find_trigger_fire(
                         type=_TRIGGER_TYPE[type(trig)], ts=ts, value=val
                     )
 
-        # Mirror the hedge cadence so cum_hedge_pnl tracks the real hedge. The
-        # "< exit_ts" guard matches _run_hedge's "never rehedge at off_ts".
+        # Mirror the v4 hedge cadence so cum_hedge_pnl tracks the real hedge —
+        # same helpers as _run_hedge. The "< exit_ts" guard matches _run_hedge's
+        # "never rehedge at off_ts"; entry establishes the hedge unconditionally.
         is_entry = i == 0
-        if hedge_enabled:
-            residual = net_delta + hedged_qty
-            interval_hit = (ts - last_rehedge_ts).total_seconds() >= (
-                interval_minutes * 60.0
-            )
-            band_hit = abs(residual) > delta_band
-            if is_entry or (ts < exit_ts and (interval_hit or band_hit)):
-                hedged_qty = -net_delta
+        if hedge.enabled:
+            execute = False
+            if is_entry:
+                execute = True
+            elif ts < exit_ts:
+                sigma_h = (
+                    es_last * iv_entry * math.sqrt(t_years)
+                    if iv_entry is not None
+                    else None
+                )
+                if _hedge_considered(
+                    hedge,
+                    ts=ts,
+                    last_rehedge_ts=last_rehedge_ts,
+                    net_delta=net_delta,
+                    net_delta_last=net_delta_last,
+                    es_price=es_price,
+                    es_last=es_last,
+                    sigma_bar=sigma_h,
+                ):
+                    new_qty = _target_hedged_qty(hedge, net_delta)
+                    if _hedge_conditions_pass(
+                        hedge.conditions, es_bar, new_qty - hedged_qty, es_tick
+                    ):
+                        execute = True
+            if execute:
+                hedged_qty = _target_hedged_qty(hedge, net_delta)
                 last_rehedge_ts = ts
-        if i + 1 < len(path) and hedge_enabled:
-            next_price = path[i + 1][1]
+                net_delta_last = net_delta
+                es_last = es_price
+        if i + 1 < len(path) and hedge.enabled:
+            next_price = path[i + 1].price
             cum_hedge_pnl += hedged_qty * (next_price - es_price)
 
     return None
@@ -552,6 +583,87 @@ def _es_at(es_bars: list[IntradayBar], ts: datetime) -> IntradayBar | None:
     return last_known_at_or_before(es_bars, ts) or snap_nearest(es_bars, ts, None)
 
 
+# --------------------------------------------------------------------------- #
+# Hedge module (v4) — trigger-OR / condition-AND / target. Shared by the real
+# hedge loop AND the exit-trigger pnl mirror so both agree bar-for-bar.
+# --------------------------------------------------------------------------- #
+def _target_hedged_qty(hedge: HedgeSpec, net_delta: float) -> float:
+    """The ES-future position a rehedge WOULD set, given ``target.mode``.
+
+    * ``zero``      -> ``-net_delta`` (residual 0).
+    * ``band_edge`` -> leave ``sign(net_delta)*delta_band`` of delta on
+      (``residual = +band`` if net_delta>=0 else ``-band``). Requires delta_band.
+    * ``ratio``     -> ``-ratio*net_delta`` (partial; residual = (1-ratio)*net_delta).
+    """
+    mode = hedge.target.mode
+    if mode == "ratio":
+        return -hedge.target.ratio * net_delta
+    if mode == "band_edge":
+        band = hedge.triggers.delta_band or 0.0
+        sign = 1.0 if net_delta >= 0.0 else -1.0
+        return -net_delta + sign * band
+    # "zero" (default)
+    return -net_delta
+
+
+def _hedge_considered(
+    hedge: HedgeSpec,
+    *,
+    ts: datetime,
+    last_rehedge_ts: datetime,
+    net_delta: float,
+    net_delta_last: float,
+    es_price: float,
+    es_last: float,
+    sigma_bar: float | None,
+) -> bool:
+    """OR of the enabled rehedge triggers (DESIGN v4). ``net_delta_last`` /
+    ``es_last`` are the net delta / ES price captured at the LAST executed hedge
+    (``sigma_bar`` uses ``es_last`` as its reference)."""
+    trig = hedge.triggers
+    if trig.interval_minutes:  # None or 0 -> off
+        if (ts - last_rehedge_ts).total_seconds() >= trig.interval_minutes * 60.0:
+            return True
+    if trig.delta_band is not None:  # |delta drift since last hedge|
+        if abs(net_delta - net_delta_last) >= trig.delta_band:
+            return True
+    sm = trig.sigma_move
+    if sm.enabled and sigma_bar is not None and sigma_bar > 0.0:
+        if abs(es_price - es_last) >= sm.n * sigma_bar:
+            return True
+    return False
+
+
+def _hedge_conditions_pass(
+    conditions: tuple | list,
+    es_bar: IntradayBar,
+    delta_to_remove: float,
+    es_tick: float,
+) -> bool:
+    """AND of the hedge execution conditions on the ES-FUTURE bar. A considered
+    rehedge that fails ANY condition is DEFERRED. ``max_spread`` /
+    ``min_quote_size`` REQUIRE a two-sided ES quote (bid/ask/sizes present); a
+    trade-only ES bar fails them. ``min_rehedge_delta`` gates on the size of the
+    ES trade the rehedge would make (``delta_to_remove``)."""
+    for c in conditions:
+        if isinstance(c, MaxSpreadCond):
+            if es_bar.bid is None or es_bar.ask is None:
+                return False
+            spread = es_bar.ask - es_bar.bid
+            floor = max(c.pct / 100.0 * es_bar.price, c.min_ticks * es_tick)
+            if spread > floor:
+                return False
+        elif isinstance(c, MinQuoteSizeCond):
+            if es_bar.bid_size is None or es_bar.ask_size is None:
+                return False
+            if not (es_bar.bid_size >= c.size and es_bar.ask_size >= c.size):
+                return False
+        elif isinstance(c, MinRehedgeDeltaCond):
+            if abs(delta_to_remove) < c.threshold:
+                return False
+    return True
+
+
 def _run_hedge(
     *,
     es_bars: list[IntradayBar],
@@ -564,8 +676,9 @@ def _run_hedge(
     strike: float,
     expiry_utc: datetime,
     side_sign: int,
-    interval_minutes: float,
-    delta_band: float,
+    hedge: HedgeSpec,
+    iv_entry: float | None,
+    es_tick: float,
     rate: float,
     call_fallback: float,
     put_fallback: float,
@@ -574,20 +687,29 @@ def _run_hedge(
     """Delta-hedge the COMBINED net delta over the BOTH-ON window
     ``[on_ts, off_ts]`` (single-leg legging windows are UNHEDGED, per DESIGN).
 
-    Returns ``(hedge_trades, hedge_pnl_pts)``.
+    v4 module: the entry hedge at ``on_ts`` establishes the position
+    unconditionally (applying ``target``); each interior ES bar CONSIDERS a
+    rehedge if ANY trigger fires (OR) and EXECUTES only if ALL conditions pass on
+    that ES bar (AND) — else it DEFERS. Returns ``(hedge_trades, hedge_pnl_pts)``.
     """
     hedge_trades: list[HedgeTrade] = []
     hedge_pnl_pts = 0.0
 
-    path: list[tuple[datetime, float]] = [(on_ts, on_price)]
+    # Interior points carry their real ES bar (with quote fields for conditions);
+    # the on/off anchors are synthetic price-only endpoints (entry is
+    # unconditional; off never rehedges — both bypass conditions).
+    path: list[IntradayBar] = [IntradayBar(ts=on_ts, price=on_price)]
     for bar in es_bars:
         if on_ts < bar.ts < off_ts:
-            path.append((bar.ts, bar.price))
-    path.append((off_ts, off_price))
+            path.append(bar)
+    path.append(IntradayBar(ts=off_ts, price=off_price))
 
     hedged_qty = 0.0
     last_rehedge_ts = on_ts
-    for i, (ts, es_price) in enumerate(path):
+    net_delta_last = 0.0
+    es_last = on_price
+    for i, bar in enumerate(path):
+        ts, es_price = bar.ts, bar.price
         # Delta marks carry-forward: LAST KNOWN option quote at/before ``ts`` —
         # never a quote printed after ``ts`` (no look-ahead).
         cm = last_known_at_or_before(call_marks, ts)
@@ -604,15 +726,33 @@ def _run_hedge(
             rate,
         )
         is_entry = i == 0
-        residual = net_delta + hedged_qty
-        interval_hit = (ts - last_rehedge_ts).total_seconds() >= (
-            interval_minutes * 60.0
-        )
-        band_hit = abs(residual) > delta_band
-        # Never rehedge exactly at off_ts (position is being closed there).
-        if is_entry or (ts < off_ts and (interval_hit or band_hit)):
-            hedged_qty = -net_delta
+        execute = False
+        if is_entry:
+            execute = True  # establish the hedge (unconditional)
+        elif ts < off_ts:  # never rehedge exactly at off_ts (closing there)
+            sigma_bar = (
+                es_last * iv_entry * math.sqrt(t_years) if iv_entry is not None else None
+            )
+            if _hedge_considered(
+                hedge,
+                ts=ts,
+                last_rehedge_ts=last_rehedge_ts,
+                net_delta=net_delta,
+                net_delta_last=net_delta_last,
+                es_price=es_price,
+                es_last=es_last,
+                sigma_bar=sigma_bar,
+            ):
+                new_qty = _target_hedged_qty(hedge, net_delta)
+                if _hedge_conditions_pass(
+                    hedge.conditions, bar, new_qty - hedged_qty, es_tick
+                ):
+                    execute = True
+        if execute:
+            hedged_qty = _target_hedged_qty(hedge, net_delta)
             last_rehedge_ts = ts
+            net_delta_last = net_delta
+            es_last = es_price
             hedge_trades.append(
                 HedgeTrade(
                     ts=ts,
@@ -622,7 +762,7 @@ def _run_hedge(
                 )
             )
         if i + 1 < len(path):
-            next_price = path[i + 1][1]
+            next_price = path[i + 1].price
             hedge_pnl_pts += hedged_qty * (next_price - es_price)
 
     return hedge_trades, hedge_pnl_pts
@@ -645,9 +785,8 @@ def simulate_day(
     exit_conditions: tuple | list = (),
     exit_triggers: tuple | list = (),
     tick_size: float = ES_OPTION_TICK_SIZE,
-    hedge_enabled: bool,
-    interval_minutes: float,
-    delta_band: float,
+    hedge: HedgeSpec | None = None,
+    es_tick: float = ES_FUTURE_TICK_SIZE,
     es_day_open: float | None = None,
     multiplier: float = ES_MULTIPLIER,
     rate: float = 0.0,
@@ -667,6 +806,7 @@ def simulate_day(
     if exit_ts <= entry_ts:
         raise ValueError("exit_ts must be after entry_ts")
     kernel = kernel or BS76Kernel()
+    hedge = hedge or _HEDGE_DISABLED
     side_sign = 1 if side == "long" else -1
 
     # ES "day open" reference for max_underlying_move (recon: first ES bar of
@@ -707,15 +847,22 @@ def simulate_day(
     es_on = _es_at(es_bars, straddle_on_ts)
     expiry_utc = _expiry_utc(expiry, tz)
 
-    # --- Early-exit TRIGGERS (v3): may close the straddle before exit.time #
-    exit_trigger: ExitTrigger | None = None
-    if exit_triggers and es_on is not None and straddle_on_ts < exit_ts:
-        p_entry_prem = c_entry.price + p_entry.price
+    # ATM entry IV (Black-76 inversion of the entry straddle) — shared by the
+    # exit sigma_move trigger AND the hedge sigma_move trigger. Computed once,
+    # only when either needs it (thin/one-sided entry -> None -> sigma disabled).
+    hedge_sigma_on = hedge.enabled and hedge.triggers.sigma_move.enabled
+    iv_entry: float | None = None
+    if (exit_triggers or hedge_sigma_on) and es_on is not None:
         t_entry = _year_fraction(straddle_on_ts, expiry_utc)
         iv_entry = entry_atm_iv(
             kernel, es_on.price, strike, t_entry,
             c_entry.price, p_entry.price, rate,
         )
+
+    # --- Early-exit TRIGGERS (v3): may close the straddle before exit.time #
+    exit_trigger: ExitTrigger | None = None
+    if exit_triggers and es_on is not None and straddle_on_ts < exit_ts:
+        p_entry_prem = c_entry.price + p_entry.price
         exit_trigger = find_trigger_fire(
             triggers=exit_triggers,
             es_bars=es_bars,
@@ -731,9 +878,8 @@ def simulate_day(
             side_sign=side_sign,
             rate=rate,
             multiplier=multiplier,
-            hedge_enabled=hedge_enabled,
-            interval_minutes=interval_minutes,
-            delta_band=delta_band,
+            hedge=hedge,
+            es_tick=es_tick,
             call_fallback=c_entry.price,
             put_fallback=p_entry.price,
             kernel=kernel,
@@ -801,7 +947,7 @@ def simulate_day(
     # --- Delta hedge over the BOTH-ON window ---------------------------- #
     hedge_trades: list[HedgeTrade] = []
     hedge_pnl_pts = 0.0
-    if hedge_enabled and straddle_off_ts > straddle_on_ts and es_on and es_off:
+    if hedge.enabled and straddle_off_ts > straddle_on_ts and es_on and es_off:
         hedge_trades, hedge_pnl_pts = _run_hedge(
             es_bars=es_bars,
             call_marks=call_marks,
@@ -813,8 +959,9 @@ def simulate_day(
             strike=strike,
             expiry_utc=expiry_utc,
             side_sign=side_sign,
-            interval_minutes=interval_minutes,
-            delta_band=delta_band,
+            hedge=hedge,
+            iv_entry=iv_entry,
+            es_tick=es_tick,
             rate=rate,
             call_fallback=c_entry.price,
             put_fallback=p_entry.price,

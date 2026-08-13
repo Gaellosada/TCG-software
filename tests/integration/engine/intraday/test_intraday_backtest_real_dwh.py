@@ -63,6 +63,25 @@ async def test_es_future_intraday_bars_present(reader):
     assert all(b.price > 0 for b in bars)
 
 
+async def test_es_future_bars_carry_quotes(reader):
+    # v4: the ES future bbo-1m serie must surface bid/ask/sizes on the front
+    # contract (the fields the hedge max_spread / min_quote_size conditions read).
+    day = date(2025, 6, 16)
+    start_ts = resolve_et_to_utc(day, "09:30")
+    end_ts = resolve_et_to_utc(day, "16:00")
+    bars = await reader.fetch_es_future_1m(start_ts, end_ts, on_or_after=day)
+    quoted = [b for b in bars if b.bid is not None and b.ask is not None]
+    assert quoted, (
+        "expected some ES-future bars to carry two-sided bbo quotes "
+        "(bid/ask) for the hedge conditions"
+    )
+    b = quoted[0]
+    assert b.ask >= b.bid > 0
+    assert b.bid_size is not None and b.ask_size is not None
+    # ES-future tick constant exposed via the getter (documented 0.25 pts).
+    assert await reader.get_es_future_tick_size() == 0.25
+
+
 async def test_run_backtest_end_to_end(reader):
     # v2 request shape: entry/exit rule MODULES (time + snap tolerance +
     # conditions). A light max_spread condition exercises the conditional path
@@ -76,6 +95,16 @@ async def test_run_backtest_end_to_end(reader):
         expiry_mode="NDTE",
         dte=0,
         straddle_side="long",
+        # v4 hedge module: interval + band triggers, an ES-bar spread guard, and
+        # a band-edge target — exercises the configurable hedge on real ES bbo.
+        hedge={
+            "enabled": True,
+            "instrument": "es_future",
+            "triggers": {"interval_minutes": 15, "delta_band": 0.1,
+                         "sigma_move": {"enabled": False, "n": 1.0}},
+            "conditions": [{"type": "max_spread", "pct": 50.0, "min_ticks": 8}],
+            "target": {"mode": "band_edge", "ratio": 1.0},
+        },
     )
     result = await run_backtest(reader, req)
 

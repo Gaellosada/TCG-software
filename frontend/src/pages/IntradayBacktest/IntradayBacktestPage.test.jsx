@@ -261,11 +261,23 @@ describe('IntradayBacktestPage', () => {
     expect(lastRunBody.expiry_mode).toBe('0DTE');
     expect(typeof lastRunBody.dte).toBe('number');
     expect(lastRunBody.straddle_side).toBe('short');
+    // Hedge is now the PINNED v4 nested module (this test leaves it at its
+    // defaults). The OLD flat interval_minutes/delta_band top-level fields are
+    // gone — see the dedicated v4 hedge tests for a configured payload.
     expect(lastRunBody.hedge).toEqual({
-      enabled: expect.any(Boolean),
-      interval_minutes: expect.any(Number),
-      delta_band: expect.any(Number),
+      enabled: true,
+      instrument: 'es_future',
+      triggers: {
+        interval_minutes: 15,
+        delta_band: 0.10,
+        sigma_move: { enabled: false, n: 1.0 },
+      },
+      conditions: [],
+      target: { mode: 'zero', ratio: 1.0 },
     });
+    // Old flat hedge fields must NOT leak at the top of `hedge`.
+    expect(lastRunBody.hedge.interval_minutes).toBeUndefined();
+    expect(lastRunBody.hedge.delta_band).toBeUndefined();
 
     // Old flat fields are gone.
     expect(lastRunBody.entry_time).toBeUndefined();
@@ -601,5 +613,208 @@ describe('IntradayBacktestPage', () => {
     const excluded = document.querySelector('[data-testid="day-cell"][data-date="2025-02-17"]');
     expect(excluded.querySelector('[data-testid="trigger-marker"]')).toBeNull();
     expect(excluded.getAttribute('data-exit-trigger')).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // v4 — Hedge as a configurable MODULE (DESIGN.md "Hedge as a configurable
+  // module (PINNED)"). Replaces the flat hedge:{enabled,interval,band} with a
+  // module: enable + instrument + triggers (interval, band, σ-move) +
+  // conditions (hedge types) + target (zero | band_edge | ratio).
+  // -------------------------------------------------------------------------
+  const optionValues = (sel) =>
+    Array.from(sel.querySelectorAll('option')).map((o) => o.value).filter(Boolean);
+
+  it('renders the Hedge module — instrument, triggers (interval/band/σ-move), conditions builder + target', async () => {
+    await renderReady();
+    expect(screen.getByTestId('hedge-module')).toBeTruthy();
+
+    // Enable toggle (as before).
+    expect(screen.getByLabelText('Delta-hedge enabled')).toBeTruthy();
+
+    // "Hedge with" instrument dropdown — one option today (es_future).
+    const instrument = screen.getByTestId('hedge-instrument');
+    expect(instrument).toBeTruthy();
+    expect(optionValues(instrument)).toEqual(['es_future']);
+
+    // Triggers: interval + delta band + σ-move (enable toggle + n).
+    expect(screen.getByLabelText('Hedge interval minutes')).toBeTruthy();
+    expect(screen.getByLabelText('Delta band')).toBeTruthy();
+    expect(screen.getByTestId('hedge-sigma-enable')).toBeTruthy();
+    expect(screen.getByTestId('hedge-sigma-n')).toBeTruthy();
+    // σ-move help copy names the n×σ semantics.
+    expect(screen.getByTestId('hedge-sigma-help').getAttribute('title')).toMatch(/n×σ/);
+    expect(screen.getByTestId('hedge-sigma-help').getAttribute('title')).toMatch(/1σ move/);
+
+    // Conditions builder present with an empty hint + its own dropdown.
+    expect(screen.getByTestId('hedge-add-condition')).toBeTruthy();
+    expect(screen.getByTestId('hedge-conditions-empty')).toBeTruthy();
+
+    // Target selector: three modes, ratio input hidden until "ratio" chosen.
+    const target = screen.getByTestId('hedge-target');
+    expect(optionValues(target)).toEqual(['zero', 'band_edge', 'ratio']);
+    expect(screen.queryByTestId('hedge-ratio')).toBeNull();
+    fireEvent.change(target, { target: { value: 'ratio' } });
+    expect(screen.getByTestId('hedge-ratio')).toBeTruthy();
+    // Switching away hides it again.
+    fireEvent.change(target, { target: { value: 'zero' } });
+    expect(screen.queryByTestId('hedge-ratio')).toBeNull();
+  });
+
+  it('adding a hedge condition reveals its params (min_rehedge_delta threshold)', async () => {
+    await renderReady();
+    expect(screen.getByTestId('hedge-conditions-empty')).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId('hedge-add-condition'), { target: { value: 'min_rehedge_delta' } });
+    expect(screen.getByTestId('hedge-condition-min_rehedge_delta')).toBeTruthy();
+    expect(screen.getByLabelText('hedge min_rehedge_delta threshold')).toBeTruthy();
+
+    // A shared type (max_spread) still renders its own pct + min_ticks inputs.
+    fireEvent.change(screen.getByTestId('hedge-add-condition'), { target: { value: 'max_spread' } });
+    expect(screen.getByLabelText('hedge max_spread pct')).toBeTruthy();
+    expect(screen.getByLabelText('hedge max_spread min ticks')).toBeTruthy();
+
+    // Removing the min_rehedge_delta row drops just that condition.
+    fireEvent.click(screen.getByLabelText('Remove Min rehedge delta condition'));
+    expect(screen.queryByTestId('hedge-condition-min_rehedge_delta')).toBeNull();
+    expect(screen.getByTestId('hedge-condition-max_spread')).toBeTruthy();
+  });
+
+  it('condition builders offer their OWN types — no cross-contamination', async () => {
+    await renderReady();
+
+    // ENTRY / EXIT offer the v2 types (incl. min_premium, max_underlying_move)
+    // and NOT the hedge-only min_rehedge_delta.
+    const entryTypes = optionValues(screen.getByTestId('entry-add-condition'));
+    expect(entryTypes).toEqual(['max_spread', 'min_quote_size', 'min_premium', 'max_underlying_move']);
+    expect(entryTypes).not.toContain('min_rehedge_delta');
+    const exitTypes = optionValues(screen.getByTestId('exit-add-condition'));
+    expect(exitTypes).toEqual(entryTypes);
+
+    // HEDGE offers the v4 types (incl. min_rehedge_delta) and NOT the
+    // entry/exit-only min_premium / max_underlying_move.
+    const hedgeTypes = optionValues(screen.getByTestId('hedge-add-condition'));
+    expect(hedgeTypes).toEqual(['max_spread', 'min_quote_size', 'min_rehedge_delta']);
+    expect(hedgeTypes).not.toContain('min_premium');
+    expect(hedgeTypes).not.toContain('max_underlying_move');
+  });
+
+  it('serializes the configured hedge module to the PINNED v4 shape', async () => {
+    await renderReady();
+
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2025-02-01' } });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-03-31' } });
+
+    // Triggers: keep interval/band, enable σ-move and set n.
+    fireEvent.change(screen.getByLabelText('Hedge interval minutes'), { target: { value: '20' } });
+    fireEvent.change(screen.getByLabelText('Delta band'), { target: { value: '0.15' } });
+    fireEvent.click(screen.getByTestId('hedge-sigma-enable'));
+    fireEvent.change(screen.getByTestId('hedge-sigma-n'), { target: { value: '2' } });
+
+    // A hedge condition (max_spread).
+    fireEvent.change(screen.getByTestId('hedge-add-condition'), { target: { value: 'max_spread' } });
+    fireEvent.change(screen.getByLabelText('hedge max_spread pct'), { target: { value: '3' } });
+    fireEvent.change(screen.getByLabelText('hedge max_spread min ticks'), { target: { value: '1' } });
+
+    // Target = ratio (exercises the ratio input).
+    fireEvent.change(screen.getByTestId('hedge-target'), { target: { value: 'ratio' } });
+    fireEvent.change(screen.getByTestId('hedge-ratio'), { target: { value: '0.5' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(lastRunBody).not.toBeNull());
+
+    const h = lastRunBody.hedge;
+    expect(h.enabled).toBe(true);
+    expect(h.instrument).toBe('es_future');
+    // Nested triggers incl. sigma_move enabled.
+    expect(h.triggers.interval_minutes).toBe(20);
+    expect(h.triggers.delta_band).toBe(0.15);
+    expect(h.triggers.sigma_move).toEqual({ enabled: true, n: 2 });
+    // Conditions carry the max_spread hedge condition.
+    expect(Array.isArray(h.conditions)).toBe(true);
+    expect(h.conditions).toContainEqual({ type: 'max_spread', pct: 3, min_ticks: 1 });
+    // Target mode + ratio.
+    expect(h.target).toEqual({ mode: 'ratio', ratio: 0.5 });
+    // Old flat fields are gone.
+    expect(h.interval_minutes).toBeUndefined();
+    expect(h.delta_band).toBeUndefined();
+  });
+
+  it('clears interval + band to null and serializes the σ-only "wait for 1σ" payload', async () => {
+    await renderReady();
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2025-02-01' } });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-03-31' } });
+
+    // Turn interval + band OFF by clearing them; enable σ-move with n=1.
+    fireEvent.change(screen.getByLabelText('Hedge interval minutes'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Delta band'), { target: { value: '' } });
+    // Both fields now show a visible "off" hint.
+    expect(screen.getByTestId('hedge-interval-off')).toBeTruthy();
+    expect(screen.getByTestId('hedge-band-off')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('hedge-sigma-enable'));
+    fireEvent.change(screen.getByTestId('hedge-sigma-n'), { target: { value: '1' } });
+
+    // σ-move armed → no un-triggerable warning, Run enabled.
+    expect(screen.queryByTestId('hedge-no-trigger-hint')).toBeNull();
+    const runBtn = screen.getByRole('button', { name: /run backtest/i });
+    expect(runBtn.disabled).toBe(false);
+
+    fireEvent.click(runBtn);
+    await waitFor(() => expect(lastRunBody).not.toBeNull());
+
+    // PINNED σ-only shape: interval + band NULL (off, NOT 0), σ-move enabled.
+    expect(lastRunBody.hedge.triggers).toEqual({
+      interval_minutes: null,
+      delta_band: null,
+      sigma_move: { enabled: true, n: 1 },
+    });
+    // Explicitly: the band is null, never 0 (which the backend reads as
+    // "fire every bar").
+    expect(lastRunBody.hedge.triggers.delta_band).toBeNull();
+    expect(lastRunBody.hedge.triggers.delta_band).not.toBe(0);
+  });
+
+  it('preserves band=0 (fire-every-bar) as distinct from a blank band (off)', async () => {
+    await renderReady();
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2025-02-01' } });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-03-31' } });
+
+    // Explicit 0 in the band → fire every bar, serialized as 0 (NOT null).
+    fireEvent.change(screen.getByLabelText('Delta band'), { target: { value: '0' } });
+    expect(screen.queryByTestId('hedge-band-off')).toBeNull(); // 0 is not "off"
+
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(lastRunBody).not.toBeNull());
+    expect(lastRunBody.hedge.triggers.delta_band).toBe(0);
+  });
+
+  it('blocks Run when hedging is enabled but no trigger is armed', async () => {
+    await renderReady();
+    // Clear interval + band, leave σ-move off → no trigger armed.
+    fireEvent.change(screen.getByLabelText('Hedge interval minutes'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Delta band'), { target: { value: '' } });
+
+    // Module surfaces the hint and Run is disabled.
+    expect(screen.getByTestId('hedge-no-trigger-hint')).toBeTruthy();
+    const runBtn = screen.getByRole('button', { name: /run backtest/i });
+    expect(runBtn.disabled).toBe(true);
+    expect(runBtn.getAttribute('title')).toMatch(/at least one hedge trigger/i);
+
+    // Arming σ-move clears the block.
+    fireEvent.click(screen.getByTestId('hedge-sigma-enable'));
+    expect(screen.queryByTestId('hedge-no-trigger-hint')).toBeNull();
+    expect(runBtn.disabled).toBe(false);
+  });
+
+  it('disables hedge sub-controls when the module is turned off', async () => {
+    await renderReady();
+    // Enabled by default → interval editable.
+    expect(screen.getByLabelText('Hedge interval minutes').disabled).toBe(false);
+    // Turn the module off.
+    fireEvent.click(screen.getByLabelText('Delta-hedge enabled'));
+    expect(screen.getByLabelText('Hedge interval minutes').disabled).toBe(true);
+    expect(screen.getByLabelText('Delta band').disabled).toBe(true);
+    expect(screen.getByTestId('hedge-instrument').disabled).toBe(true);
+    expect(screen.getByTestId('hedge-add-condition').disabled).toBe(true);
+    expect(screen.getByTestId('hedge-target').disabled).toBe(true);
   });
 });

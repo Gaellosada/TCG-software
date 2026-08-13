@@ -14,6 +14,11 @@ import EntryExitModule, {
   serializeModule,
   serializePartialModule,
 } from './EntryExitModule';
+import HedgeModule, {
+  defaultHedgeModule,
+  serializeHedge,
+  hedgeTriggersAllOff,
+} from './HedgeModule';
 import styles from './IntradayBacktestPage.module.css';
 
 // Progress poll cadence (ms). Kept small so the "X / N days" readout tracks the
@@ -38,17 +43,15 @@ const POLL_INTERVAL_MS = 400;
 // ---------------------------------------------------------------------------
 
 // The flat entry_time / exit_time / snap_tolerance_minutes are gone (DESIGN.md
-// v2). Entry and Exit are now full "rule modules" held in their own state; the
-// form keeps only the scalar params below.
+// v2), and the flat hedge fields are gone (DESIGN.md v4). Entry, Exit and Hedge
+// are now full "rule modules" held in their own state; the form keeps only the
+// scalar params below.
 const DEFAULT_FORM = {
   start_date: '',
   end_date: '',
   expiry_mode: '0DTE',
   dte: 0,
   straddle_side: 'long',
-  hedge_enabled: true,
-  interval_minutes: 15,
-  delta_band: 0.10,
 };
 
 function clampToWindow(value, win) {
@@ -64,23 +67,6 @@ function signClass(v) {
   if (v < 0) return styles.negative;
   return '';
 }
-
-// In-app help for the hedge interval + delta band fields. Copy mirrors what the
-// engine actually does (tcg/engine/intraday_backtest.py simulate_day): the
-// straddle's net delta is re-hedged with the ES future on a fixed clock OR when
-// the open (unhedged) net delta breaches the band — whichever fires first.
-const HEDGE_INTERVAL_HELP = "How often the straddle's delta is re-hedged with "
-  + 'the ES future on a fixed clock: every N minutes the position is brought '
-  + 'back toward delta-neutral, no matter how little it has drifted. Smaller = '
-  + 'more frequent hedging (tighter neutrality, more hedge trades); larger = '
-  + 'looser. A rehedge also fires early if the delta drifts past the band.';
-
-const DELTA_BAND_HELP = 'Rehedge as soon as the open (unhedged) net delta drifts '
-  + 'past this threshold, in ES-future-equivalent units (~0–1 for one ATM '
-  + 'straddle), without waiting for the clock. Smaller = react to smaller '
-  + 'moves (tighter neutrality, more trades); larger = tolerate more drift; 0 '
-  + 'rehedges on every bar. Whichever fires first — the timed rehedge or the '
-  + 'band — triggers a rehedge.';
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
 
@@ -230,6 +216,9 @@ export default function IntradayBacktestPage() {
   // conditions array. Held separately from the scalar form fields.
   const [entry, setEntry] = useState(defaultEntryModule);
   const [exit, setExit] = useState(defaultExitModule);
+  // Hedge rule module (v4): enable + instrument + triggers (interval, band,
+  // σ-move) + conditions + target. Replaces the flat hedge fields.
+  const [hedge, setHedge] = useState(defaultHedgeModule);
   // Unified "Custom days" control (supersedes the old exception_dates +
   // date_overrides). Each row: exclude the day, OR expand to override entry
   // and/or exit via the SAME EntryExitModule (partial — only set fields sent).
@@ -322,11 +311,7 @@ export default function IntradayBacktestPage() {
     expiry_mode: form.expiry_mode,
     dte: Number(form.dte) || 0,
     straddle_side: form.straddle_side,
-    hedge: {
-      enabled: Boolean(form.hedge_enabled),
-      interval_minutes: Number(form.interval_minutes),
-      delta_band: Number(form.delta_band),
-    },
+    hedge: serializeHedge(hedge),
     entry: serializeModule(entry),
     exit: serializeModule(exit),
     custom_days: customDays.map((c) => {
@@ -338,7 +323,7 @@ export default function IntradayBacktestPage() {
       if (x) out.exit = x;
       return out;
     }),
-  }), [form, entry, exit, customDays]);
+  }), [form, hedge, entry, exit, customDays]);
 
   const runDisabledReason = useMemo(() => {
     if (running) return 'Running…';
@@ -347,8 +332,13 @@ export default function IntradayBacktestPage() {
     if (entry.time && exit.time && exit.time <= entry.time) {
       return 'Exit time must be after entry time';
     }
+    // Guard (v4): a hedge that is enabled but has no armed trigger can never
+    // rehedge — block Run rather than send an un-triggerable hedge.
+    if (hedge.enabled && hedgeTriggersAllOff(hedge)) {
+      return 'Enable at least one hedge trigger (interval, band, or σ-move)';
+    }
     return null;
-  }, [running, form, entry.time, exit.time]);
+  }, [running, form, entry.time, exit.time, hedge]);
 
   // Async run: start a background job, then poll its progress until done/error.
   // Validation failures (400) surface synchronously from the start call.
@@ -506,61 +496,16 @@ export default function IntradayBacktestPage() {
             </select>
           </label>
 
-          {/* Delta hedge. */}
-          <label className={`${styles.field} ${styles.checkboxRow}`}>
-            <input
-              type="checkbox"
-              aria-label="Delta-hedge enabled"
-              checked={form.hedge_enabled}
-              onChange={(e) => setField('hedge_enabled', e.target.checked)}
-            />
-            <span>Delta-hedge</span>
-          </label>
-          <label className={styles.field}>
-            <span className={styles.labelRow}>
-              Hedge interval (min)
-              <span
-                className={styles.help}
-                data-testid="hedge-interval-help"
-                role="img"
-                aria-label={HEDGE_INTERVAL_HELP}
-                title={HEDGE_INTERVAL_HELP}
-              >
-                ⓘ
-              </span>
-            </span>
-            <input
-              type="number"
-              min={1}
-              aria-label="Hedge interval minutes"
-              value={form.interval_minutes}
-              disabled={!form.hedge_enabled}
-              onChange={(e) => setField('interval_minutes', e.target.value)}
-            />
-          </label>
-          <label className={styles.field}>
-            <span className={styles.labelRow}>
-              Delta band
-              <span
-                className={styles.help}
-                data-testid="delta-band-help"
-                role="img"
-                aria-label={DELTA_BAND_HELP}
-                title={DELTA_BAND_HELP}
-              >
-                ⓘ
-              </span>
-            </span>
-            <input
-              type="number"
-              step="0.01"
-              min={0}
-              aria-label="Delta band"
-              value={form.delta_band}
-              disabled={!form.hedge_enabled}
-              onChange={(e) => setField('delta_band', e.target.value)}
-            />
-          </label>
+        </div>
+
+        {/* Hedge rule module (v4): enable + instrument + triggers (interval,
+            delta band, σ-move) + a Conditions builder (hedge types) + target
+            selector. Replaces the old flat hedge controls. */}
+        <div className={styles.modulesRow} data-testid="hedge-module-row">
+          <div className={styles.moduleColumn}>
+            <div className={styles.moduleHeading}>Hedge rule</div>
+            <HedgeModule value={hedge} onChange={setHedge} />
+          </div>
         </div>
 
         {/* Entry & Exit rule modules (v2): time + own snap tolerance + a

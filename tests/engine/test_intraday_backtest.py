@@ -30,19 +30,56 @@ from tcg.engine.intraday_backtest import (
 )
 from tcg.engine.options.pricing import BS76Kernel
 from tcg.types.intraday import (
+    ES_FUTURE_TICK_SIZE,
     ES_OPTION_TICK_SIZE,
+    HedgeSpec,
+    HedgeTargetSpec,
+    HedgeTriggers,
     IntradayBar,
     MaxSpreadCond,
     MaxUnderlyingMoveCond,
     MinPremiumCond,
     MinQuoteSizeCond,
+    MinRehedgeDeltaCond,
     NetDeltaTrigger,
     PnlTrigger,
+    SigmaMoveHedgeTrigger,
     SigmaMoveTrigger,
     UnderlyingMoveTrigger,
 )
 
 UTC = timezone.utc
+
+
+def _hspec(
+    *,
+    enabled: bool = True,
+    interval_minutes: float | None = 15.0,
+    delta_band: float | None = 0.10,
+    sigma_enabled: bool = False,
+    sigma_n: float = 1.0,
+    conditions: tuple = (),
+    mode: str = "zero",
+    ratio: float = 1.0,
+    instrument: str = "es_future",
+) -> HedgeSpec:
+    """Build a v4 engine HedgeSpec from flat kwargs (test convenience)."""
+    return HedgeSpec(
+        enabled=enabled,
+        instrument=instrument,
+        triggers=HedgeTriggers(
+            interval_minutes=interval_minutes,
+            delta_band=delta_band,
+            sigma_move=SigmaMoveHedgeTrigger(enabled=sigma_enabled, n=sigma_n),
+        ),
+        conditions=tuple(conditions),
+        target=HedgeTargetSpec(mode=mode, ratio=ratio),
+    )
+
+
+def _esq(ts: datetime, price: float, *, bid=None, ask=None, bs=None, as_=None) -> IntradayBar:
+    """A quoted ES-future bar (two-sided when bid/ask supplied)."""
+    return IntradayBar(ts=ts, price=price, bid=bid, ask=ask, bid_size=bs, ask_size=as_)
 
 
 def _bars(base: datetime, prices: list[float], step_min: int = 1) -> list[IntradayBar]:
@@ -208,7 +245,7 @@ def _day(**over):
         date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
         es_bars=es, call_marks=calls, put_marks=puts,
         entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
-        hedge_enabled=False, interval_minutes=15.0, delta_band=0.10,
+        hedge=_hspec(enabled=False),
     )
     kwargs.update(over)
     return kwargs
@@ -318,7 +355,7 @@ def test_pnl_sign_long_vs_short_and_dollarization():
         date_int=20250303, strike=5000.0, expiry=date(2025, 3, 4),
         es_bars=es, call_marks=calls, put_marks=puts,
         entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
-        hedge_enabled=False, interval_minutes=15.0, delta_band=0.10,
+        hedge=_hspec(enabled=False),
     )
     long_res = simulate_day(side="long", **common)
     short_res = simulate_day(side="short", **common)
@@ -348,7 +385,7 @@ def test_hedge_triggers_on_interval():
         date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
         es_bars=es, call_marks=marks, put_marks=marks,
         entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
-        hedge_enabled=True, interval_minutes=1.0, delta_band=10.0,
+        hedge=_hspec(enabled=True, interval_minutes=1.0, delta_band=10.0),
     )
     assert res.status == "ok"
     assert len(res.hedge_trades) >= 4  # entry + one per minute (not at off_ts)
@@ -366,7 +403,7 @@ def test_hedge_triggers_on_band():
         date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
         es_bars=es, call_marks=marks, put_marks=marks,
         entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
-        hedge_enabled=True, interval_minutes=999.0, delta_band=0.20,
+        hedge=_hspec(enabled=True, interval_minutes=999.0, delta_band=0.20),
     )
     assert res.status == "ok"
     assert len(res.hedge_trades) == 2  # entry + band rehedge at the +200 bar
@@ -392,7 +429,7 @@ def _monotone_es_day(prices: list[float]):
         date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
         es_bars=es, call_marks=marks, put_marks=marks,
         entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
-        hedge_enabled=True, interval_minutes=999.0, delta_band=10.0,
+        hedge=_hspec(enabled=True, interval_minutes=999.0, delta_band=10.0),
         kernel=_FixedKernel(),
     )
 
@@ -410,7 +447,7 @@ def test_hedge_pnl_numerical_sign_and_magnitude():
 
 
 def test_no_hedge_when_disabled():
-    res = simulate_day(**_day(hedge_enabled=False))
+    res = simulate_day(**_day(hedge=_hspec(enabled=False)))
     assert res.hedge_trades == () and res.pnl.hedge_pnl_pts == 0.0
 
 
@@ -430,7 +467,7 @@ def test_hedge_window_starts_at_straddle_on_ts_when_legs_asymmetric():
             _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50)]
     res = simulate_day(**_day(call_marks=calls, put_marks=puts, es_bars=es,
                               exit_ts=exit_, entry_conditions=cond, exit_conditions=cond,
-                              hedge_enabled=True, interval_minutes=1.0, delta_band=10.0))
+                              hedge=_hspec(enabled=True, interval_minutes=1.0, delta_band=10.0)))
     assert res.status == "ok"
     assert res.hedge_trades  # hedged
     on_ts = res.straddle_on_ts
@@ -453,7 +490,7 @@ def test_no_hedge_when_both_on_window_empty():
     puts = [IntradayBar(entry + timedelta(minutes=5), 30.0)]
     res = simulate_day(**_day(call_marks=calls, put_marks=puts, es_bars=es,
                               exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
-                              hedge_enabled=True, interval_minutes=1.0, delta_band=10.0))
+                              hedge=_hspec(enabled=True, interval_minutes=1.0, delta_band=10.0)))
     assert res.status == "ok"
     assert res.straddle_off_ts <= res.straddle_on_ts
     assert res.hedge_trades == ()          # no hedge over an empty window
@@ -569,7 +606,7 @@ def test_trigger_sigma_move_shrinks_intraday():
         date_int=20250303, side="long", strike=5000.0, expiry=day,  # 0DTE
         es_bars=es, call_marks=marks, put_marks=marks,
         entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
-        hedge_enabled=False, interval_minutes=15.0, delta_band=0.1,
+        hedge=_hspec(enabled=False),
         kernel=_PinnedVolKernel(),
         exit_triggers=[SigmaMoveTrigger(n=1.0)],
     )
@@ -590,7 +627,7 @@ def test_trigger_sigma_move_big_move_fires_immediately():
         date_int=20250303, side="long", strike=5000.0, expiry=day,
         es_bars=es, call_marks=marks, put_marks=marks,
         entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
-        hedge_enabled=False, interval_minutes=15.0, delta_band=0.1,
+        hedge=_hspec(enabled=False),
         kernel=_PinnedVolKernel(), exit_triggers=[SigmaMoveTrigger(n=1.0)],
     )
     assert res.exit_trigger is not None
@@ -623,8 +660,7 @@ def _pnl_base():
     base = dict(
         date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
         es_bars=es, put_marks=put, entry_ts=entry, exit_ts=exit_,
-        entry_tol=10.0, exit_tol=10.0, hedge_enabled=False,
-        interval_minutes=15.0, delta_band=0.1,
+        entry_tol=10.0, exit_tol=10.0, hedge=_hspec(enabled=False),
     )
     return base, entry, n
 
@@ -732,7 +768,7 @@ def test_no_trigger_fire_falls_back_to_time_exit_unchanged():
     puts = _bars(entry, [30.0] * 31)
     common = dict(
         es_bars=es, call_marks=calls, put_marks=puts,
-        hedge_enabled=True, interval_minutes=5.0, delta_band=0.2,
+        hedge=_hspec(enabled=True, interval_minutes=5.0, delta_band=0.2),
     )
     # A never-firing trigger must produce the SAME result as no triggers at all.
     baseline = simulate_day(**_day(**common))
@@ -749,4 +785,127 @@ def test_no_triggers_field_is_v2_time_exit():
     # The v2 path (no exit_triggers arg) is unchanged: exit at exit.time.
     res = simulate_day(**_day())
     assert res.exit_trigger is None
+    assert res.status == "ok"
+
+
+# --------------------------------------------------------------------------- #
+# v4 — Hedge as a configurable module (triggers-OR / conditions-AND / target)
+# --------------------------------------------------------------------------- #
+def _hedge_day(es_bars, hedge, kernel=None, minutes=4):
+    """A day whose both-on window spans ``minutes`` with dense option marks."""
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = entry + timedelta(minutes=minutes)
+    n = minutes + 1
+    marks = _bars(entry, [30.0] * n)
+    return dict(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es_bars, call_marks=marks, put_marks=marks,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=hedge, kernel=kernel or _MoneynessKernel(),
+    ), entry
+
+
+def test_hedge_target_zero_band_edge_ratio():
+    # _FixedKernel pins net delta to +0.5 (constant), so target math is exact.
+    es = _bars(resolve_et_to_utc(date(2025, 3, 3), "10:00"), [5000.0] * 5)
+    kw_z, _ = _hedge_day(es, _hspec(interval_minutes=999.0, delta_band=10.0,
+                                    mode="zero"), kernel=_FixedKernel())
+    z = simulate_day(**kw_z)
+    assert z.hedge_trades[0].hedge_qty == pytest.approx(-0.5)      # -net_delta
+
+    kw_r, _ = _hedge_day(es, _hspec(interval_minutes=999.0, delta_band=10.0,
+                                    mode="ratio", ratio=0.5), kernel=_FixedKernel())
+    r = simulate_day(**kw_r)
+    assert r.hedge_trades[0].hedge_qty == pytest.approx(-0.25)     # -ratio*net_delta
+
+    kw_b, _ = _hedge_day(es, _hspec(interval_minutes=999.0, delta_band=0.2,
+                                    mode="band_edge"), kernel=_FixedKernel())
+    b = simulate_day(**kw_b)
+    ht = b.hedge_trades[0]
+    assert ht.hedge_qty == pytest.approx(-0.3)                     # -0.5 + sign*0.2
+    # residual delta left on the book == +band (sign of net_delta).
+    assert ht.net_delta + ht.hedge_qty == pytest.approx(0.2)
+
+
+def _es_quoted_ramp(entry, half_spread, size, n=5, step=25.0):
+    """ES bars ramping +step/min, each two-sided with the given half-spread/size."""
+    return [
+        _esq(entry + timedelta(minutes=i), 5000.0 + step * i,
+             bid=5000.0 + step * i - half_spread, ask=5000.0 + step * i + half_spread,
+             bs=size, as_=size)
+        for i in range(n)
+    ]
+
+
+def test_hedge_condition_max_spread_defers_on_es_bar():
+    entry = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    cond = (MaxSpreadCond(pct=0.001, min_ticks=1.0),)  # floor = max(~0.05, 0.25)=0.25
+    hspec = _hspec(interval_minutes=1.0, delta_band=10.0, conditions=cond)
+    # Tight ES quote (spread 0.2 <= 0.25) -> every interior rehedge EXECUTES.
+    kw_t, _ = _hedge_day(_es_quoted_ramp(entry, 0.1, 50), hspec)
+    tight = simulate_day(**kw_t)
+    # Wide ES quote (spread 2.0 > 0.25) -> every interior rehedge DEFERS.
+    kw_w, _ = _hedge_day(_es_quoted_ramp(entry, 1.0, 50), hspec)
+    wide = simulate_day(**kw_w)
+    assert len(tight.hedge_trades) == 4   # entry + 3 interior (minutes 1,2,3)
+    assert len(wide.hedge_trades) == 1    # only the unconditional entry hedge
+
+
+def test_hedge_condition_min_quote_size_defers_on_es_bar():
+    entry = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    cond = (MinQuoteSizeCond(size=10),)
+    hspec = _hspec(interval_minutes=1.0, delta_band=10.0, conditions=cond)
+    kw_big, _ = _hedge_day(_es_quoted_ramp(entry, 0.1, 50), hspec)   # sizes 50 >= 10
+    kw_small, _ = _hedge_day(_es_quoted_ramp(entry, 0.1, 5), hspec)  # sizes 5 < 10
+    assert len(simulate_day(**kw_big).hedge_trades) == 4
+    assert len(simulate_day(**kw_small).hedge_trades) == 1
+
+
+def test_hedge_condition_min_rehedge_delta_defers():
+    entry = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    # +5/min keeps _MoneynessKernel net delta UNSATURATED so it changes each bar
+    # (|delta to remove| ~0.2/min) — isolating the threshold gate, not saturation.
+    es = _bars(entry, [5000.0 + 5.0 * i for i in range(5)])  # no ES quotes needed
+    # threshold 5.0 >> any |delta to remove| (<=~1) -> all interior rehedges DEFER.
+    kw_defer, _ = _hedge_day(es, _hspec(interval_minutes=1.0, delta_band=10.0,
+                                        conditions=(MinRehedgeDeltaCond(threshold=5.0),)))
+    # threshold 0.01 -> interior rehedges EXECUTE (delta actually moves).
+    kw_exec, _ = _hedge_day(es, _hspec(interval_minutes=1.0, delta_band=10.0,
+                                       conditions=(MinRehedgeDeltaCond(threshold=0.01),)))
+    assert len(simulate_day(**kw_defer).hedge_trades) == 1
+    assert len(simulate_day(**kw_exec).hedge_trades) == 4
+
+
+def test_hedge_sigma_move_trigger_waits_for_one_sigma():
+    # Only sigma_move enabled (interval + band OFF): "wait for 1 sigma before
+    # rehedging". _FixedKernel pins net delta (+0.5) and IV (0.2) so sigma is
+    # deterministic. sigma_bar ~ 5000*0.2*sqrt(T~30h) ~ 58 pts; a +70 jump at
+    # minute 4 is the FIRST move that clears 1 sigma from the entry hedge.
+    entry = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    es = _bars(entry, [5000.0] * 4 + [5070.0] * 3)  # flat, then +70 at minute 4
+    kw, _ = _hedge_day(
+        es,
+        _hspec(interval_minutes=None, delta_band=None, sigma_enabled=True, sigma_n=1.0),
+        kernel=_FixedKernel(), minutes=6,
+    )
+    res = simulate_day(**kw)
+    assert res.status == "ok"
+    # entry hedge + exactly ONE sigma-triggered rehedge at the +70 bar.
+    assert len(res.hedge_trades) == 2
+    assert res.hedge_trades[1].ts == entry + timedelta(minutes=4)
+    assert res.hedge_trades[1].underlying == pytest.approx(5070.0)
+
+
+def test_hedge_disabled_via_spec_no_trades():
+    res = simulate_day(**_day(hedge=_hspec(enabled=False, interval_minutes=1.0)))
+    assert res.hedge_trades == () and res.pnl.hedge_pnl_pts == 0.0
+
+
+def test_hedge_default_none_is_disabled():
+    # Omitting the hedge kwarg entirely -> disabled (no hedge, hedge_pnl 0).
+    kw = _day()
+    kw.pop("hedge")
+    res = simulate_day(**kw)
+    assert res.hedge_trades == () and res.pnl.hedge_pnl_pts == 0.0
     assert res.status == "ok"

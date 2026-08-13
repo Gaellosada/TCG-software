@@ -22,14 +22,17 @@ from tcg.core.api.intraday_backtest import (
     HedgeConfig,
     RunRequest,
     _pick_expiry,
+    _to_engine_hedge,
     count_trading_days,
     resolve_day_plans,
 )
 from tcg.types.intraday import (
+    HedgeSpec,
     MaxSpreadCond,
     MaxUnderlyingMoveCond,
     MinPremiumCond,
     MinQuoteSizeCond,
+    MinRehedgeDeltaCond,
     NetDeltaTrigger,
     PnlTrigger,
     SigmaMoveTrigger,
@@ -51,7 +54,15 @@ def test_default_entry_exit_modules():
     assert r.entry.time == "10:00" and r.entry.snap_tolerance_minutes == 10.0
     assert r.exit.time == "15:45" and r.exit.snap_tolerance_minutes == 10.0
     assert r.entry.conditions == [] and r.exit.conditions == []
-    assert r.hedge == HedgeConfig(enabled=True, interval_minutes=15.0, delta_band=0.10)
+    # v4 hedge module defaults: enabled es_future, interval+band triggers on,
+    # sigma off, no conditions, target zero.
+    assert r.hedge.enabled is True
+    assert r.hedge.instrument == "es_future"
+    assert r.hedge.triggers.interval_minutes == 15.0
+    assert r.hedge.triggers.delta_band == 0.10
+    assert r.hedge.triggers.sigma_move.enabled is False
+    assert r.hedge.conditions == []
+    assert r.hedge.target.mode == "zero"
     assert r.custom_days == []
 
 
@@ -304,3 +315,98 @@ def test_all_trigger_types_convert_to_engine_dataclasses():
         NetDeltaTrigger(threshold=0.5),
         PnlTrigger(amount=300.0, unit="points", direction="loss"),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# v4 — Hedge as a configurable module (triggers / conditions / target)
+# --------------------------------------------------------------------------- #
+def test_hedge_module_full_shape_accepted():
+    h = HedgeConfig(
+        enabled=True,
+        instrument="es_future",
+        triggers={"interval_minutes": 15, "delta_band": 0.1,
+                  "sigma_move": {"enabled": True, "n": 1.5}},
+        conditions=[
+            {"type": "max_spread", "pct": 5.0, "min_ticks": 1},
+            {"type": "min_quote_size", "size": 10},
+            {"type": "min_rehedge_delta", "threshold": 0.05},
+        ],
+        target={"mode": "ratio", "ratio": 0.5},
+    )
+    assert h.triggers.sigma_move.enabled is True and h.triggers.sigma_move.n == 1.5
+    assert len(h.conditions) == 3
+    assert h.target.mode == "ratio" and h.target.ratio == 0.5
+
+
+def test_hedge_triggers_off_via_null():
+    h = HedgeConfig(triggers={"interval_minutes": None, "delta_band": None,
+                              "sigma_move": {"enabled": True, "n": 1.0}})
+    assert h.triggers.interval_minutes is None and h.triggers.delta_band is None
+
+
+def test_hedge_unknown_instrument_rejected_422():
+    with pytest.raises(ValidationError):
+        HedgeConfig(instrument="spx_future")
+    with pytest.raises(ValidationError):
+        RunRequest(start_date="2025-02-03", end_date="2025-02-07",
+                   hedge={"instrument": "vix_future"})
+
+
+def test_hedge_unknown_condition_type_rejected():
+    # min_premium / max_underlying_move are NOT valid hedge conditions.
+    with pytest.raises(ValidationError):
+        HedgeConfig(conditions=[{"type": "min_premium", "points": 0.5}])
+    with pytest.raises(ValidationError):
+        HedgeConfig(conditions=[{"type": "max_underlying_move", "pct": 1.0}])
+    with pytest.raises(ValidationError):
+        HedgeConfig(conditions=[{"type": "totally_unknown", "x": 1}])
+
+
+def test_hedge_bad_condition_params_rejected():
+    with pytest.raises(ValidationError):
+        HedgeConfig(conditions=[{"type": "min_rehedge_delta", "threshold": 0}])
+    with pytest.raises(ValidationError):
+        HedgeConfig(conditions=[{"type": "min_rehedge_delta", "threshold": -0.1}])
+
+
+def test_hedge_target_mode_and_ratio_validation():
+    with pytest.raises(ValidationError):
+        HedgeConfig(target={"mode": "half"})            # unknown mode
+    with pytest.raises(ValidationError):
+        HedgeConfig(target={"mode": "ratio", "ratio": 0})    # ratio must be > 0
+    with pytest.raises(ValidationError):
+        HedgeConfig(target={"mode": "ratio", "ratio": 1.5})  # ratio must be <= 1
+
+
+def test_hedge_band_edge_requires_delta_band():
+    # band_edge with delta_band disabled (null) -> rejected.
+    with pytest.raises(ValidationError):
+        HedgeConfig(triggers={"delta_band": None}, target={"mode": "band_edge"})
+    # band_edge WITH a delta_band set -> accepted.
+    ok = HedgeConfig(triggers={"delta_band": 0.1}, target={"mode": "band_edge"})
+    assert ok.target.mode == "band_edge"
+
+
+def test_to_engine_hedge_mirrors_module():
+    h = HedgeConfig(
+        enabled=True,
+        triggers={"interval_minutes": 20, "delta_band": 0.2,
+                  "sigma_move": {"enabled": True, "n": 2.0}},
+        conditions=[
+            {"type": "max_spread", "pct": 5.0, "min_ticks": 2},
+            {"type": "min_quote_size", "size": 25},
+            {"type": "min_rehedge_delta", "threshold": 0.07},
+        ],
+        target={"mode": "ratio", "ratio": 0.75},
+    )
+    spec = _to_engine_hedge(h)
+    assert isinstance(spec, HedgeSpec)
+    assert spec.enabled and spec.instrument == "es_future"
+    assert spec.triggers.interval_minutes == 20 and spec.triggers.delta_band == 0.2
+    assert spec.triggers.sigma_move.enabled is True and spec.triggers.sigma_move.n == 2.0
+    assert spec.conditions == (
+        MaxSpreadCond(pct=5.0, min_ticks=2.0),
+        MinQuoteSizeCond(size=25),
+        MinRehedgeDeltaCond(threshold=0.07),
+    )
+    assert spec.target.mode == "ratio" and spec.target.ratio == 0.75
