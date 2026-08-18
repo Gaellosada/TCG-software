@@ -9,7 +9,7 @@ condition params/types, bad time-format rejection, and expiry resolution.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from fastapi import HTTPException
@@ -22,11 +22,14 @@ from tcg.core.api.intraday_backtest import (
     HedgeConfig,
     RunRequest,
     _pick_expiry,
+    _resolve_es_day_open,
     _to_engine_hedge,
     count_trading_days,
     resolve_day_plans,
 )
+from tcg.engine.intraday_backtest import resolve_et_to_utc
 from tcg.types.intraday import (
+    IntradayBar,
     HedgeSpec,
     MaxSpreadCond,
     MaxUnderlyingMoveCond,
@@ -163,6 +166,72 @@ def test_custom_days_mixed_exclude_and_override():
     assert next(p for p in plans if p.date_int == 20250205).excluded
     d4 = next(p for p in plans if p.date_int == 20250204)
     assert not d4.excluded and d4.entry_ts.hour == 16 and d4.exit_ts.hour == 19
+
+
+# --------------------------------------------------------------------------- #
+# 98core-03: custom_days on a weekend / outside [start,end] must 400 (not be
+# silently dropped) — the "always emitted as excluded" contract otherwise breaks.
+# --------------------------------------------------------------------------- #
+def test_custom_day_on_weekend_rejected_400():
+    # 2025-02-08 is a Saturday inside a Mon..Fri range -> a typo'd exclusion.
+    with pytest.raises(HTTPException) as ei:
+        resolve_day_plans(_req(custom_days=[{"date": "2025-02-08", "exclude": True}]))
+    assert ei.value.status_code == 400
+    # Same rule for an override on a weekend.
+    with pytest.raises(HTTPException) as ei2:
+        resolve_day_plans(_req(custom_days=[
+            {"date": "2025-02-09", "entry": {"time": "11:00"}},  # Sunday
+        ]))
+    assert ei2.value.status_code == 400
+
+
+def test_custom_day_out_of_range_rejected_400():
+    # Weekday but outside [start=2025-02-03, end=2025-02-07].
+    with pytest.raises(HTTPException) as ei:
+        resolve_day_plans(_req(custom_days=[{"date": "2025-02-10", "exclude": True}]))
+    assert ei.value.status_code == 400
+    with pytest.raises(HTTPException) as ei2:
+        resolve_day_plans(_req(custom_days=[{"date": "2025-01-31", "exclude": True}]))
+    assert ei2.value.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# 98core-01: the max_underlying_move day-open reference is anchored to the 09:30
+# session open, NOT the first fetched bar (~09:28, the buffered window start).
+# --------------------------------------------------------------------------- #
+def test_es_day_open_anchors_to_session_open_not_buffer_bar():
+    day = date(2025, 2, 3)
+    session_open = resolve_et_to_utc(day, "09:30")
+    # Bars from ~09:28 (buffer) through 09:33; the 09:30 print is the anchor.
+    bars = [
+        IntradayBar(ts=session_open - timedelta(minutes=2), price=5000.0),  # 09:28
+        IntradayBar(ts=session_open - timedelta(minutes=1), price=5001.0),  # 09:29
+        IntradayBar(ts=session_open, price=5010.0),                          # 09:30
+        IntradayBar(ts=session_open + timedelta(minutes=1), price=5015.0),
+    ]
+    # The 09:28 buffer bar (5000) must NOT be the reference; 09:30 (5010) is.
+    assert _resolve_es_day_open(bars, session_open) == 5010.0
+
+
+def test_es_day_open_ignores_premarket_first_bar():
+    # Pre-open entry pushes the fetch window back to ~08:58; that premarket bar
+    # must not become the day-open reference.
+    day = date(2025, 2, 3)
+    session_open = resolve_et_to_utc(day, "09:30")
+    bars = [
+        IntradayBar(ts=session_open - timedelta(minutes=32), price=4900.0),  # 08:58
+        IntradayBar(ts=session_open, price=5010.0),                          # 09:30
+    ]
+    assert _resolve_es_day_open(bars, session_open) == 5010.0
+
+
+def test_es_day_open_falls_back_when_no_open_bar():
+    # No bar near the session open (sparse/holiday) -> fall back to the first bar.
+    day = date(2025, 2, 3)
+    session_open = resolve_et_to_utc(day, "09:30")
+    bars = [IntradayBar(ts=session_open + timedelta(minutes=30), price=5050.0)]
+    assert _resolve_es_day_open(bars, session_open) == 5050.0
+    assert _resolve_es_day_open([], session_open) is None
 
 
 # --------------------------------------------------------------------------- #

@@ -143,13 +143,23 @@ def test_unknown_job_id_404(client: TestClient, fake_run: dict[str, Any]) -> Non
     assert resp.status_code == 404
 
 
-def test_terminal_job_dropped_after_first_fetch(
+def test_terminal_job_persists_for_repeated_fetch(
     client: TestClient, fake_run: dict[str, Any]
 ) -> None:
+    # 98core-02: a terminal job is NOT evicted on first fetch, so a lost/retried
+    # final poll can still recover the result (no forced recompute).
     job_id = client.post("/api/intraday-backtest/run-async", json=_body()).json()["job_id"]
-    _poll_until_terminal(client, job_id)  # last poll observed 'done' -> dropped
-    # A subsequent poll now 404s (finished job cleaned up).
-    assert client.get(f"/api/intraday-backtest/progress/{job_id}").status_code == 404
+    _poll_until_terminal(client, job_id)  # first observation of 'done'
+
+    first = client.get(f"/api/intraday-backtest/progress/{job_id}")
+    assert first.status_code == 200
+    assert first.json()["status"] == "done"
+    assert first.json()["result"] == _PINNED_RESULT
+    # A SECOND read still returns the same terminal snapshot (not a 404).
+    second = client.get(f"/api/intraday-backtest/progress/{job_id}")
+    assert second.status_code == 200
+    assert second.json()["status"] == "done"
+    assert second.json()["result"] == _PINNED_RESULT
 
 
 def test_validation_400_before_job_creation(

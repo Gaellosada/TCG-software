@@ -35,7 +35,6 @@ from tcg.engine.intraday_backtest import (
 )
 from tcg.types.intraday import (
     ES_MULTIPLIER,
-    ES_OPTION_TICK_SIZE,
     WINDOW_MAX_DATE,
     WINDOW_MIN_DATE,
     AggregateResult,
@@ -63,6 +62,10 @@ _TZ = "America/New_York"
 _EXPIRY_MODES = ["0DTE", "NDTE"]
 # Session open (ET) used as the max_underlying_move "day_open" reference anchor.
 _SESSION_OPEN_ET = "09:30"
+# Tolerance (minutes) for snapping the day-open reference to the 09:30 session
+# open. Covers the fetch buffer + a missing exact-09:30 print without letting an
+# unrelated (much later) bar become the anchor.
+_SESSION_OPEN_SNAP_TOL_MIN = 5.0
 
 
 # --------------------------------------------------------------------------- #
@@ -392,6 +395,25 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
     overrides: dict[date, tuple[EntryExitOverride | None, EntryExitOverride | None]] = {}
     for cd in req.custom_days:
         cd_date = _parse_date(cd.date, "custom_days")
+        # A custom_day (exclude OR override) MUST reference a trading day inside
+        # the range: the plan loop only emits weekdays in [start,end], so a
+        # weekend/out-of-range custom_day would otherwise be silently dropped
+        # (neither applied, nor emitted as "excluded", nor flagged). Reject it
+        # 400 so a typo (e.g. excluding a Saturday) surfaces instead of the day
+        # being traded normally. Contract: excluded days are always emitted.
+        if not (start <= cd_date <= end):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"custom_days: {cd.date} is outside the range "
+                    f"[{start.isoformat()}..{end.isoformat()}]"
+                ),
+            )
+        if cd_date.weekday() >= 5:
+            raise HTTPException(
+                status_code=400,
+                detail=f"custom_days: {cd.date} is not a weekday (no trading day)",
+            )
         if cd.exclude:
             excluded.add(cd_date)
             continue
@@ -452,6 +474,21 @@ def _resolve_module(
     conds = ov.conditions if ov.conditions is not None else base.conditions
     trigs = ov.triggers if ov.triggers is not None else base.triggers
     return time_, tol, conds, trigs
+
+
+def _resolve_es_day_open(
+    es_bars: list, session_open: datetime
+) -> float | None:
+    """Day-open ES reference for ``max_underlying_move`` = the bar at the 09:30
+    session open (nearest within ``_SESSION_OPEN_SNAP_TOL_MIN``), NOT the first
+    fetched bar (~09:28 — the buffered window start) which is 2 min early and,
+    for a pre-open entry, could be a premarket price. Falls back to the first
+    bar only if no bar sits near the session open at all (sparse/holiday data).
+    """
+    so_bar = snap_nearest(es_bars, session_open, _SESSION_OPEN_SNAP_TOL_MIN)
+    if so_bar is not None:
+        return so_bar.price
+    return es_bars[0].price if es_bars else None
 
 
 def _pick_expiry(all_exps: list[date], day: date, mode: str, dte: int) -> date | None:
@@ -653,7 +690,9 @@ async def _process_day(
     _oid, strike, call_id, put_id = chosen
     call_marks = await reader.fetch_option_1m(call_id, win_start, win_end)
     put_marks = await reader.fetch_option_1m(put_id, win_start, win_end)
-    es_day_open = es_bars[0].price if es_bars else None
+    # Anchor the day-open reference to the 09:30 session open, not es_bars[0]
+    # (~09:28, the buffered window start).
+    es_day_open = _resolve_es_day_open(es_bars, session_open)
 
     return simulate_day(
         date_int=plan.date_int,
@@ -760,8 +799,9 @@ class _Job:
 # Keyed by job_id. Bounded by ``_JOB_CAP``: on each new job we evict finished
 # jobs (oldest first, insertion-ordered dict) once over the cap, so an abandoned
 # ``done``/``error`` job that is never fetched can't grow the store without
-# bound. A successfully fetched ``done``/``error`` job is dropped immediately
-# (see ``get_progress``).
+# bound. A terminal job is NOT dropped on first fetch — it persists (under the
+# same cap) so a lost/retried final poll can still recover the result rather
+# than 404ing an expensive completed run (see ``get_progress``).
 _JOBS: dict[str, _Job] = {}
 _JOB_CAP = 64
 
@@ -853,20 +893,18 @@ async def post_run_async(request: Request, req: RunRequest) -> dict[str, str]:
 async def get_progress(job_id: str) -> dict[str, Any]:
     """Live progress for a job. Unknown id → 404.
 
-    A finished job (``done``/``error``) is dropped from the store on this, the
-    first fetch that observes its terminal state — the client polls until then
-    and stops, so the single terminal snapshot returned here is authoritative.
+    A terminal job (``done``/``error``) is NOT evicted here: it persists in the
+    bounded store (pruned only when a later run needs the space, see
+    :func:`_prune_jobs`/``_JOB_CAP``) so a lost or retried final poll can still
+    recover the result instead of 404ing an expensive completed run.
     """
     job = _JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"unknown job_id {job_id!r}")
-    snapshot = {
+    return {
         "status": job.status,
         "days_done": job.days_done,
         "total_days": job.total_days,
         "result": job.result,
         "error": job.error,
     }
-    if job.status in ("done", "error"):
-        _JOBS.pop(job_id, None)
-    return snapshot
