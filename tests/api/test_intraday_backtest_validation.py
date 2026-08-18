@@ -16,7 +16,6 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from tcg.core.api.intraday_backtest import (
-    CustomDay,
     EntryExitModule,
     EntryExitOverride,
     HedgeConfig,
@@ -32,7 +31,6 @@ from tcg.types.intraday import (
     IntradayBar,
     HedgeSpec,
     MaxSpreadCond,
-    MaxUnderlyingMoveCond,
     MinPremiumCond,
     MinQuoteSizeCond,
     MinRehedgeDeltaCond,
@@ -202,6 +200,7 @@ def test_custom_day_out_of_range_rejected_400():
 def test_es_day_open_anchors_to_session_open_not_buffer_bar():
     day = date(2025, 2, 3)
     session_open = resolve_et_to_utc(day, "09:30")
+    entry = resolve_et_to_utc(day, "10:00")  # normal (>= open) entry
     # Bars from ~09:28 (buffer) through 09:33; the 09:30 print is the anchor.
     bars = [
         IntradayBar(ts=session_open - timedelta(minutes=2), price=5000.0),  # 09:28
@@ -210,7 +209,7 @@ def test_es_day_open_anchors_to_session_open_not_buffer_bar():
         IntradayBar(ts=session_open + timedelta(minutes=1), price=5015.0),
     ]
     # The 09:28 buffer bar (5000) must NOT be the reference; 09:30 (5010) is.
-    assert _resolve_es_day_open(bars, session_open) == 5010.0
+    assert _resolve_es_day_open(bars, entry, session_open) == 5010.0
 
 
 def test_es_day_open_ignores_premarket_first_bar():
@@ -218,20 +217,40 @@ def test_es_day_open_ignores_premarket_first_bar():
     # must not become the day-open reference.
     day = date(2025, 2, 3)
     session_open = resolve_et_to_utc(day, "09:30")
+    entry = resolve_et_to_utc(day, "10:00")  # normal (>= open) entry
     bars = [
         IntradayBar(ts=session_open - timedelta(minutes=32), price=4900.0),  # 08:58
         IntradayBar(ts=session_open, price=5010.0),                          # 09:30
     ]
-    assert _resolve_es_day_open(bars, session_open) == 5010.0
+    assert _resolve_es_day_open(bars, entry, session_open) == 5010.0
 
 
 def test_es_day_open_falls_back_when_no_open_bar():
     # No bar near the session open (sparse/holiday) -> fall back to the first bar.
     day = date(2025, 2, 3)
     session_open = resolve_et_to_utc(day, "09:30")
+    entry = resolve_et_to_utc(day, "10:00")
     bars = [IntradayBar(ts=session_open + timedelta(minutes=30), price=5050.0)]
-    assert _resolve_es_day_open(bars, session_open) == 5050.0
-    assert _resolve_es_day_open([], session_open) is None
+    assert _resolve_es_day_open(bars, entry, session_open) == 5050.0
+    assert _resolve_es_day_open([], entry, session_open) is None
+
+
+def test_es_day_open_preopen_entry_no_lookahead():
+    # A pre-open entry (09:00 < 09:30) must NOT anchor to the FUTURE 09:30 price:
+    # the anchor is clamped to min(entry, open) = entry, so the reference is the
+    # entry bar, never a bar later than it (look-ahead-free).
+    day = date(2025, 2, 3)
+    session_open = resolve_et_to_utc(day, "09:30")
+    entry = resolve_et_to_utc(day, "09:00")  # BEFORE the session open
+    bars = [
+        IntradayBar(ts=entry - timedelta(minutes=2), price=4900.0),  # 08:58 premarket
+        IntradayBar(ts=entry, price=4950.0),                          # 09:00 entry
+        IntradayBar(ts=session_open, price=5010.0),                   # 09:30 (future!)
+    ]
+    ref = _resolve_es_day_open(bars, entry, session_open)
+    # Anchored to the 09:00 entry bar (4950), NOT the still-future 09:30 (5010).
+    assert ref == 4950.0
+    assert ref != 5010.0
 
 
 # --------------------------------------------------------------------------- #

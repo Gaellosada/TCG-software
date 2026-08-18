@@ -477,17 +477,29 @@ def _resolve_module(
 
 
 def _resolve_es_day_open(
-    es_bars: list, session_open: datetime
+    es_bars: list, entry_ts: datetime, session_open: datetime
 ) -> float | None:
-    """Day-open ES reference for ``max_underlying_move`` = the bar at the 09:30
-    session open (nearest within ``_SESSION_OPEN_SNAP_TOL_MIN``), NOT the first
-    fetched bar (~09:28 — the buffered window start) which is 2 min early and,
-    for a pre-open entry, could be a premarket price. Falls back to the first
-    bar only if no bar sits near the session open at all (sparse/holiday data).
+    """Day-open ES reference for ``max_underlying_move``.
+
+    Anchored to the 09:30 session open, but CLAMPED so the anchor can never sit
+    in the FUTURE relative to the entry: ``anchor = min(entry_ts, session_open)``.
+
+    * Normal case (entry >= open): ``anchor = session_open`` — the day-open
+      reference is the 09:30 session open (nearest bar within
+      ``_SESSION_OPEN_SNAP_TOL_MIN``), NOT the first fetched bar (~09:28 — the
+      buffered window start, 2 min early).
+    * Pre-open entry (e.g. 09:00, entry < open): ``anchor = entry_ts`` — the
+      move is measured from the entry itself, never against a still-in-the-future
+      09:30 price (no look-ahead; entry time is validated for format only, with
+      no lower bound, so this degenerate case is reachable).
+
+    Falls back to the first bar only if no bar sits near the anchor at all
+    (sparse/holiday data).
     """
-    so_bar = snap_nearest(es_bars, session_open, _SESSION_OPEN_SNAP_TOL_MIN)
-    if so_bar is not None:
-        return so_bar.price
+    anchor = min(entry_ts, session_open)
+    anchor_bar = snap_nearest(es_bars, anchor, _SESSION_OPEN_SNAP_TOL_MIN)
+    if anchor_bar is not None:
+        return anchor_bar.price
     return es_bars[0].price if es_bars else None
 
 
@@ -691,8 +703,9 @@ async def _process_day(
     call_marks = await reader.fetch_option_1m(call_id, win_start, win_end)
     put_marks = await reader.fetch_option_1m(put_id, win_start, win_end)
     # Anchor the day-open reference to the 09:30 session open, not es_bars[0]
-    # (~09:28, the buffered window start).
-    es_day_open = _resolve_es_day_open(es_bars, session_open)
+    # (~09:28, the buffered window start), and clamp to min(entry, open) so a
+    # pre-open entry can never reference a future 09:30 price (no look-ahead).
+    es_day_open = _resolve_es_day_open(es_bars, plan.entry_ts, session_open)
 
     return simulate_day(
         date_int=plan.date_int,
