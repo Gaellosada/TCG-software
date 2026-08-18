@@ -1,13 +1,23 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
-import { MemoryRouter, useSearchParams } from 'react-router-dom';
+import { MemoryRouter, useSearchParams, useNavigate } from 'react-router-dom';
 import { renderWithClient } from '../../test/queryWrapper';
 
-/** Exposes the query string, which is where the applied filter lives. */
+/**
+ * Exposes the query string (where the applied filter lives) and a real
+ * history-back button — ``navigate(-1)`` is the same history ``go`` the browser
+ * button calls, and MemoryRouter has no address bar of its own.
+ */
 function Spy() {
   const [params] = useSearchParams();
-  return <div data-testid="qs">{params.toString()}</div>;
+  const navigate = useNavigate();
+  return (
+    <>
+      <div data-testid="qs">{params.toString()}</div>
+      <button type="button" onClick={() => navigate(-1)}>go back in history</button>
+    </>
+  );
 }
 
 /**
@@ -360,6 +370,44 @@ describe('DataV2Page', () => {
     // exactly as it did to the first one.
     const newCalls = vi.mocked(getObjectSeriesV2).mock.calls.slice(callsBefore);
     expect(newCalls.map(([objectId]) => objectId)).toEqual([]);
+  });
+
+  it('does not re-apply the previous object\'s filter after a Back press onto the new object', async () => {
+    /*
+     * The regression the object-switch clearing exists to prevent, reached with
+     * one keypress: apply a filter on A, switch to B (the URL is cleared with a
+     * history PUSH), then press Back. The router restores A's query string, but
+     * ``selected`` is still B. Without binding the applied filter to the object
+     * it was produced for, B would re-derive and fetch A's filter and the panel
+     * would misreport it (a <select> value B lacks falls back to "Any"). The fix
+     * stamps each write with its object, so a filter is never read against a
+     * different object than the one that produced it.
+     */
+    renderPage();
+    fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
+    fireEvent.change(await screen.findByLabelText('Series type'), {
+      target: { value: 'bbba' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /apply/i }));
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    expect(qs()).toEqual({ serie_type: 'bbba' });
+
+    // Switch to a different object — the filter is cleared for it (PUSH).
+    fireEvent.click(screen.getByText('FUT_SP_500'));
+    expect(await screen.findByText(/press Apply to list/i)).toBeTruthy();
+    expect(qs()).toEqual({});
+    const callsBefore = vi.mocked(getObjectSeriesV2).mock.calls.length;
+
+    // Press Back: the router restores ?serie_type=bbba, but that filter belongs
+    // to OPT (7), not FUT (6).
+    fireEvent.click(screen.getByRole('button', { name: /go back in history/i }));
+
+    // The panel and the request reflect FUT with NO stale filter…
+    await waitFor(() => expect(screen.getByLabelText('Series type').value).toBe('any'));
+    expect(screen.getByText(/press Apply to list/i)).toBeTruthy();
+    // …and no request was ever issued for FUT (6) — least of all bbba.
+    const after = vi.mocked(getObjectSeriesV2).mock.calls.slice(callsBefore);
+    expect(after.map(([objectId]) => objectId)).toEqual([]);
   });
 
   it("keeps a shared link's filter across the recipient's first object pick", async () => {

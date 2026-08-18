@@ -227,6 +227,49 @@ describe('ObjectDetail filter state in the URL', () => {
     expect(screen.getByLabelText(/strike min/i).value).toBe('');
   });
 
+  it('degrades a malformed expiration in the URL instead of crashing the tab', async () => {
+    /*
+     * ``expiration``/``expiration_min``/``expiration_max`` are user-editable in a
+     * shared link exactly as strikes and enums are. A junk value like
+     * ``notadate`` reaches ``getObjectSeriesV2`` -> the backend ``parse_iso_range``
+     * (``date.fromisoformat``) raises ValueError -> HTTP 400 for the whole tab,
+     * while every other hostile dimension degrades. So it must be dropped HERE,
+     * at the boundary, like ``parseStrikeBound``/``urlEnum`` do.
+     */
+    renderAt('/data-v2?expiration_min=notadate&serie_type=bbba');
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    expect(lastSent().expirationMin).toBeUndefined();
+    expect(lastSent().expirationMax).toBeUndefined();
+    expect(lastSent()).toMatchObject({ serieType: 'bbba' });
+    // The panel shows no expiration (Any), rather than the literal 'notadate'.
+    expect((await screen.findByLabelText(/expiration/i)).value).toBe('');
+  });
+
+  it('degrades a malformed ``expiration`` synonym too', async () => {
+    renderAt('/data-v2?expiration=2026-13-40&serie_type=bbba');
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    // A well-shaped but impossible calendar date is invalid too — the backend
+    // ``date.fromisoformat`` rejects it, so drop it rather than pass it on.
+    expect(lastSent().expirationMin).toBeUndefined();
+    expect(lastSent().expirationMax).toBeUndefined();
+    expect(lastSent()).toMatchObject({ serieType: 'bbba' });
+  });
+
+  it('does not fetch for a URL whose only filter is a malformed expiration', async () => {
+    renderAt('/data-v2?expiration_min=notadate');
+    expect(await screen.findByLabelText(/series type/i)).toBeTruthy();
+    expect(getObjectSeriesV2).not.toHaveBeenCalled();
+    expect(screen.getByText(/press Apply to list/i)).toBeTruthy();
+  });
+
+  it('still accepts a well-formed expiration bound from the URL', async () => {
+    // The validator must not reject legitimate dates.
+    renderAt('/data-v2?expiration_min=2026-03-13&serie_type=bbba');
+    await waitFor(() => expect(lastSent()).toMatchObject({
+      expirationMin: '2026-03-13', serieType: 'bbba',
+    }));
+  });
+
   it('drops an enum value the backend would reject, rather than passing it on', async () => {
     /*
      * The backend allowlists all three enums (``_SERIE_TYPE_VALUES`` &c. in

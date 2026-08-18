@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useLocation } from 'react-router-dom';
 import { useObjectSeriesV2 } from '../../hooks/marketQueries';
 import SeriesChartV2 from './SeriesChartV2';
 import SeriesFilterPanel, { parseStrikeBound } from './SeriesFilterPanel';
@@ -40,7 +40,7 @@ const APPLIED_MARKER = 'applied';
  * read "Any" while the request carried the junk — the panel lying about the
  * applied filter, plus an error banner from the backend instead of a page.
  */
-const URL_ENUMS = Object.freeze({
+export const URL_ENUMS = Object.freeze({
   option_type: Object.freeze(['call', 'put', 'both']),
   serie_type: Object.freeze(['bar', 'value', 'greeks', 'bbba', 'any']),
   freq: Object.freeze(['1m', 'daily', 'any']),
@@ -50,6 +50,28 @@ const URL_ENUMS = Object.freeze({
 function urlEnum(params, key) {
   const raw = params.get(key);
   return raw && URL_ENUMS[key].includes(raw) ? raw : '';
+}
+
+/**
+ * One expiration value from the URL, or '' when absent or not a real ISO date.
+ *
+ * Unlike the strike bounds (see ``parseStrikeBound``) and the enums (see
+ * ``urlEnum``), an expiration is passed to the backend as-is, where
+ * ``parse_iso_range`` runs ``date.fromisoformat`` on it: a junk value like
+ * ``?expiration_min=notadate`` — or a well-shaped but impossible calendar date
+ * like ``2026-13-40`` — raises ValueError → HTTP 400 and takes down the whole
+ * tab, while every other hostile dimension degrades to a working page. So a bad
+ * value is dropped HERE, at the boundary, exactly as those two are.
+ *
+ * The check mirrors ``date.fromisoformat``'s own contract: a strict
+ * ``YYYY-MM-DD`` shape AND a calendar-valid date (``2026-02-30`` is rejected by
+ * both). ``T00:00:00Z`` pins the parse to UTC so it is not shifted by the host
+ * time zone.
+ */
+function urlIsoDate(raw) {
+  if (!raw) return '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return '';
+  return Number.isNaN(Date.parse(`${raw}T00:00:00Z`)) ? '' : raw;
 }
 
 /**
@@ -132,12 +154,19 @@ function serieTitle(serie) {
  * across the recipient's first object pick". Neither is redundant with the
  * other: dropping either one un-guards one half of the rule.
  *
- * One limitation does genuinely remain, and it is a known follow-up rather than
- * intended behaviour: the clear is a history PUSH and the object is not in the
- * URL, so a single back press restores the previous query string while
- * ``selected`` stays on the NEW object — re-applying the old filter to it (and
- * re-seeding the panel from it, ``urlEpoch`` having remounted the panel).
- * Putting the object in the URL is the clean fix if that ever bites.
+ * The clear is a history PUSH and the object is deliberately not in the URL, so
+ * a single back press would restore the previous query string while ``selected``
+ * stays on the NEW object. Left unguarded that re-applies the old filter to it
+ * (and re-seeds the panel from it, ``urlEpoch`` having remounted the panel) —
+ * the panel-lies condition again, reached with one keypress. It is closed by
+ * BINDING each applied filter to the object that produced it: every write stamps
+ * the object id into the history entry's ``state`` (not the query string — the
+ * object stays out of shareable links), and the ``filters`` memo IGNORES a
+ * restored filter whose stamp names a different object, gating the new object
+ * cleanly instead. A link carries no such stamp, so the recipient's first pick
+ * still applies it (the shared-link case above). Pinned by
+ * "does not re-apply the previous object's filter after a Back press" in
+ * ``DataV2Page.test.jsx``.
  */
 function ObjectDetail({ object }) {
   const [tab, setTab] = useState('series');
@@ -176,10 +205,28 @@ function ObjectDetail({ object }) {
    */
   const [searchParams, setSearchParams] = useSearchParams();
 
+  /*
+   * Which object the query string in the URL was produced for.
+   *
+   * ``writeParams`` stamps the current object id into the history entry's
+   * ``state`` on every write. The selected object is NOT in the URL, so a Back
+   * press can restore a filter this component wrote for a DIFFERENT object while
+   * ``selected`` (held in ``DataV2Page``) stays put — see the header note. This
+   * stamp is what lets ``filters`` tell the two apart. ``undefined`` means "no
+   * stamp" — an unwritten shared link, or a full reload — and is treated as "for
+   * this object", which keeps a shared link's filter working on first pick.
+   */
+  const location = useLocation();
+  const filterObjectId = location.state?.filterObjectId;
+
   const filters = useMemo(() => {
-    const expiration = searchParams.get('expiration');
-    const expirationMin = searchParams.get('expiration_min') || expiration || '';
-    const expirationMax = searchParams.get('expiration_max') || expiration || '';
+    // A restored filter that was produced for another object must never be read
+    // against this one (the panel cannot always display it, so it would lie).
+    if (filterObjectId != null && filterObjectId !== object.object_id) return null;
+
+    const expiration = urlIsoDate(searchParams.get('expiration'));
+    const expirationMin = urlIsoDate(searchParams.get('expiration_min')) || expiration || '';
+    const expirationMax = urlIsoDate(searchParams.get('expiration_max')) || expiration || '';
     // A URL is user-editable, so a strike bound can arrive as anything.
     // ``parseStrikeBound`` drops a non-finite one: ``?strike_min=abc`` would
     // otherwise reach ``getObjectSeriesV2``, which throws a TypeError on a
@@ -217,7 +264,7 @@ function ObjectDetail({ object }) {
       serieType: serieType || 'any',
       freq: freq || 'any',
     };
-  }, [searchParams]);
+  }, [searchParams, filterObjectId, object.object_id]);
 
   // Also user-editable: a negative or non-numeric offset would render a "0-0 of
   // N" range (and NaN is silently dropped by the client, so the page would not
@@ -320,7 +367,11 @@ function ObjectDetail({ object }) {
     const replace = lastWrittenShape.current === shape;
     lastWritten.current = p.toString();
     lastWrittenShape.current = shape;
-    setSearchParams(p, replace ? { replace: true } : undefined);
+    // Stamp the object this filter was produced for into the history entry's
+    // state, so a Back press can never read it against a different object (see
+    // ``filterObjectId``). The stamp rides in ``state``, not the query string —
+    // the object stays out of shareable links, as the design intends.
+    setSearchParams(p, { replace, state: { filterObjectId: object.object_id } });
   }
 
   // A new filter starts from the first page; changing pages must not reset it.
