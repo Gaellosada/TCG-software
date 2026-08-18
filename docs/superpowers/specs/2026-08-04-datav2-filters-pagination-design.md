@@ -1,7 +1,16 @@
 # Database v2 — series filtering, pagination & intraday grain
 
+> **Implemented / superseded.** This design shipped. Where it and the code
+> disagree, the code wins; the deltas are recorded in
+> [`2026-08-05-datav2-follow-ups.md`](./2026-08-05-datav2-follow-ups.md). Known
+> drift a reader should not act on: the call/put filter key is **`option_type`**,
+> not `type` (see the shareable-link example below); `list_contracts` was removed
+> from this path (contract metadata rides on the series join); and `/facets`
+> ships **three** aggregates, not two. This file is kept for the problem
+> statement and rationale, not as the current interface reference.
+
 **Date:** 2026-08-04
-**Status:** approved design, not yet implemented
+**Status:** implemented (2026-08 / PR #93) — see the banner above
 **Scope:** the Database v2 page (`/api/data-v2`, `frontend/src/pages/DataV2`)
 
 ## Problem
@@ -152,7 +161,7 @@ changing a dimension costs one interaction and never requires re-entering the ot
   axis natively); keeps `formatDateInt` for integers. Dispatch on `grain`.
 - **Hooks** — `useObjectFacetsV2`, `useSeriesListV2(objectId, filters, page)`.
 
-**Filter state lives in the URL** (`?expiration=2026-03-13&type=put&serie_type=bbba`): the back
+**Filter state lives in the URL** (`?expiration=2026-03-13&option_type=put&serie_type=bbba`): the back
 button works, a filter state is shareable by link, and a reload loses nothing. React Router is
 already in use.
 
