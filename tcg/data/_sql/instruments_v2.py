@@ -472,7 +472,7 @@ class SqlInstrumentReaderV2:
         One :class:`ContractPriceData` per contract, sorted ascending by
         expiration (the ``ContinuousSeriesBuilder`` requires that ordering). Only
         ``bar``-type series are joined (a future's price lives in ``fact_bar``),
-        pinned to the daily frequencies (``freq = ANY(_DAILY_FREQS)``) for the
+        pinned to the daily frequencies (``freq = ANY(_DAILY_FREQ_LIST)``) for the
         same reason as
         :meth:`fetch_future_front_closes`: FUT_SP_500 also carries ``bar:1m``
         series, and ``PriceSeries.dates`` are ``YYYYMMDD`` ints, so minute rows
@@ -671,7 +671,7 @@ class SqlInstrumentReaderV2:
 
         Feeds the options-continuous *moneyness* spot: the resolver picks, per
         date, the front future (nearest expiration >= that date) close. Pinned to
-        the daily frequencies (``freq = ANY(_DAILY_FREQS)``) — FUT_SP_500 also
+        the daily frequencies (``freq = ANY(_DAILY_FREQ_LIST)``) — FUT_SP_500 also
         carries ``bar:1m`` series, and
         without the pin this scans minute bars (timeout) and makes the per-date
         front close the 00:00 bar rather than the daily close. Only

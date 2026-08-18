@@ -17,7 +17,7 @@ import styles from '../Data/DataPage.module.css';
  */
 function DataV2Page() {
   const [selected, setSelected] = useState(null);
-  const [, setSearchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   /*
    * Picking an object clears the filter in the query string — EXCEPT on the
@@ -47,6 +47,24 @@ function DataV2Page() {
   function handleSelect(next) {
     if (selected && next.object_id !== selected.object_id) {
       setSearchParams(new URLSearchParams());
+    } else if (!selected) {
+      /*
+       * First pick of the session — typically a shared link being opened. The
+       * query string may already carry a filter, but the router wrote that
+       * history entry BEFORE any object existed, so it has no object stamp.
+       * ``ObjectDetail`` stamps every filter IT writes (into the entry's
+       * ``state``, not the query string) so a later Back onto a DIFFERENT object
+       * can tell the filter was produced elsewhere and gate it — but a filter
+       * that arrived on the link and is never re-written keeps a bare entry.
+       * Without a stamp here, switching away and pressing Back re-applies the
+       * link's filter to the new object (the panel-lies condition again). Stamp
+       * the entry now, in place (``replace`` + unchanged query string), so EVERY
+       * applied-filter entry carries the object it belongs to.
+       */
+      setSearchParams(searchParams, {
+        replace: true,
+        state: { filterObjectId: next.object_id },
+      });
     }
     setSelected(next);
   }

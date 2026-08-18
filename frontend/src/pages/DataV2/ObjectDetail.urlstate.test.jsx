@@ -245,7 +245,7 @@ describe('ObjectDetail filter state in the URL', () => {
     expect((await screen.findByLabelText(/expiration/i)).value).toBe('');
   });
 
-  it('degrades a malformed ``expiration`` synonym too', async () => {
+  it('degrades a month-overflow ``expiration`` synonym', async () => {
     renderAt('/data-v2?expiration=2026-13-40&serie_type=bbba');
     expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
     // A well-shaped but impossible calendar date is invalid too — the backend
@@ -253,6 +253,30 @@ describe('ObjectDetail filter state in the URL', () => {
     expect(lastSent().expirationMin).toBeUndefined();
     expect(lastSent().expirationMax).toBeUndefined();
     expect(lastSent()).toMatchObject({ serieType: 'bbba' });
+  });
+
+  it('degrades a DAY-overflow expiration instead of silently rolling it over', async () => {
+    /*
+     * The subtle one: ``2026-02-30`` is well-shaped and month-in-range, so a
+     * naive ``Date.parse`` does NOT return NaN — V8 rolls it forward to Mar 2.
+     * The backend ``date.fromisoformat`` rejects it outright (2026 is not a leap
+     * year either, so Feb has 28 days), so passing it on 400s the tab, and
+     * silently shifting it to a different day would be worse. It must be dropped.
+     */
+    renderAt('/data-v2?expiration_min=2026-02-30&serie_type=bbba');
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    expect(lastSent().expirationMin).toBeUndefined();
+    expect(lastSent().expirationMax).toBeUndefined();
+    expect(lastSent()).toMatchObject({ serieType: 'bbba' });
+    expect((await screen.findByLabelText(/expiration/i)).value).toBe('');
+  });
+
+  it('accepts a valid leap-day expiration', async () => {
+    // The validator must not over-reject: 2024 IS a leap year, so Feb 29 is real.
+    renderAt('/data-v2?expiration_min=2024-02-29&serie_type=bbba');
+    await waitFor(() => expect(lastSent()).toMatchObject({
+      expirationMin: '2024-02-29', serieType: 'bbba',
+    }));
   });
 
   it('does not fetch for a URL whose only filter is a malformed expiration', async () => {

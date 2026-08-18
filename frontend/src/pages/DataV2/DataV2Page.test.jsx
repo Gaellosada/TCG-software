@@ -410,6 +410,35 @@ describe('DataV2Page', () => {
     expect(after.map(([objectId]) => objectId)).toEqual([]);
   });
 
+  it('does not inherit a shared link\'s filter after switching object then Back', async () => {
+    /*
+     * The residual of the residual: a shared link's filter entry is written by
+     * the router BEFORE any object is picked, so the first pick applies it
+     * without a query-string write — and thus without an object stamp unless the
+     * first pick adds one. Open ?serie_type=bbba, pick A (applies), switch to B
+     * (empty pushed), press Back: the shared-link entry restores while
+     * ``selected`` is B. It must NOT re-apply the link's filter to B.
+     */
+    renderPage('/data-v2?serie_type=bbba');
+    fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    expect(qs()).toEqual({ serie_type: 'bbba' });
+
+    // Switch to a different object — cleared for it.
+    fireEvent.click(screen.getByText('FUT_SP_500'));
+    expect(await screen.findByText(/press Apply to list/i)).toBeTruthy();
+    expect(qs()).toEqual({});
+    const callsBefore = vi.mocked(getObjectSeriesV2).mock.calls.length;
+
+    // Back restores the shared-link entry, but it belongs to OPT (7), not FUT (6).
+    fireEvent.click(screen.getByRole('button', { name: /go back in history/i }));
+
+    await waitFor(() => expect(screen.getByLabelText('Series type').value).toBe('any'));
+    expect(screen.getByText(/press Apply to list/i)).toBeTruthy();
+    const after = vi.mocked(getObjectSeriesV2).mock.calls.slice(callsBefore);
+    expect(after.map(([objectId]) => objectId)).toEqual([]);
+  });
+
   it("keeps a shared link's filter across the recipient's first object pick", async () => {
     // The object is deliberately NOT in the URL, so the recipient of a link
     // has to pick it from the browser list. That pick must not be mistaken for

@@ -64,14 +64,19 @@ function urlEnum(params, key) {
  * value is dropped HERE, at the boundary, exactly as those two are.
  *
  * The check mirrors ``date.fromisoformat``'s own contract: a strict
- * ``YYYY-MM-DD`` shape AND a calendar-valid date (``2026-02-30`` is rejected by
- * both). ``T00:00:00Z`` pins the parse to UTC so it is not shifted by the host
- * time zone.
+ * ``YYYY-MM-DD`` shape AND a calendar-valid date. A plain ``Date.parse`` is NOT
+ * enough — V8 ROLLS OVER an out-of-range day (``2026-02-30`` becomes Mar 2, and
+ * 2026 is not a leap year so Feb has 28 days) and returns a valid time rather
+ * than NaN, so it would keep a date the backend rejects and silently shift it.
+ * Round-tripping through ``toISOString`` catches that: a rolled-over date no
+ * longer equals the input. ``T00:00:00Z`` pins the parse to UTC so it is not
+ * shifted by the host time zone.
  */
 function urlIsoDate(raw) {
   if (!raw) return '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return '';
-  return Number.isNaN(Date.parse(`${raw}T00:00:00Z`)) ? '' : raw;
+  const d = new Date(`${raw}T00:00:00Z`);
+  return (!Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === raw) ? raw : '';
 }
 
 /**
@@ -159,13 +164,18 @@ function serieTitle(serie) {
  * stays on the NEW object. Left unguarded that re-applies the old filter to it
  * (and re-seeds the panel from it, ``urlEpoch`` having remounted the panel) —
  * the panel-lies condition again, reached with one keypress. It is closed by
- * BINDING each applied filter to the object that produced it: every write stamps
- * the object id into the history entry's ``state`` (not the query string — the
- * object stays out of shareable links), and the ``filters`` memo IGNORES a
- * restored filter whose stamp names a different object, gating the new object
- * cleanly instead. A link carries no such stamp, so the recipient's first pick
- * still applies it (the shared-link case above). Pinned by
- * "does not re-apply the previous object's filter after a Back press" in
+ * BINDING each applied filter to the object that produced it: the object id is
+ * stamped into the history entry's ``state`` (not the query string — the object
+ * stays out of shareable links), and the ``filters`` memo IGNORES a restored
+ * filter whose stamp names a different object, gating the new object cleanly.
+ * Two write sites cover every applied-filter entry: ``writeParams`` here stamps
+ * everything THIS component writes, and ``DataV2Page.handleSelect`` stamps the
+ * entry a shared link arrived on at first pick (that entry predates any object,
+ * so it would otherwise be a stamp-less filter that Back re-applies to the wrong
+ * object). A stamp of ``undefined`` (e.g. after a full reload) is read as "for
+ * this object", so a link still applies on first pick. Pinned by
+ * "does not re-apply the previous object's filter after a Back press" and "does
+ * not inherit a shared link's filter after switching object then Back" in
  * ``DataV2Page.test.jsx``.
  */
 function ObjectDetail({ object }) {
