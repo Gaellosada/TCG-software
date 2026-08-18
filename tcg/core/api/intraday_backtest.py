@@ -15,15 +15,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from tcg.core.cache import DiskResultCache, canonical_hash
 from tcg.data._sql.intraday_v2 import IntradayV2Reader
 from tcg.engine.intraday_backtest import (
     aggregate_days,
@@ -326,6 +330,12 @@ class RunRequest(BaseModel):
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
     # Unified per-date control (exclude + full per-day override).
     custom_days: list[CustomDay] = Field(default_factory=list)
+    # Durable-cache opt-out (Settings parity with the portfolio path). It selects
+    # WHETHER to consult the on-disk result cache, never WHICH result a body maps
+    # to, so it is STRIPPED from the cache key (``_intraday_cache_key``) — a
+    # pre-feature payload without the field hashes identically. use_cache=False =>
+    # no read, no write, always a fresh compute.
+    use_cache: bool = True
 
     @model_validator(mode="after")
     def _no_entry_triggers(self) -> "RunRequest":
@@ -795,6 +805,94 @@ async def run_backtest(
 
 
 # --------------------------------------------------------------------------- #
+# On-disk result cache (durable, always-on) — mirrors the portfolio pattern.
+# --------------------------------------------------------------------------- #
+# Compute-version salt for the durable on-disk cache. Folded into every key so a
+# compute-affecting change (engine simulate/aggregate logic, the ES multiplier,
+# tick-size handling, expiry/DTE resolution) namespaces the cache: bumping this
+# guarantees stale entries can never be served with ``from_cache: true``. BUMP on
+# ANY change to the intraday backtest compute output AND on each release.
+INTRADAY_COMPUTE_VERSION = "0.1.0"
+
+# A DISTINCT sqlite filename from the portfolio cache so the two do not share the
+# 200-entry LRU domain (they would otherwise evict each other's entries).
+_INTRADAY_CACHE_FILENAME = "intraday_results.sqlite"
+
+# Generous default TTL: content-addressed keys mean a changed body is already a
+# new key, so the TTL only bounds staleness from an UPSTREAM dwh bar revision
+# under an unchanged body. Mirrors the portfolio 30-day default.
+_DEFAULT_CACHE_TTL_SECONDS = 30 * 24 * 3600  # 30 days
+
+_intraday_result_cache: DiskResultCache | None = None
+
+
+def _default_cache_path() -> str:
+    """Resolve the on-disk intraday-cache file path.
+
+    ``TCG_CACHE_DIR`` overrides the base dir (same convention as the portfolio
+    cache); the default is a per-user cache dir outside the repo. Tests never
+    reach this — the root-conftest autouse fixture swaps ``_intraday_result_cache``
+    for a tmp-dir instance.
+    """
+    base = os.environ.get("TCG_CACHE_DIR") or str(Path.home() / ".cache" / "tcg")
+    return str(Path(base) / _INTRADAY_CACHE_FILENAME)
+
+
+def _default_cache_ttl() -> float | None:
+    """Resolve the default result-cache TTL in seconds, or ``None`` for no expiry.
+
+    ``TCG_CACHE_TTL_SECONDS`` overrides: a positive value sets the TTL; ``0`` (or a
+    negative / non-numeric / empty value) DISABLES expiry. Unset → the 30-day
+    default. Same knob the portfolio cache honors.
+    """
+    raw = os.environ.get("TCG_CACHE_TTL_SECONDS")
+    if raw is None or not raw.strip():
+        return float(_DEFAULT_CACHE_TTL_SECONDS)
+    try:
+        val = float(raw)
+    except ValueError:
+        return None  # misconfigured → fail safe to no-expiry rather than crash
+    return val if val > 0 else None
+
+
+def _get_intraday_result_cache() -> DiskResultCache:
+    """Return the process-wide intraday result cache, lazily creating it."""
+    global _intraday_result_cache
+    if _intraday_result_cache is None:
+        _intraday_result_cache = DiskResultCache(
+            _default_cache_path(), ttl_seconds=_default_cache_ttl()
+        )
+    return _intraday_result_cache
+
+
+def _strip_use_cache(obj: object) -> object:
+    """Recursively drop every ``use_cache`` key from a JSON-able structure.
+
+    ``use_cache`` selects WHETHER to use the cache, never WHICH result a body maps
+    to, so it must not affect the key. Stripping it also makes a pre-feature
+    payload (no ``use_cache`` field) hash identically to a current one.
+    """
+    if isinstance(obj, dict):
+        return {k: _strip_use_cache(v) for k, v in obj.items() if k != "use_cache"}
+    if isinstance(obj, list):
+        return [_strip_use_cache(v) for v in obj]
+    return obj
+
+
+def _intraday_cache_key(req: RunRequest) -> str:
+    """Canonical content key for an intraday backtest request.
+
+    Pure function of the canonicalized request (``use_cache`` stripped at every
+    level) plus the ``INTRADAY_COMPUTE_VERSION`` salt, so two equal requests hash
+    equal, toggling ``use_cache`` never changes identity, and a version bump
+    invalidates every stale entry. Used by BOTH the run path and the read-only
+    cache endpoints so their keys always coincide.
+    """
+    payload = _strip_use_cache(req.model_dump(mode="json"))
+    return canonical_hash({"_cv": INTRADAY_COMPUTE_VERSION, "body": payload})
+
+
+# --------------------------------------------------------------------------- #
 # Async job store (in-memory, single-process — see PROBLEMS.md)
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -834,8 +932,19 @@ def _prune_jobs() -> None:
             del _JOBS[jid]
 
 
-async def _run_job(job: _Job, reader: IntradayV2Reader, req: RunRequest) -> None:
-    """Background task body: run the backtest, streaming progress into ``job``."""
+async def _run_job(
+    job: _Job,
+    reader: IntradayV2Reader,
+    req: RunRequest,
+    cache_key: str | None = None,
+) -> None:
+    """Background task body: run the backtest, streaming progress into ``job``.
+
+    On success, when ``cache_key`` is not None (i.e. ``req.use_cache`` was True and
+    the initial lookup missed), the fresh result dict is written to the durable
+    on-disk cache under that key so a later identical run is served instantly. A
+    failed run is NEVER cached — only a completed result is stored.
+    """
 
     def _cb(done: int, total: int) -> None:
         job.days_done = done
@@ -845,6 +954,17 @@ async def _run_job(job: _Job, reader: IntradayV2Reader, req: RunRequest) -> None
         result = await run_backtest(reader, req, progress_cb=_cb)
         job.result = result
         job.days_done = job.total_days
+        if cache_key is not None:
+            # Store the PURE result (no ``from_cache`` marker) so a cached serve is
+            # byte-identical to this fresh compute apart from the response-only
+            # ``from_cache`` flag the read paths add. Never cache an error. Persist
+            # BEFORE flipping to ``done`` so that the moment a ``/progress`` poll
+            # observes the terminal state the entry is already durably cached (no
+            # observe-done-then-miss race for a follow-up cache read / fast-path).
+            try:
+                await _get_intraday_result_cache().put(cache_key, result)
+            except Exception:  # noqa: BLE001 — a cache write glitch must not fail a good run
+                logger.exception("intraday backtest cache write failed")
         job.status = "done"
     except Exception as exc:  # noqa: BLE001 - surfaced to the client as error
         logger.exception("intraday backtest job failed")
@@ -893,12 +1013,43 @@ async def post_run_async(request: Request, req: RunRequest) -> dict[str, str]:
     """
     total_days = count_trading_days(req)  # raises HTTPException(400) on bad input
 
+    # Cache seam. With use_cache on, look up the durable result BEFORE creating a
+    # compute task: a hit becomes a job that is ALREADY ``done`` (result attached,
+    # progress pinned full, no task spawned), so the very next ``/progress`` poll
+    # returns the stored result instantly. A miss (or use_cache off) falls through
+    # to the normal background compute; the key is threaded to ``_run_job`` so it
+    # writes the fresh result back on success (None => never cache).
+    #
+    # Concurrency: two identical requests arriving on a COLD cache both miss here
+    # and both spawn a compute — the benign double-compute the DiskResultCache
+    # documents (INSERT OR REPLACE writes the same content; never a wrong answer
+    # or a corrupt row). No in-flight dedup is attempted (deliberate).
+    cache_key: str | None = None
+    if req.use_cache:
+        cache_key = _intraday_cache_key(req)
+        try:
+            cached = await _get_intraday_result_cache().get(cache_key)
+        except Exception:  # noqa: BLE001 — a cache glitch degrades to a fresh compute
+            logger.exception("intraday backtest cache read failed")
+            cached = None
+        if cached is not None:
+            job = _Job(
+                status="done",
+                days_done=total_days,
+                total_days=total_days,
+                result={**cached, "from_cache": True},
+            )
+            _prune_jobs()
+            job_id = _new_job_id()
+            _JOBS[job_id] = job
+            return {"job_id": job_id}
+
     reader = IntradayV2Reader(request.app.state.dwh_pool)
     job = _Job(status="running", days_done=0, total_days=total_days)
     _prune_jobs()
     job_id = _new_job_id()
     _JOBS[job_id] = job
-    job.task = asyncio.create_task(_run_job(job, reader, req))
+    job.task = asyncio.create_task(_run_job(job, reader, req, cache_key))
     return {"job_id": job_id}
 
 
@@ -921,3 +1072,54 @@ async def get_progress(job_id: str) -> dict[str, Any]:
         "result": job.result,
         "error": job.error,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Read-only cache endpoints (mirror the portfolio pattern). Body is a full
+# RunRequest so the key is computed IDENTICALLY to the run path. Neither endpoint
+# ever computes or takes a market-data / reader dependency — they structurally
+# cannot fetch dwh or trigger a backtest.
+# --------------------------------------------------------------------------- #
+@router.post("/cache/status")
+async def intraday_cache_status(req: RunRequest) -> dict[str, bool]:
+    """Report whether a cached result already exists for ``req`` — WITHOUT
+    computing anything. Uses ``peek`` (a pure, non-mutating existence check that
+    honors the TTL and never bumps the LRU), so the status agrees exactly with a
+    real hit. A cache glitch degrades to ``cached: false`` (never a 500)."""
+    try:
+        cached = await _get_intraday_result_cache().peek(_intraday_cache_key(req))
+    except Exception:  # noqa: BLE001 — a cache glitch degrades to not-cached, never 500
+        cached = False
+    return {"cached": bool(cached)}
+
+
+@router.post("/cache/get")
+async def intraday_cache_get(req: RunRequest) -> dict[str, Any]:
+    """Return a cached backtest result for ``req`` WITHOUT ever computing.
+
+    Backs the reload-a-simulation UX: reopening a run whose config is already
+    cached shows its results with no recompute.
+
+    * HIT  → the full result object with ``from_cache: true`` (byte-identical to a
+      fresh run's result plus that marker).
+    * MISS → ``{"cached": false}`` at HTTP 200. It NEVER calls the compute path on
+      a miss — the safety property behind auto-display.
+
+    A cache error degrades to a miss (never a 500) so a glitch can't block the UI.
+    """
+    try:
+        cached = await _get_intraday_result_cache().get(_intraday_cache_key(req))
+    except Exception:  # noqa: BLE001 — a cache glitch degrades to a miss, never 500
+        cached = None
+    if cached is None:
+        return {"cached": False}
+    return {**cached, "from_cache": True}
+
+
+@router.post("/cache/clear")
+async def intraday_cache_clear() -> dict[str, bool]:
+    """Clear the on-disk intraday result cache. Content-addressed, so this only
+    forces the next run of each body to recompute-and-repopulate — never a
+    correctness change."""
+    await asyncio.to_thread(_get_intraday_result_cache().clear)
+    return {"cleared": True}

@@ -97,3 +97,45 @@ export async function getIntradayBacktestProgress(jobId, { signal } = {}) {
     rethrowClassified(err);
   }
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/intraday-backtest/cache/get
+//   body: the RunRequest JSON (the SAME body ``buildPayload`` builds, so the
+//         backend key matches a prior /run of the same config).
+//   → HIT: the full result object (params_echo / window / days / aggregate /
+//          warnings / from_cache:true) — SAME shape the /progress ``result``
+//          carries, so it feeds the identical rendering path.
+//     MISS: ``{ cached: false }`` (HTTP 200) — read-only, never computes.
+// Mirrors ``portfolio.getPortfolioCachedResult``. Backs the auto-display on
+// Load: a HIT renders the equity curve + metrics instantly; a MISS leaves the
+// results empty (the user clicks Run).
+// ---------------------------------------------------------------------------
+export async function getIntradayBacktestCachedResult(params, { signal } = {}) {
+  try {
+    return await fetchApi('/intraday-backtest/cache/get', {
+      method: 'POST',
+      body: JSON.stringify(params),
+      ...(signal ? { signal } : {}),
+    });
+  } catch (err) {
+    rethrowClassified(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/intraday-backtest/cache/status
+//   body: the RunRequest JSON (same body as above).
+//   → { cached: bool } — a PURE key lookup (no compute).
+// Mirrors ``portfolio.getPortfolioCacheStatus``.
+// ---------------------------------------------------------------------------
+export async function getIntradayBacktestCacheStatus(params, { signal } = {}) {
+  try {
+    return await fetchApi('/intraday-backtest/cache/status', {
+      method: 'POST',
+      body: JSON.stringify(params),
+      ...(signal ? { signal } : {}),
+    });
+  } catch (err) {
+    rethrowClassified(err);
+  }
+}
