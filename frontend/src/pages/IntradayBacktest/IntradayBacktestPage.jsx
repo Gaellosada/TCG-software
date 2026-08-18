@@ -30,6 +30,7 @@ import HedgeModule, {
   hedgeTriggersAllOff,
   isBlank,
 } from './HedgeModule';
+import WeekdayAttributionView from './WeekdayAttributionView';
 import styles from './IntradayBacktestPage.module.css';
 
 // Progress poll cadence (ms). Kept small so the "X / N days" readout tracks the
@@ -1089,6 +1090,8 @@ export default function IntradayBacktestPage() {
           </div>
         </Card>
       )}
+
+      {days.length > 0 && <WeekdayAttributionView days={days} />}
 
       {days.length > 0 && (
         <Card

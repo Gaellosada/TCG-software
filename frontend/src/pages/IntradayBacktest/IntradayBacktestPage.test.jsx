@@ -384,7 +384,10 @@ describe('IntradayBacktestPage', () => {
     expect(agg.textContent).toMatch(/Sharpe/i);
     expect(agg.textContent).toMatch(/-0\.8/);
 
-    const chart = screen.getByTestId('chart');
+    // The weekday-attribution view (A1) also renders a Chart now, so scope by
+    // downloadFilename rather than the shared mock testid.
+    const chart = document.querySelector('[data-testid="chart"][data-fn="intraday-backtest-equity"]');
+    expect(chart).toBeTruthy();
     expect(chart.getAttribute('data-points')).toBe('1');
     expect(chart.getAttribute('data-last')).toBe('-57.5');
   });
