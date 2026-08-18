@@ -160,6 +160,70 @@
   border-color: var(--color-danger, #e53e3e);
 }
 
+/* Net-position cap sub-row: wraps onto its own line under the input row
+   (parent .row is flex-wrap: wrap; flex-basis:100% forces the break). */
+.capRow {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 18px;
+}
+
+.capLabel {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 500;
+  cursor: help;
+}
+
+.capTo {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.capField {
+  width: 56px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: 0.8rem;
+  text-align: right;
+  outline: none;
+}
+
+.capField:focus {
+  border-color: var(--border-accent);
+}
+
+.capField[aria-invalid='true'] {
+  border-color: var(--color-danger, #e53e3e);
+}
+
+.capToggle,
+.capClear {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.capClear {
+  border-style: solid;
+}
+
+.capToggle:hover,
+.capClear:hover {
+  color: var(--text-primary);
+  border-color: var(--border-accent);
+}
+
 .addBtn {
   align-self: flex-start;
   background: transparent;

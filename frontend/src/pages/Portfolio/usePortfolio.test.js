@@ -19,6 +19,9 @@ vi.mock('../../api/portfolio', () => ({
 
 vi.mock('../../api/data', () => ({
   getInstrumentPrices: vi.fn(() => Promise.resolve({ dates: [20200101, 20201231] })),
+  // Instrument-leg RANGE resolution now uses the cheap bounds endpoint; its
+  // start/end mirror the full-series dates[0]/dates[-1] (byte-identical range).
+  getInstrumentPriceBounds: vi.fn(() => Promise.resolve({ start: 20200101, end: 20201231 })),
   getContinuousSeries: vi.fn(() => Promise.resolve({ dates: [20200101, 20201231] })),
 }));
 
@@ -55,7 +58,8 @@ vi.mock('../../components/SaveControls', () => ({
 }));
 
 import { computePortfolio } from '../../api/portfolio';
-import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
+import { getInstrumentPrices, getInstrumentPriceBounds, getContinuousSeries } from '../../api/data';
+import { getOptionCoverage } from '../../api/options';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 
 // Provide a minimal localStorage stub for the hook's internal use.
@@ -521,7 +525,7 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
 
     // The slider min/max are bound to overlapRange (PortfolioPage), so it must
     // carry the real coverage window.
-    expect(result.current.overlapRange).toEqual({ start: expectedStart, end: expectedEnd });
+    expect(result.current.overlapRange).toMatchObject({ start: expectedStart, end: expectedEnd });
 
     await act(async () => {
       await result.current.handleCalculate();
@@ -532,6 +536,41 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
     const body = computePortfolio.mock.calls[0][0];
     expect(body.start).toBe(expectedStart);
     expect(body.end).toBe(expectedEnd);
+  });
+
+  it('defaults the compute window START to recommended_start (cadence cliff)', async () => {
+    // The cadence-aware coverage: a quarterly-only era then a monthly era. The
+    // DEFAULT window (no manual drag) must seed at the monthly floor
+    // (recommended_start), NOT the raw quarterly start — otherwise a "monthly"
+    // cycle silently backtests quarterly over the pre-cliff span.
+    getOptionCoverage.mockResolvedValueOnce({
+      root: 'OPT_SP_500',
+      start: '2010-06-07',
+      end: '2026-07-27',
+      recommended_start: '2016-05-01',
+      segments: [
+        { start: '2010-06-07', end: '2016-04-30', cadence: 'quarterly' },
+        { start: '2016-05-01', end: '2026-07-27', cadence: 'monthly' },
+      ],
+    });
+    const { result } = renderHook(() => usePortfolio());
+    act(() => { result.current.addLeg(optionLeg); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+
+    // overlapRange carries the raw floor (slider MIN) AND the recommendation.
+    expect(result.current.overlapRange).toMatchObject({
+      start: '2010-06-07',
+      end: '2026-07-27',
+      recommendedStart: '2016-05-01',
+    });
+    expect(result.current.overlapRange.segments).toHaveLength(2);
+
+    await act(async () => { await result.current.handleCalculate(); });
+    expect(result.current.error).toBeNull();
+    const body = computePortfolio.mock.calls[0][0];
+    // The DEFAULT compute window starts at the monthly floor, not 2010.
+    expect(body.start).toBe('2016-05-01');
+    expect(body.end).toBe('2026-07-27');
   });
 
   it('computes an OPTION + INSTRUMENT portfolio without a manual slider drag', async () => {
@@ -636,11 +675,12 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
     // though the option leg's coverage (2005..2025) spans both. With an option
     // leg present and no derivable window, the guard correctly fires instead of
     // sending an undefined window to the backend.
-    const prev = getInstrumentPrices.getMockImplementation();
-    getInstrumentPrices.mockImplementation((_collection, symbol) => {
-      if (symbol === 'EARLY') return Promise.resolve({ dates: [20180101, 20181231] });
-      if (symbol === 'LATE') return Promise.resolve({ dates: [20230101, 20231231] });
-      return Promise.resolve({ dates: [20200101, 20201231] });
+    const prev = getInstrumentPriceBounds.getMockImplementation();
+    // Instrument legs resolve their range via the cheap bounds endpoint now.
+    getInstrumentPriceBounds.mockImplementation((_collection, symbol) => {
+      if (symbol === 'EARLY') return Promise.resolve({ start: 20180101, end: 20181231 });
+      if (symbol === 'LATE') return Promise.resolve({ start: 20230101, end: 20231231 });
+      return Promise.resolve({ start: 20200101, end: 20201231 });
     });
     try {
       const { result } = renderHook(() => usePortfolio());
@@ -670,7 +710,7 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
       );
       expect(computePortfolio).not.toHaveBeenCalled();
     } finally {
-      getInstrumentPrices.mockImplementation(prev);
+      getInstrumentPriceBounds.mockImplementation(prev);
     }
   });
 
@@ -828,7 +868,7 @@ describe('usePortfolio — overlapRange re-resolves on a same-ranges-key reload'
     // Load A and let its range resolve to the concrete instrument window.
     act(() => { result.current.loadFromPersisted(docA); });
     await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
-    expect(result.current.overlapRange).toEqual({ start: '2020-01-01', end: '2020-12-31' });
+    expect(result.current.overlapRange).toMatchObject({ start: '2020-01-01', end: '2020-12-31' });
 
     // Load B — SAME ranges key. On the buggy code the range effect does not
     // re-fire, so overlapRange is stranded at null.
@@ -836,7 +876,7 @@ describe('usePortfolio — overlapRange re-resolves on a same-ranges-key reload'
     await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
 
     // Must reliably become the concrete window again, never stuck at null.
-    expect(result.current.overlapRange).toEqual({ start: '2020-01-01', end: '2020-12-31' });
+    expect(result.current.overlapRange).toMatchObject({ start: '2020-01-01', end: '2020-12-31' });
 
     // And the effective compute window must be the concrete dates, not undefined.
     await act(async () => { await result.current.handleCalculate(); });

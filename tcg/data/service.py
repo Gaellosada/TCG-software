@@ -32,6 +32,12 @@ from tcg.types.options import (
 )
 
 from tcg.data._cache import LRUCache
+from tcg.data._options_coverage_cache import (
+    get_coverage_cache,
+    make_coverage_key,
+    make_span_key,
+    service_source_id,
+)
 from tcg.data._sql.connection import DwhConnectionPool
 from tcg.data._sql.instruments import SqlInstrumentReader
 from tcg.data._sql.options import SqlOptionsDataReader
@@ -148,6 +154,27 @@ class DefaultMarketDataService:
         if result is not None:
             self._cache.put(cache_key, result)
         return result
+
+    async def get_price_bounds(
+        self,
+        collection: str,
+        instrument_id: str,
+        *,
+        provider: str | None = None,
+    ) -> tuple[int | None, int | None]:
+        """Cheap first/last available ``trade_date`` (``(min, max)`` YYYYMMDD
+        ints) for one instrument — the endpoints of what :meth:`get_prices`
+        would return, WITHOUT hydrating the series. Feeds the portfolio
+        cache-status range resolution (byte-identical start/end → identical
+        cache key). Mirrors :meth:`get_prices`' unknown-collection guard so
+        route input can't probe arbitrary ``source_collection`` values; a valid
+        collection with no matching instrument returns ``(None, None)``.
+        """
+        if not await self._sql.collection_exists(collection):
+            raise DataNotFoundError(f"Collection '{collection}' not found")
+        return await self._sql.read_price_bounds(
+            collection, instrument_id, provider=provider
+        )
 
     # --- Continuous futures series ---
 
@@ -350,7 +377,39 @@ class DefaultMarketDataService:
     async def option_trade_date_coverage(
         self, root: str
     ) -> tuple[date | None, date | None]:
-        return await self._options.trade_date_coverage(root)
+        cache = get_coverage_cache()
+        if cache is None:
+            return await self._options.trade_date_coverage(root)
+        key = make_coverage_key(source=service_source_id(self), root=root)
+        return await cache.get_or_fetch(
+            key, lambda: self._options.trade_date_coverage(root)
+        )
+
+    async def option_cycle_trade_date_span(
+        self,
+        root: str,
+        start: date | None = None,
+        end: date | None = None,
+        cycle: str | Sequence[str] | None = None,
+    ) -> tuple[date | None, date | None]:
+        cache = get_coverage_cache()
+        if cache is None:
+            return await self._options.cycle_trade_date_span(
+                root, start, end, cycle=cycle
+            )
+        key = make_span_key(
+            source=service_source_id(self),
+            root=root,
+            start=start,
+            end=end,
+            cycle=cycle,
+        )
+        return await cache.get_or_fetch(
+            key,
+            lambda: self._options.cycle_trade_date_span(
+                root, start, end, cycle=cycle
+            ),
+        )
 
     async def list_option_expirations_filtered(
         self,

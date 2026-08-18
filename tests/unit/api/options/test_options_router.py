@@ -21,7 +21,7 @@ Coverage:
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import AsyncClient
@@ -273,6 +273,11 @@ async def test_coverage_happy_path(client: AsyncClient, mock_svc):
         "root": "OPT_SP_500",
         "start": "2005-12-01",
         "end": "2025-06-30",
+        # Collection-wide (no cycle) → single monthly segment, no extra query.
+        "recommended_start": "2005-12-01",
+        "segments": [
+            {"start": "2005-12-01", "end": "2025-06-30", "cadence": "monthly"}
+        ],
     }
 
 
@@ -281,7 +286,13 @@ async def test_coverage_none_when_no_contracts(client: AsyncClient, mock_svc):
     mock_svc.option_trade_date_coverage = AsyncMock(return_value=(None, None))
     resp = await client.get("/api/options/coverage", params={"root": "OPT_EMPTY"})
     assert resp.status_code == 200
-    assert resp.json() == {"root": "OPT_EMPTY", "start": None, "end": None}
+    assert resp.json() == {
+        "root": "OPT_EMPTY",
+        "start": None,
+        "end": None,
+        "recommended_start": None,
+        "segments": [],
+    }
 
 
 async def test_coverage_data_access_error_502(client: AsyncClient, mock_svc):
@@ -291,6 +302,311 @@ async def test_coverage_data_access_error_502(client: AsyncClient, mock_svc):
     resp = await client.get("/api/options/coverage", params={"root": "OPT_SP_500"})
     assert resp.status_code == 502
     assert resp.json()["error_type"] == "options_data_access_error"
+
+
+async def test_coverage_data_source_v2_reads_the_v2_warehouse(
+    client: AsyncClient, mock_svc
+):
+    """``data_source=v2`` resolves coverage from the v2 service, NOT v1.
+
+    v2's option history starts years after v1's, so the slider/compute window
+    must reflect the v2 floor — otherwise a v2 run seeds a v1-era start and
+    trips the E7 floor at compute for a run the correct window would serve.
+    """
+    app = client._transport.app  # type: ignore[attr-defined]
+    v2_svc = MagicMock()
+    v2_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2011, 6, 15), date(2026, 7, 21))
+    )
+    app.state.market_data_v2_compat = v2_svc
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2005, 12, 1), date(2025, 6, 30))
+    )
+
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_SP_500", "data_source": "v2"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "root": "OPT_SP_500",
+        "start": "2011-06-15",  # v2 floor, not v1's 2005-12-01
+        "end": "2026-07-21",
+        "recommended_start": "2011-06-15",
+        "segments": [
+            {"start": "2011-06-15", "end": "2026-07-21", "cadence": "monthly"}
+        ],
+    }
+    v2_svc.option_trade_date_coverage.assert_awaited_once_with("OPT_SP_500")
+    mock_svc.option_trade_date_coverage.assert_not_awaited()  # v1 never consulted
+
+
+async def test_coverage_defaults_to_v1_when_source_absent(
+    client: AsyncClient, mock_svc
+):
+    """No ``data_source`` param ⇒ v1 (byte-identical to the pre-parameter path)."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2005, 12, 1), date(2025, 6, 30))
+    )
+    resp = await client.get("/api/options/coverage", params={"root": "OPT_SP_500"})
+    assert resp.status_code == 200
+    assert resp.json()["start"] == "2005-12-01"
+    mock_svc.option_trade_date_coverage.assert_awaited_once_with("OPT_SP_500")
+
+
+# ---------------------------------------------------------------------------
+# /coverage — cycle-scoped (Task 1: cycle-aware coverage)
+# ---------------------------------------------------------------------------
+
+
+async def test_coverage_omitted_cycle_never_consults_by_date(
+    client: AsyncClient, mock_svc
+):
+    """Byte-identity guard: when ``expiration_cycle`` is OMITTED the handler
+    returns the collection-wide coverage via ``option_trade_date_coverage`` and
+    NEVER touches the per-date map — the response is identical to the
+    pre-feature path."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2005, 12, 1), date(2025, 6, 30))
+    )
+    mock_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2016, 2, 22), date(2016, 3, 18))
+    )
+    mock_svc.list_option_expirations_by_date = AsyncMock(
+        return_value={date(2016, 2, 22): [date(2016, 3, 18)]}
+    )
+    resp = await client.get("/api/options/coverage", params={"root": "OPT_SP_500"})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "root": "OPT_SP_500",
+        "start": "2005-12-01",
+        "end": "2025-06-30",
+        "recommended_start": "2005-12-01",
+        "segments": [
+            {"start": "2005-12-01", "end": "2025-06-30", "cadence": "monthly"}
+        ],
+    }
+    # The no-cycle path must NOT run the cycle span read, the per-date map, or
+    # the cadence dim scan (zero-cost default — byte-identical to pre-feature).
+    mock_svc.option_cycle_trade_date_span.assert_not_awaited()
+    mock_svc.list_option_expirations_by_date.assert_not_awaited()
+    mock_svc.list_option_expirations_filtered.assert_not_awaited()
+
+
+async def test_coverage_empty_cycle_string_treated_as_omitted(
+    client: AsyncClient, mock_svc
+):
+    """An empty ``expiration_cycle`` is coerced to no filter (collection-wide)."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2005, 12, 1), date(2025, 6, 30))
+    )
+    mock_svc.list_option_expirations_by_date = AsyncMock(return_value={})
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_SP_500", "expiration_cycle": ""},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["start"] == "2005-12-01"
+    mock_svc.list_option_expirations_by_date.assert_not_awaited()
+
+
+async def test_coverage_cycle_narrows_start(client: AsyncClient, mock_svc):
+    """A cycle filter (e.g. EW3 / "W3 Friday", which only starts 2016) narrows
+    coverage to the min/max ``trade_date`` of THAT cycle's listed bars — later
+    than the collection-wide ~2005/2011 start."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2011, 6, 15), date(2026, 7, 21))
+    )
+    mock_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2016, 2, 22), date(2026, 6, 30))
+    )
+    mock_svc.list_option_expirations_by_date = AsyncMock(
+        return_value={date(2016, 2, 22): [date(2016, 3, 18)]}
+    )
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_SP_500", "expiration_cycle": "W3 Friday"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Cycle start is the cycle's own EXACT extent (later than the collection).
+    assert body["start"] == "2016-02-22"
+    assert body["end"] == "2026-06-30"
+    # The span is read cycle-scoped with NO collection-window pre-fetch (the
+    # cold fan-out onto option_trade_date_coverage is gone) — NOT the heavy
+    # per-date map.
+    call = mock_svc.option_cycle_trade_date_span.await_args
+    assert call.args[0] == "OPT_SP_500"
+    assert call.kwargs["cycle"] == "W3 Friday"
+    mock_svc.option_trade_date_coverage.assert_not_awaited()
+    mock_svc.list_option_expirations_by_date.assert_not_awaited()
+
+
+async def test_coverage_cycle_returns_cadence_segments(
+    client: AsyncClient, mock_svc
+):
+    """A cycle whose expiries are quarterly-only early then monthly (the real
+    W3-v2 shape) is segmented additively: raw ``start``/``end`` are UNCHANGED,
+    and ``segments`` + ``recommended_start`` describe the cadence cliff.  The
+    classification consumes the CHEAP ``list_option_expirations_filtered``
+    dim scan, not another per-date fact join."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2010, 6, 7), date(2026, 7, 27))
+    )
+    # _cycle_trade_date_coverage → raw (start, end) = cycle trade_date extent.
+    mock_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2010, 6, 7), date(2026, 7, 27))
+    )
+    # The per-cycle DISTINCT expiries: quarterly 2010–2015, then monthly 2016+.
+    quarterly = [
+        date(y, m, 18) for y in range(2010, 2016) for m in (3, 6, 9, 12)
+    ]
+    monthly = []
+    y, m = 2016, 1
+    while (y, m) <= (2026, 7):
+        monthly.append(date(y, m, 18))
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    mock_svc.list_option_expirations_filtered = AsyncMock(
+        return_value=quarterly + monthly
+    )
+
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_SP_500", "expiration_cycle": "W3 Friday"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # start/end UNCHANGED (raw trade_date extent) — backward compatible.
+    assert body["start"] == "2010-06-07"
+    assert body["end"] == "2026-07-27"
+
+    # Two cadence segments: quarterly era then monthly era, contiguous.
+    cadences = [s["cadence"] for s in body["segments"]]
+    assert cadences == ["quarterly", "monthly"]
+    assert body["segments"][0]["start"] == "2010-06-07"
+    assert body["segments"][-1]["end"] == "2026-07-27"
+
+    # recommended_start is in the monthly segment (well past the quarterly years).
+    rec = body["recommended_start"]
+    assert rec == body["segments"][1]["start"]
+    assert "2015" <= rec[:4] < "2017"  # excludes 2010–2014, lands near the cliff
+
+    # Classification used the CHEAP dim scan, filtered by the cycle.
+    call = mock_svc.list_option_expirations_filtered.await_args
+    assert call.args[0] == "OPT_SP_500"
+    assert call.kwargs["cycle"] == "W3 Friday"
+
+
+async def test_coverage_cycle_no_bars_returns_null(client: AsyncClient, mock_svc):
+    """A cycle with no listed bars in the window yields null bounds, not error."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2011, 6, 15), date(2026, 7, 21))
+    )
+    mock_svc.option_cycle_trade_date_span = AsyncMock(return_value=(None, None))
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_SP_500", "expiration_cycle": "W9 Friday"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "root": "OPT_SP_500",
+        "start": None,
+        "end": None,
+        "recommended_start": None,
+        "segments": [],
+    }
+
+
+async def test_coverage_cycle_empty_returns_null_without_prefetch(
+    client: AsyncClient, mock_svc
+):
+    """A cycle with no bars yields null bounds directly from the (EXACT) span —
+    no collection-coverage pre-fetch is consulted (that fan-out is gone), and
+    the per-date map is never probed."""
+    mock_svc.option_trade_date_coverage = AsyncMock(return_value=(None, None))
+    mock_svc.option_cycle_trade_date_span = AsyncMock(return_value=(None, None))
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_EMPTY", "expiration_cycle": "M"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "root": "OPT_EMPTY",
+        "start": None,
+        "end": None,
+        "recommended_start": None,
+        "segments": [],
+    }
+    # The span itself reports the empty cycle; the collection pre-fetch is gone.
+    mock_svc.option_cycle_trade_date_span.assert_awaited_once_with(
+        "OPT_EMPTY", cycle="M"
+    )
+    mock_svc.option_trade_date_coverage.assert_not_awaited()
+
+
+async def test_coverage_cycle_respects_data_source_v2(client: AsyncClient, mock_svc):
+    """A cycle-scoped coverage with ``data_source=v2`` reads the v2 service's
+    per-date map (the primary EW3/W3 case is a v2 root)."""
+    app = client._transport.app  # type: ignore[attr-defined]
+    v2_svc = MagicMock()
+    v2_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2011, 6, 15), date(2026, 7, 21))
+    )
+    v2_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2016, 2, 22), date(2026, 6, 30))
+    )
+    v2_svc.list_option_expirations_filtered = AsyncMock(return_value=[])
+    app.state.market_data_v2_compat = v2_svc
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2005, 12, 1), date(2025, 6, 30))
+    )
+    mock_svc.option_cycle_trade_date_span = AsyncMock(return_value=(None, None))
+
+    resp = await client.get(
+        "/api/options/coverage",
+        params={
+            "root": "OPT_SP_500",
+            "data_source": "v2",
+            "expiration_cycle": "W3 Friday",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["start"] == "2016-02-22"
+    v2_svc.option_cycle_trade_date_span.assert_awaited_once()
+    mock_svc.option_cycle_trade_date_span.assert_not_awaited()  # v1 untouched
+
+
+async def test_coverage_cycle_uses_span_not_per_date_map(
+    client: AsyncClient, mock_svc
+):
+    """Perf contract: the cycle bounds come from the bounded ``min/max`` span
+    read (``option_cycle_trade_date_span``) — NEVER from the full per-date map
+    (``list_option_expirations_by_date``), which scanned every settlement bar."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2010, 6, 7), date(2026, 7, 27))
+    )
+    mock_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2016, 2, 22), date(2026, 6, 30))
+    )
+    # If the handler ever touched the map again, this would be awaited.
+    mock_svc.list_option_expirations_by_date = AsyncMock(return_value={})
+
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_SP_500", "expiration_cycle": "W3 Friday"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["start"] == "2016-02-22"
+    assert resp.json()["end"] == "2026-06-30"
+    # Cycle-scoped, no collection-window pre-fetch (the cold fan-out is gone).
+    mock_svc.option_cycle_trade_date_span.assert_awaited_once_with(
+        "OPT_SP_500", cycle="W3 Friday"
+    )
+    mock_svc.option_trade_date_coverage.assert_not_awaited()
+    mock_svc.list_option_expirations_by_date.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

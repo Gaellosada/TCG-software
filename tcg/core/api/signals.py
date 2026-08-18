@@ -87,11 +87,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import numpy.typing as npt
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from tcg.core.api._dates import parse_iso_range
@@ -110,9 +110,24 @@ from tcg.core.api._series_fetch import (
     _saved_basket_leg_to_typed,
     basket_leg_date_intersection,
     make_signal_fetcher,
+    resolve_delta_hedge_raw,
+    resolve_hedge_activation_gate,
+    resolve_hedge_raw,
 )
 from tcg.core.api._serializers import nan_safe_floats
-from tcg.core.api.common import error_response, get_market_data
+from tcg.core.api._v2_preconditions import (
+    check_v2_option_coverage_floor,
+    check_v2_option_node,
+    check_v2_preconditions,
+    collect_v2_option_roots,
+)
+from tcg.core.api.common import (
+    DataSource,
+    effective_data_source,
+    error_response,
+    get_market_data,
+    get_market_data_for,
+)
 from tcg.persistence import WriteRepository
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
@@ -131,6 +146,7 @@ from tcg.types.signal import (
     Condition,
     ConstantOperand,
     CrossCondition,
+    HysteresisCondition,
     IndicatorOperand,
     InRangeCondition,
     Input,
@@ -172,6 +188,11 @@ class _InputIn(BaseModel):
     # ``_parse_input``'s validator and yields the uniform HTTP-400 envelope
     # instead of a Pydantic 422. ``None``/absent ⇒ no clamp (byte-identical).
     position_cap: Any = None
+    # Optional per-input SIGNAL LAG in trading bars (legacy real-time D-1
+    # timing). Typed ``Any`` (not ``int``) so a malformed value reaches
+    # ``_parse_input``'s validator → uniform HTTP-400 (not a Pydantic 422).
+    # ``None``/absent/``0`` ⇒ no lag (byte-identical same-bar behaviour).
+    signal_lag_days: Any = None
 
 
 class _OperandIn(BaseModel):
@@ -198,6 +219,19 @@ class _ConditionIn(BaseModel):
     min: _OperandIn | None = None
     max: _OperandIn | None = None
     lookback: int | None = None
+    # Hysteresis "episode completion" (op == "hysteresis"): the entry / exit
+    # threshold operands and the episode direction. ``enter``/``exit`` are
+    # ordinary operands; ``direction`` is validated ("up"|"down") in
+    # ``_parse_condition``. Typed ``Any`` so a bad direction routes through the
+    # uniform HTTP-400 envelope rather than a Pydantic 422.
+    enter: _OperandIn | None = None
+    exit: _OperandIn | None = None
+    direction: Any = None
+    # N-consecutive-days extension for the binary comparators (SPEC §5.5).
+    # Absent / 1 ⇒ today's single-bar comparison, byte-identical. Typed ``Any``
+    # (not ``int``) so ``1.5``/``true``/null reach ``_parse_condition``'s guard
+    # and emit the uniform HTTP-400 envelope instead of a Pydantic coercion.
+    consecutive_days: Any = None
     # cross_count extension (cross_above / cross_below only). Defaults
     # reproduce today's single-bar crossover byte-identically; both must be
     # integers >= 1 when supplied (validated in ``_parse_condition``).
@@ -279,6 +313,13 @@ class _BlockIn(BaseModel):
     # envelope rather than a Pydantic 422. Absent ⇒ ``"sustained"`` (so stored
     # signals lacking the field hydrate to the byte-identical default).
     fire_mode: Any = None
+    # LEGACY §4.2 "since last ACTUAL exit" reset semantics for a THEN-chain
+    # entry targeted by an exit (entries only; rejected on resets). Absent /
+    # ``False`` ⇒ the historical raw-exit-condition abort (byte-identical);
+    # ``True`` ⇒ the in-flight arm is aborted ONLY when an exit actually closes
+    # an OPEN position of this entry. Typed ``Any`` so a non-bool routes through
+    # ``_parse_blocks``'s guard to the uniform HTTP-400 envelope.
+    reset_on_actual_exit: Any = None
 
 
 class _SignalRulesIn(BaseModel):
@@ -319,6 +360,10 @@ class SignalComputeRequest(BaseModel):
     # reported cost), so the boundary rejects it (422).
     slippage_bps: float = Field(default=0.0, ge=0.0)
     fees_bps: float = Field(default=0.0, ge=0.0)
+    # Which warehouse this run reads. "v1" (DEFAULT) = tcg_instruments, the
+    # frozen reference; "v2" = tcg_instruments_v2 through the compat adapter.
+    # Bound to a service ONCE, at the route (see ``compute_signal``).
+    data_source: DataSource = "v1"
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +411,9 @@ class _ResolvedBasketInput:
     # Feature 1 per-input net-position clamp, carried through basket resolution
     # (raw wire value; validated in ``_parse_input`` like the non-basket path).
     position_cap: Any = None
+    # Per-input signal lag, carried through basket resolution (raw wire value;
+    # validated in ``_parse_input`` like the non-basket path).
+    signal_lag_days: Any = None
 
 
 async def _resolve_basket_inputs(
@@ -426,6 +474,7 @@ async def _resolve_basket_inputs(
                     basket_id=basket_id,
                     legs=typed_legs,
                     position_cap=inp.position_cap,
+                    signal_lag_days=inp.signal_lag_days,
                 )
             )
         elif isinstance(inp.instrument, BasketRefInline):
@@ -445,11 +494,49 @@ async def _resolve_basket_inputs(
                     legs=typed_legs,
                     asset_class=inline.asset_class,
                     position_cap=inp.position_cap,
+                    signal_lag_days=inp.signal_lag_days,
                 )
             )
         else:
             out.append(inp)
     return out
+
+
+def check_v2_basket_option_legs(
+    resolved_inputs: "Iterable[_InputIn | _ResolvedBasketInput]",
+    *,
+    default_source: str,
+) -> None:
+    """Gate v2 option legs materialised from a basket, which the wire-JSON
+    precondition walk cannot see.
+
+    A saved basket is only an id on the request, so
+    :func:`check_v2_preconditions` (which walks ``model_dump``) never reaches its
+    option legs. Without this a v2 option leg nested in a basket with the default
+    ``stream="mid"`` or a cycle v2 cannot serve skips the collection/cycle/stream
+    check and regresses to the exact unattributable all-NaN curve the
+    preconditions exist to prevent. Mirrors the coverage-floor union: each
+    resolved basket option leg is gated on its OWN effective source, so an all-v1
+    (or v1-basket) run no-ops entirely (Sign 1). Called by BOTH the signals route
+    and the portfolio signal-leg path, right after basket resolution.
+    """
+    for inp in resolved_inputs:
+        if not isinstance(inp, _ResolvedBasketInput):
+            continue
+        for inst, _weight in inp.legs:
+            if (
+                isinstance(inst, InstrumentOptionStream)
+                and effective_data_source(inst.data_source, default_source) == "v2"
+            ):
+                check_v2_option_node(
+                    {
+                        "type": "option_stream",
+                        "collection": inst.collection,
+                        "cycle": inst.cycle,
+                        "stream": inst.stream,
+                    },
+                    label=f"Basket '{inp.id}'",
+                )
 
 
 def _parse_position_cap(raw: Any, *, iid: str) -> tuple[float, float] | None:
@@ -487,11 +574,35 @@ def _parse_position_cap(raw: Any, *, iid: str) -> tuple[float, float] | None:
     return (lo_cap, hi_cap)
 
 
+def _parse_signal_lag_days(raw: Any, *, iid: str) -> int:
+    """Validate a wire ``signal_lag_days`` → a non-negative int (bars) or 0.
+
+    Accepts ``None``/absent (⇒ 0 = no lag). Otherwise requires a non-negative
+    integer. ``bool`` is rejected (it subclasses ``int`` — ``True`` is almost
+    certainly a client bug). Floats are rejected even when integral (a lag is a
+    whole number of trading bars). All failures raise
+    :class:`SignalValidationError` (uniform HTTP-400 envelope).
+    """
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise SignalValidationError(
+            f"input {iid!r}: signal_lag_days must be a non-negative integer "
+            f"(got {raw!r})"
+        )
+    if raw < 0:
+        raise SignalValidationError(
+            f"input {iid!r}: signal_lag_days must be >= 0 (got {raw!r})"
+        )
+    return raw
+
+
 def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
     iid = inp_in.id
     if not iid:
         raise SignalValidationError("input id must be non-empty")
     cap = _parse_position_cap(inp_in.position_cap, iid=iid)
+    lag = _parse_signal_lag_days(inp_in.signal_lag_days, iid=iid)
     # Pre-resolved basket — typed legs already materialised by
     # ``_resolve_basket_inputs``.  No I/O performed here.
     if isinstance(inp_in, _ResolvedBasketInput):
@@ -500,7 +611,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             basket_id=inp_in.basket_id,
             asset_class=inp_in.asset_class,
         )
-        return Input(id=iid, instrument=instrument, position_cap=cap)
+        return Input(id=iid, instrument=instrument, position_cap=cap, signal_lag_days=lag)
     inst_in = inp_in.instrument
     if isinstance(inst_in, SpotInstrumentRef):
         if not inst_in.collection or not inst_in.instrument_id:
@@ -510,6 +621,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
         instrument: InputInstrument = InstrumentSpot(
             collection=inst_in.collection,
             instrument_id=inst_in.instrument_id,
+            data_source=inst_in.data_source,
         )
     elif isinstance(inst_in, OptionStreamRef):
         if not inst_in.collection:
@@ -543,8 +655,9 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             cycle=inst_in.cycle,
             roll_offset=int(inst_in.rollOffset),
             strategy=inst_in.strategy,
+            data_source=inst_in.data_source,
         )
-    return Input(id=iid, instrument=instrument, position_cap=cap)
+    return Input(id=iid, instrument=instrument, position_cap=cap, signal_lag_days=lag)
 
 
 def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
@@ -589,10 +702,40 @@ def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
 def _parse_condition(c: _ConditionIn, *, path: str) -> Condition:
     op = c.op
     if op in _COMPARE_OPS:
+        # consecutive_days: absent ⇒ 1 (byte-identical single-bar compare).
+        # Explicitly supplied (incl. null) must pass the integer >= 1 guard.
+        cd = 1 if "consecutive_days" not in c.model_fields_set else c.consecutive_days
+        if (
+            cd is None
+            or isinstance(cd, bool)
+            or not isinstance(cd, int)
+            or cd < 1
+        ):
+            raise SignalValidationError(
+                f"{path}: '{op}' consecutive_days must be an integer >= 1 "
+                f"(got {c.consecutive_days!r})"
+            )
         return CompareCondition(
             op=op,  # type: ignore[arg-type]
             lhs=_parse_operand(c.lhs, path=f"{path}.lhs"),
             rhs=_parse_operand(c.rhs, path=f"{path}.rhs"),
+            consecutive_days=cd,
+        )
+    if op == "hysteresis":
+        # Two-threshold episode-completion pulse (SPEC §4.1). Requires the
+        # moving operand, both threshold operands, and a valid direction.
+        direction = c.direction
+        if direction not in ("up", "down"):
+            raise SignalValidationError(
+                f"{path}: 'hysteresis' direction must be 'up' or 'down' "
+                f"(got {c.direction!r})"
+            )
+        return HysteresisCondition(
+            op="hysteresis",
+            operand=_parse_operand(c.operand, path=f"{path}.operand"),
+            enter=_parse_operand(c.enter, path=f"{path}.enter"),
+            exit=_parse_operand(c.exit, path=f"{path}.exit"),
+            direction=direction,  # type: ignore[arg-type]
         )
     if op in _CROSS_OPS:
         # Absent field (not in model_fields_set) → use default 1 (byte-identical
@@ -776,6 +919,10 @@ def _parse_blocks(
         rrc = blk.requires_reset_count
         raw_links = blk.links or None
         raw_fire_mode = blk.fire_mode
+        raw_reset_on_actual_exit = blk.reset_on_actual_exit
+        # Validated below (entries/exits only; resets reject). Default False =
+        # historical raw-exit-condition abort.
+        parsed_reset_on_actual_exit: bool = False
         # Validated temporal chain (entries/exits only). Stays None for
         # placeholders and resets (resets reject non-empty links above).
         parsed_links: dict[int, int] | None = None
@@ -842,6 +989,13 @@ def _parse_blocks(
                 if raw_fire_mode is not None:
                     raise SignalValidationError(
                         f"{path}: reset blocks must not set fire_mode"
+                    )
+                # ``reset_on_actual_exit`` selects an ENTRY's exit-driven abort
+                # semantics; it is meaningless on a signal-global reset block.
+                # Reject any explicit value (mirror the fire_mode rejection).
+                if raw_reset_on_actual_exit is not None:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set reset_on_actual_exit"
                     )
             elif is_entry:
                 if has_target:
@@ -973,6 +1127,19 @@ def _parse_blocks(
                     )
                 parsed_fire_mode = raw_fire_mode
 
+            # ``reset_on_actual_exit`` (entries/exits only — resets reject
+            # above). Absent ⇒ False (byte-identical historical abort). Must be
+            # a genuine bool; any other value is a malformed payload → uniform
+            # HTTP-400 envelope (routed here rather than a Pydantic 422 because
+            # the wire field is typed ``Any``).
+            if raw_reset_on_actual_exit is not None:
+                if not isinstance(raw_reset_on_actual_exit, bool):
+                    raise SignalValidationError(
+                        f"{path}: reset_on_actual_exit must be a boolean "
+                        f"(got {raw_reset_on_actual_exit!r})"
+                    )
+                parsed_reset_on_actual_exit = raw_reset_on_actual_exit
+
         out.append(
             Block(
                 id=bid,
@@ -987,6 +1154,7 @@ def _parse_blocks(
                 requires_reset_count=int(rrc),
                 links=parsed_links,
                 fire_mode=parsed_fire_mode,  # type: ignore[arg-type]
+                reset_on_actual_exit=parsed_reset_on_actual_exit,
             )
         )
     return tuple(out)
@@ -1041,12 +1209,20 @@ async def compute_input_overlap(
     signal: Signal,
     start: date | None,
     end: date | None,
+    *,
+    svc_for: "Callable[[str | None], MarketDataService] | None" = None,
 ) -> tuple[date | None, date | None]:
     """Pre-fetch all input instruments and return the overlapping date range.
 
     Returns ``(start, end)`` clamped to the intersection of all inputs'
     date ranges so the engine only evaluates bars where every input is
     defined — analogous to the portfolio page's aligned-price logic.
+
+    ``svc_for`` (per-instrument v1/v2 selection): when supplied, each leaf's date
+    axis is read from the warehouse matching that leaf's ``data_source``; when
+    ``None``, the single ``svc`` is used — byte-identical to before. The overlap
+    pass MUST use the same per-instrument selection as the fetcher, or a v2 leaf's
+    real (shorter) window would be computed off the v1 axis.
     """
     if len(signal.inputs) <= 1:
         # Preserve the short-circuit for the spot/continuous case
@@ -1078,6 +1254,7 @@ async def compute_input_overlap(
                     start=start,
                     end=end,
                     err_prefix=f"input {inp.id!r}",
+                    svc_for=svc_for,
                 )
             )
         else:
@@ -1088,6 +1265,7 @@ async def compute_input_overlap(
                     start=start,
                     end=end,
                     err_prefix=f"input {inp.id!r}",
+                    svc_for=svc_for,
                 )
             )
 
@@ -1123,12 +1301,20 @@ def _int_yyyymmdd_to_unix_ms(d: int) -> int:
 
 
 def _instrument_payload(inst: InputInstrument) -> dict:
+    # Emit ``data_source`` ONLY when ``"v2"`` (mirrors the wire contract and keeps
+    # a v1 response byte-identical), so the FE can reconstruct the per-instrument
+    # source on a round-trip. Applied to every leaf-carrying branch below.
+    def _ds(payload: dict) -> dict:
+        if getattr(inst, "data_source", None) == "v2":
+            payload["data_source"] = "v2"
+        return payload
+
     if isinstance(inst, InstrumentSpot):
-        return {
+        return _ds({
             "type": "spot",
             "collection": inst.collection,
             "instrument_id": inst.instrument_id,
-        }
+        })
     if isinstance(inst, InstrumentBasket):
         # Kind-discriminated emission so the FE can re-render either
         # shape from the response.  Each leg's ``instrument`` is emitted
@@ -1156,7 +1342,7 @@ def _instrument_payload(inst: InputInstrument) -> dict:
     if isinstance(inst, InstrumentOptionStream):
         from dataclasses import asdict
 
-        return {
+        return _ds({
             "type": "option_stream",
             "collection": inst.collection,
             "option_type": inst.option_type,
@@ -1182,24 +1368,50 @@ def _instrument_payload(inst: InputInstrument) -> dict:
             # (hold mode only); round-trips through ``OptionStreamRef`` (default
             # 1.0).
             "nav_times": float(inst.nav_times),
-        }
-    return {
+        })
+    return _ds({
         "type": "continuous",
         "collection": inst.collection,
         "adjustment": inst.adjustment,
         "cycle": inst.cycle,
         "rollOffset": int(inst.roll_offset),
         "strategy": inst.strategy,
-    }
+    })
 
 
 @router.post("/compute")
 async def compute_signal(
     body: SignalComputeRequest,
+    request: Request,
     svc: MarketDataService = Depends(get_market_data),
     repo: WriteRepository = Depends(get_write_repository),
 ) -> dict:
-    """Evaluate a v4 Signal and return per-input positions + events."""
+    """Evaluate a v4 Signal and return per-input positions + events.
+
+    ``body.data_source`` is now the INHERITED DEFAULT: every input ref carries its
+    own ``data_source`` (per-instrument selection) and falls back to this per-run
+    value only when it omitted the field. ``svc_for`` resolves the concrete
+    warehouse for a source, and ``inst_svc_for`` bakes the body default into the
+    ref-source→service map that ``compute_input_overlap`` and
+    ``make_signal_fetcher`` use per instrument. An all-v1 run resolves every leaf
+    to the same object ``Depends(get_market_data)`` gave (Sign 1).
+    """
+
+    def svc_for(source: DataSource) -> MarketDataService:
+        return get_market_data_for(request, source)
+
+    def inst_svc_for(own: str | None) -> MarketDataService:
+        return svc_for(effective_data_source(own, body.data_source))
+
+    # The single "default" service (the body's own source) — used by
+    # ``_resolve_basket_inputs`` (no fetch) and as the fetch-layer fallback.
+    svc = svc_for(body.data_source)
+
+    # A v2 error raised inside an option resolve is swallowed by the engine's
+    # per-chunk fallback and reaches the user as an unattributable all-NaN curve.
+    # Check the pure preconditions here, where the message still means something.
+    # Per-node: gates ONLY the v2 legs, no-ops when there is no v2 leg (Sign 1).
+    check_v2_preconditions(body.model_dump(mode="json"), data_source=body.data_source)
 
     try:
         start_date, end_date = parse_iso_range(body.start, body.end)
@@ -1211,6 +1423,33 @@ async def compute_signal(
         signal = parse_signal(body.spec, resolved_inputs=resolved_inputs)
     except SignalValidationError as exc:
         return error_response("validation", str(exc))
+
+    # Pure v2 preconditions for BASKET-nested option legs — invisible to the
+    # wire-JSON check above (a saved basket is just an id). Runs before the DB
+    # floor so a bad cycle/stream fails without a round-trip. Raises the same
+    # ``ValidationError`` → uniform HTTP-400 as ``check_v2_preconditions``.
+    check_v2_basket_option_legs(resolved_inputs, default_source=body.data_source)
+
+    # E7 option coverage floor — the ONE v2 precondition that needs a query, so it
+    # runs here rather than in the pure checker above. Deferred until after basket
+    # resolution because a SAVED basket's legs are not on the wire (the payload
+    # carries only its id), and an option leg reached through a basket needs the
+    # same floor as a directly-named one. Only v2 option roots are collected
+    # (per-node), so an all-v1 run floors nothing and never touches the v2 service.
+    roots = collect_v2_option_roots(
+        body.model_dump(mode="json"), data_source=body.data_source
+    )
+    roots |= {
+        inst.collection
+        for inp in resolved_inputs
+        if isinstance(inp, _ResolvedBasketInput)
+        for inst, _weight in inp.legs
+        if isinstance(inst, InstrumentOptionStream)
+        and inst.collection
+        and effective_data_source(inst.data_source, body.data_source) == "v2"
+    }
+    if roots:
+        await check_v2_option_coverage_floor(roots, svc_for("v2"), start_date)
 
     indicators: dict[str, IndicatorSpecInput] = {}
     for ind_spec in body.indicators:
@@ -1238,11 +1477,14 @@ async def compute_signal(
             signal,
             start_date,
             end_date,
+            svc_for=inst_svc_for,
         )
     except SignalDataError as exc:
         return error_response("data", str(exc))
 
-    fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
+    fetcher = make_signal_fetcher(
+        svc, overlap_start, overlap_end, svc_for=inst_svc_for
+    )
     cost_config = CostConfig(
         slippage_bps=float(body.slippage_bps), fees_bps=float(body.fees_bps)
     )
@@ -1347,5 +1589,8 @@ __all__ = [
     "IndicatorSpecIn",
     "parse_signal",
     "make_signal_fetcher",
+    "resolve_delta_hedge_raw",
+    "resolve_hedge_activation_gate",
+    "resolve_hedge_raw",
     "compute_input_overlap",
 ]

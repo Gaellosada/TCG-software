@@ -83,6 +83,69 @@ describe('<TimeRangeSlider> handle positions', () => {
     expect(endInput.value).toBe('11');
   });
 
+  it('seeds the empty start handle at recommendedStart (cadence default)', () => {
+    // Raw min stays 2010-01 (quarterly era selectable) but the default handle
+    // must sit at the recommended full-cadence floor, not the raw floor.
+    render(
+      <TimeRangeSlider
+        minDate="2010-01-01"
+        maxDate="2026-01-01"
+        startDate=""
+        endDate=""
+        recommendedStart="2016-01-01"
+        disabled={false}
+        onChange={vi.fn()}
+      />,
+    );
+    const startInput = screen.getByLabelText('Start date');
+    const endInput = screen.getByLabelText('End date');
+    // 2016-01 minus 2010-01 = 72 months. End stays at the max.
+    expect(startInput.value).toBe('72');
+    expect(endInput.value).toBe(startInput.max);
+  });
+
+  it('an explicit startDate still overrides recommendedStart', () => {
+    render(
+      <TimeRangeSlider
+        minDate="2010-01-01"
+        maxDate="2026-01-01"
+        startDate="2012-01-01"
+        endDate=""
+        recommendedStart="2016-01-01"
+        disabled={false}
+        onChange={vi.fn()}
+      />,
+    );
+    // 2012-01 minus 2010-01 = 24 (user selection wins over the recommendation).
+    expect(screen.getByLabelText('Start date').value).toBe('24');
+  });
+
+  it('renders a shaded band over each lower-cadence segment', () => {
+    render(
+      <TimeRangeSlider
+        minDate="2010-01-01"
+        maxDate="2026-01-01"
+        startDate=""
+        endDate=""
+        recommendedStart="2016-01-01"
+        bands={[
+          { start: '2010-01-01', end: '2015-12-31', cadence: 'quarterly' },
+          { start: '2016-01-01', end: '2026-01-01', cadence: 'monthly' },
+        ]}
+        disabled={false}
+        onChange={vi.fn()}
+      />,
+    );
+    // Only the non-monthly segment is shaded.
+    const bands = screen.getAllByTestId('cadence-band');
+    expect(bands).toHaveLength(1);
+    expect(bands[0].getAttribute('title')).toMatch(/quarterly/i);
+    // Accessible name so screen-reader/keyboard users get the cadence info even
+    // though the band sits under the range input (title hover can't surface).
+    expect(bands[0].getAttribute('role')).toBe('img');
+    expect(bands[0].getAttribute('aria-label')).toMatch(/quarterly/i);
+  });
+
   it('returns null when totalMonths <= 0', () => {
     const { container } = render(
       <TimeRangeSlider

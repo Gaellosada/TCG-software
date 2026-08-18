@@ -35,12 +35,27 @@ function formatLabel(dateStr) {
  * Props:
  *   minDate  — earliest available date "YYYY-MM-DD" (or null)
  *   maxDate  — latest available date "YYYY-MM-DD" (or null)
- *   startDate — current start selection "YYYY-MM-DD" (or '' = use min)
+ *   startDate — current start selection "YYYY-MM-DD" (or '' = use default)
  *   endDate   — current end selection "YYYY-MM-DD" (or '' = use max)
+ *   recommendedStart — cadence full-cadence floor "YYYY-MM-DD" (or null). When
+ *     `startDate` is empty the default start handle seeds HERE (not at min), so
+ *     the picker never silently defaults into a cycle's pre-cliff lower-cadence
+ *     era. `minDate` stays the raw floor so that era is still selectable.
+ *   bands — optional [{ start, end, cadence }] cadence segments; each
+ *     non-"monthly" span is shaded over the track with a tooltip.
  *   disabled  — disable interaction
  *   onChange({ startDate, endDate }) — callback with ISO date strings
  */
-export default function TimeRangeSlider({ minDate, maxDate, startDate, endDate, disabled, onChange }) {
+export default function TimeRangeSlider({
+  minDate,
+  maxDate,
+  startDate,
+  endDate,
+  recommendedStart,
+  bands,
+  disabled,
+  onChange,
+}) {
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
 
@@ -52,7 +67,12 @@ export default function TimeRangeSlider({ minDate, maxDate, startDate, endDate, 
     [effectiveMin, effectiveMax],
   );
 
-  const startIdx = startDate ? dateToMonthIndex(effectiveMin, startDate) : 0;
+  // Default start handle: explicit selection wins; else the cadence
+  // recommendation (full-cadence floor); else the raw min (index 0).
+  const defaultStartIdx = recommendedStart
+    ? dateToMonthIndex(effectiveMin, recommendedStart)
+    : 0;
+  const startIdx = startDate ? dateToMonthIndex(effectiveMin, startDate) : defaultStartIdx;
   const endIdx = endDate ? dateToMonthIndex(effectiveMin, endDate) : totalMonths;
 
   const clampedStart = Math.max(0, Math.min(startIdx, totalMonths));
@@ -83,8 +103,22 @@ export default function TimeRangeSlider({ minDate, maxDate, startDate, endDate, 
   const maxLabel = formatLabel(effectiveMax);
 
   const hasSelection = clampedStart > 0 || clampedEnd < totalMonths;
-  const selStartLabel = startDate ? formatLabel(startDate) : minLabel;
+  const defaultStartLabel = recommendedStart ? formatLabel(recommendedStart) : minLabel;
+  const selStartLabel = startDate ? formatLabel(startDate) : defaultStartLabel;
   const selEndLabel = endDate ? formatLabel(endDate) : maxLabel;
+
+  // Shade each lower-cadence (non-monthly) segment as an overlay positioned by
+  // the same month→% math as the fill. Clamp into [0, totalMonths].
+  const bandOverlays = (Array.isArray(bands) ? bands : [])
+    .filter((b) => b && b.cadence && b.cadence !== 'monthly' && b.start && b.end)
+    .map((b) => {
+      const s = Math.max(0, Math.min(dateToMonthIndex(effectiveMin, b.start), totalMonths));
+      const e = Math.max(0, Math.min(dateToMonthIndex(effectiveMin, b.end), totalMonths));
+      const left = totalMonths > 0 ? (s / totalMonths) * 100 : 0;
+      const width = totalMonths > 0 ? ((e - s) / totalMonths) * 100 : 0;
+      return { key: `${b.start}-${b.end}`, left, width, cadence: b.cadence };
+    })
+    .filter((b) => b.width > 0);
 
   if (totalMonths <= 0) return null;
 
@@ -100,6 +134,22 @@ export default function TimeRangeSlider({ minDate, maxDate, startDate, endDate, 
       </div>
       <div className={styles.slider}>
         <div className={styles.track} />
+        {bandOverlays.map((b) => (
+          <div
+            key={b.key}
+            className={styles.band}
+            data-testid="cadence-band"
+            data-cadence={b.cadence}
+            // Accessible name: the band is decorative-but-informative and sits
+            // under the native range input (pointer-events:none), so the `title`
+            // hover-tooltip can't reliably surface — role=img + aria-label give
+            // screen-reader/keyboard users the cadence info regardless.
+            role="img"
+            aria-label={`${b.cadence}-only cadence (~4 rolls/yr) — lower than the current monthly cadence`}
+            title={`${b.cadence}-only cadence (~4 rolls/yr) — lower than the current monthly cadence`}
+            style={{ left: `${b.left}%`, width: `${b.width}%` }}
+          />
+        ))}
         <div
           className={styles.fill}
           style={{ left: `${leftPct}%`, width: `${rightPct - leftPct}%` }}

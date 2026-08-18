@@ -22,6 +22,20 @@ from tcg.types.statistics import (
 )
 
 _TRADING_DAYS_PER_YEAR = 252
+# NOTE — Legacy-platform reconciliation (why this Sharpe reads below the old
+# Java platform's, verified 2026-08; see tests::TestLegacyInformationRatioReconciliation):
+# The gap vs the legacy platform is DEFINITIONAL, not a bug. Two differences,
+# and only these two:
+#   1. Risk-free rate: this engine subtracts ``risk_free_rate`` (user-configurable,
+#      default 4%); legacy's headline ratio (StatisticsUtils.getInformationRatio =
+#      sqrt(260)*mean/std) subtracts NONE. The 4% drag is the dominant term — it
+#      roughly halves the ratio for a typical strategy.
+#   2. Annualization constant: this engine uses 252 (industry-standard US trading
+#      days); legacy hard-codes 260 (52*5). On the SAME return series at rf=0 the
+#      ratios differ by EXACTLY sqrt(252/260) ≈ 0.9845 (~1.6%) — nothing more.
+# Decision (Gael, 2026-08): keep 252. At rf=0 these two accounts match to 1.6%;
+# any larger observed gap must come from the two engines running over DIFFERENT
+# return series (trades / date range / days counted), not from this formula.
 # Minimum sample size below which skew / kurtosis are statistically
 # unreliable. The brief specifies < 30 → null.
 _MIN_OBS_FOR_HIGHER_MOMENTS = 30

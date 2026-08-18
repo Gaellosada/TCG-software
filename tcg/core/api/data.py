@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from typing import Annotated, Union
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from tcg.core.api._basket_compute import compute_basket_series
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import BasketRefInline, BasketRefSaved
 from tcg.core.api._persistence_wiring import get_write_repository
-from tcg.core.api.common import get_market_data
+from tcg.core.api.common import DataSource, get_market_data, get_market_data_for
 from tcg.data.protocols import MarketDataService
 from tcg.engine.signal_exec import SignalDataError, SignalValidationError
 from tcg.persistence import WriteRepository
@@ -109,18 +109,29 @@ async def get_basket_series(
 
 @router.get("/collections")
 async def list_collections(
+    request: Request,
     asset_class: str | None = Query(
         None, description="Filter by asset class (equity, index, future)"
     ),
-    svc: MarketDataService = Depends(get_market_data),
+    data_source: DataSource = Query(
+        "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
 ) -> dict:
-    """List available data collections, optionally filtered by asset class."""
+    """List available data collections, optionally filtered by asset class.
+
+    ``data_source`` selects the warehouse the catalog is drawn from, so the
+    instrument picker offers ONLY what the chosen source actually serves (v2
+    reports its restricted set — e.g. no ``FUT_VIX``). ``"v1"`` (the default,
+    or an omitted param) returns the exact object the fixed v1 dependency would,
+    so the default path is byte-identical to before.
+    """
     try:
         ac = AssetClass(asset_class) if asset_class is not None else None
     except ValueError:
         raise ValidationError(
             f"Invalid asset_class '{asset_class}'. Must be one of: {', '.join(e.value for e in AssetClass)}"
         )
+    svc = get_market_data_for(request, data_source)
     collections = await svc.list_collections(ac)
     return {"collections": collections}
 
@@ -205,9 +216,18 @@ async def get_continuous_series(
 @router.get("/continuous/{collection}/cycles")
 async def get_available_cycles(
     collection: str,
-    svc: MarketDataService = Depends(get_market_data),
+    request: Request,
+    data_source: DataSource = Query(
+        "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
 ) -> dict:
-    """Return available expiration cycles for a futures collection."""
+    """Return available expiration cycles for a futures collection.
+
+    ``data_source`` picks the warehouse so the picker's cycle dropdown offers
+    only the chosen source's real cycles. ``"v1"`` (default/omitted) is
+    byte-identical to the fixed v1 dependency.
+    """
+    svc = get_market_data_for(request, data_source)
     cycles = await svc.get_available_cycles(collection)
     return {"cycles": cycles}
 
@@ -218,11 +238,20 @@ async def get_available_cycles(
 @router.get("/{collection}")
 async def list_instruments(
     collection: str,
+    request: Request,
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
-    svc: MarketDataService = Depends(get_market_data),
+    data_source: DataSource = Query(
+        "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
 ) -> dict:
-    """List instruments in a collection with pagination."""
+    """List instruments in a collection with pagination.
+
+    ``data_source`` selects the warehouse so the picker lists only the chosen
+    source's instruments. ``"v1"`` (default/omitted) is byte-identical to the
+    fixed v1 dependency.
+    """
+    svc = get_market_data_for(request, data_source)
     result = await svc.list_instruments(collection, skip=skip, limit=limit)
     return {
         "items": [
@@ -238,6 +267,26 @@ async def list_instruments(
         "skip": result.skip,
         "limit": result.limit,
     }
+
+
+@router.get("/{collection}/{instrument_id}/bounds")
+async def get_price_bounds(
+    collection: str,
+    instrument_id: str,
+    svc: MarketDataService = Depends(get_market_data),
+) -> dict:
+    """Cheap first/last available ``trade_date`` for an instrument.
+
+    Returns ``{"start", "end"}`` as YYYYMMDD ints (or ``null`` when the
+    instrument has no bars) — the endpoints of what ``GET
+    /{collection}/{instrument_id}`` would return, WITHOUT hydrating the whole
+    OHLCV series. The portfolio cache-status probe uses this to resolve each
+    leg's date range (part of the compute cache key) without a cold full-history
+    dwh round-trip per leg. Same read-only ``get_market_data`` dependency and
+    unknown-collection guard as ``get_prices``.
+    """
+    start_int, end_int = await svc.get_price_bounds(collection, instrument_id)
+    return {"start": start_int, "end": end_int}
 
 
 @router.get("/{collection}/{instrument_id}")

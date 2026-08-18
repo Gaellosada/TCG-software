@@ -56,6 +56,12 @@ export function savePortfolio(name, { legs, rebalance }) {
       // use camelCase `rollOffset` above). ``?? null`` so a {value:0} survives.
       // ("End of month" is the maturity, not a separate roll_schedule.)
       roll_offset: l.roll_offset ?? null,
+      // Per-instrument market-data source. PERSISTED now (behavior change from
+      // the per-child prototype, which did not persist it): source is part of
+      // the saved spec. Omitted when v1/absent so a pre-feature saved doc stays
+      // byte-identical (no spurious dirty-diff); ``coerceDataSource`` reads an
+      // absent value back as v1 on load.
+      ...(l.dataSource === 'v2' ? { dataSource: 'v2' } : {}),
     })),
     weights: weightsDict,
     rebalance,

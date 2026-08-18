@@ -52,7 +52,12 @@ from tcg.types.options import OptionContractDoc, OptionDailyRow
 # Bump on ANY change to the ``query_chain_bulk`` SELECT column set, the row
 # shape, or the ``OptionContractDoc`` / ``OptionDailyRow`` dataclass fields, so a
 # stale-shaped entry can never be served across a deploy that changed the query.
-CHAIN_CACHE_VERSION = 1
+#
+# 1 → 2: the key gained a ``source`` discriminator (below). This cache is
+# LOOP-global, not service-scoped, so without it a v1 and a v2 resolve issuing
+# the same ``(root, dates, type, window, cycle)`` args would share one entry and
+# silently serve the WRONG warehouse's rows.
+CHAIN_CACHE_VERSION = 2
 
 _DEFAULT_MAX_ROWS = 1_000_000
 _DEFAULT_TTL_SECONDS = 21_600  # 6 h
@@ -90,8 +95,27 @@ def _dateset_key(dates: Sequence[date]) -> tuple[int, ...]:
     return tuple(sorted({date_to_int(d) for d in dates}))
 
 
+def reader_source_id(reader: object) -> str:
+    """Identity of the reader that produced a cached row set.
+
+    The cache is keyed by ``id(running_loop)``, NOT by the market-data service,
+    so two services reading DIFFERENT warehouses share one cache instance. The
+    v1 ``SqlOptionsDataReader`` and the v2 ``V2OptionsDataReader`` accept the
+    identical ``query_chain_bulk`` argument tuple (the whole point of the compat
+    adapter) and return DIFFERENT rows, so the arguments alone are not a
+    sufficient key.
+
+    Derived from the reader's fully-qualified class name rather than passed in
+    by the caller: a new source added later is discriminated automatically, with
+    no wiring step anyone can forget.
+    """
+    cls = type(reader)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
 def make_chain_bulk_key(
     *,
+    source: str,
     root: str,
     dates: Sequence[date],
     type: str,
@@ -103,6 +127,9 @@ def make_chain_bulk_key(
 ) -> _Key:
     """Build the LRU key from the EXACT args ``query_chain_bulk`` receives.
 
+    ``source`` (see :func:`reader_source_id`) scopes the entry to the warehouse
+    that produced it — REQUIRED, because the cache itself is loop-global.
+
     The floats ``strike_min`` / ``strike_max`` are keyed VERBATIM (not rounded):
     a mismatched float is simply a miss (re-fetch), never a wrong hit, so this is
     correctness-safe even if an upstream change (e.g. Wave 2B strike-window
@@ -110,6 +137,7 @@ def make_chain_bulk_key(
     """
     return (
         CHAIN_CACHE_VERSION,
+        source,
         root,
         type,
         date_to_int(expiration_min),
@@ -287,4 +315,5 @@ __all__ = [
     "ChainBulkCache",
     "get_chain_bulk_cache",
     "make_chain_bulk_key",
+    "reader_source_id",
 ]

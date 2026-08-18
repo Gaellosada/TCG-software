@@ -7,15 +7,55 @@ drift apart.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from tcg.data.protocols import MarketDataService, MarketDataServiceV2
 from tcg.types.market import AdjustmentMethod
 
+# The per-instrument warehouse selector carried on ref / leg objects (and, as an
+# inherited default, on compute request bodies).
+# ``"v1"`` = ``tcg_instruments`` (the frozen reference), ``"v2"`` =
+# ``tcg_instruments_v2`` through the compat adapter. Declared here so the
+# portfolio and signal request models cannot drift.
+DataSource = Literal["v1", "v2"]
+
+
+def effective_data_source(own: str | None, default: DataSource) -> DataSource:
+    """Resolve the warehouse a ref actually reads from, per the frozen precedence.
+
+    Precedence (highest first): the ref's OWN ``data_source`` (``"v1"``/``"v2"``);
+    else the enclosing body's ``data_source`` (``default``); else — since the
+    per-run field itself defaults to ``"v1"`` — the frozen reference. A ``None``
+    (unset) or any non-literal value inherits ``default``, so a leaf that omitted
+    the field on the wire (the emit-only-when-``"v2"`` rule) inherits the body's
+    source. ``"v1"`` and ``"v2"`` on a ref win over the body default.
+    """
+    return own if own in ("v1", "v2") else default
+
 
 def get_market_data(request: Request) -> MarketDataService:
     """Dependency: retrieve the MarketDataService from app state."""
+    return request.app.state.market_data
+
+
+def get_market_data_for(request: Request, source: DataSource) -> MarketDataService:
+    """Return the ``MarketDataService`` a compute should bind for ``source``.
+
+    Both returned objects satisfy the SAME protocol, so every layer below the
+    route (``make_signal_fetcher``, ``materialise_option_streams``,
+    ``build_stream_resolver_wiring``, the per-leg evaluators) takes the service
+    as a plain argument and none of them re-reads ``app.state`` — swapping the
+    bound object at the route therefore propagates for free.
+
+    ``"v1"`` returns the exact object ``get_market_data`` would, so the default
+    path is unchanged (guardrail Sign 1). Any other value than the two literals
+    is impossible: the request models constrain it to ``DataSource``.
+    """
+    if source == "v2":
+        return request.app.state.market_data_v2_compat
     return request.app.state.market_data
 
 

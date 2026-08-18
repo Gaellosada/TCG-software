@@ -40,6 +40,15 @@ export const queryKeys = {
     prices: (collection, instrument) => ['market', 'prices', collection, instrument],
 
     /**
+     * GET /data/{collection}/{instrument}/bounds — cheap first/last trade_date.
+     * The min/max-date endpoints of the FULL price series without hydrating it;
+     * used to resolve a portfolio leg's range for the cache-status key. Kept
+     * distinct from ``prices`` so the tiny bounds payload never shadows (or is
+     * shadowed by) the full-series cache entry.
+     */
+    priceBounds: (collection, instrument) => ['market', 'priceBounds', collection, instrument],
+
+    /**
      * GET /data/continuous/{collection} — rolled continuous series.
      * ``cycle`` is normalised: ''/undefined/null all collapse to null (the
      * "all cycles" case) so the Data-page chart and a portfolio leg with no
@@ -81,8 +90,16 @@ export const queryKeys = {
     /** GET /options/expirations?root= — distinct expirations for a root */
     optionExpirations: (root) => ['market', 'optionExpirations', root],
 
-    /** GET /options/coverage?root= — first/last bar trade_date (data span) */
-    optionCoverage: (root) => ['market', 'optionCoverage', root],
+    /**
+     * GET /options/coverage?root= — first/last bar trade_date (data span).
+     * ``cycle`` scopes the span to one expiration cycle (e.g. 'W3 Friday',
+     * whose data starts years after the collection). ''/undefined/null all
+     * collapse to null (the "whole collection" case) so a cycle-less leg keeps
+     * the same cache entry as before. Positional — appended LAST so an existing
+     * cycle-less key is unchanged in meaning.
+     */
+    optionCoverage: (root, dataSource = 'v1', cycle = null) =>
+      ['market', 'optionCoverage', root, dataSource, cycle || null],
 
     /** GET /options/contract/{coll}/{id} — per-contract time series */
     optionContract: (collection, contractId, { computeMissing, dateFrom, dateTo } = {}) => [

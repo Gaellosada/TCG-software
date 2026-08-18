@@ -43,8 +43,12 @@ async function fetchClassified(path, options = {}) {
 //    Returns: { roots: OptionRootInfo[] }
 // ---------------------------------------------------------------------------
 
-export async function getOptionRoots({ signal } = {}) {
-  return fetchClassified('/options/roots', signal ? { signal } : {});
+// ``source`` picks the warehouse whose option roots are listed. ``data_source=v2``
+// is emitted ONLY for v2 (v1/omitted → byte-identical URL), so the picker's
+// Options tab offers only the chosen source's real roots.
+export async function getOptionRoots({ signal, source } = {}) {
+  const path = source === 'v2' ? '/options/roots?data_source=v2' : '/options/roots';
+  return fetchClassified(path, signal ? { signal } : {});
 }
 
 // ---------------------------------------------------------------------------
@@ -53,22 +57,47 @@ export async function getOptionRoots({ signal } = {}) {
 //     Returns: { root, expirations: ['YYYY-MM-DD', ...] }
 // ---------------------------------------------------------------------------
 
-export async function getOptionExpirations(root) {
+export async function getOptionExpirations(root, dataSource) {
   const qp = new URLSearchParams({ root: String(root) });
+  // Emit data_source ONLY for v2 (v1/omitted → byte-identical URL).
+  if (dataSource === 'v2') qp.set('data_source', 'v2');
   return fetchClassified(`/options/expirations?${qp}`);
 }
 
 // ---------------------------------------------------------------------------
 // 1c. Trade-date coverage (data span) for a root
-//     GET /api/options/coverage?root=OPT_SP_500
-//     Returns: { root, start: 'YYYY-MM-DD'|null, end: 'YYYY-MM-DD'|null }
+//     GET /api/options/coverage?root=OPT_SP_500[&expiration_cycle=...]
+//     Returns: {
+//       root,
+//       start: 'YYYY-MM-DD'|null,          // raw trade_date extent (unchanged)
+//       end:   'YYYY-MM-DD'|null,
+//       recommended_start: 'YYYY-MM-DD'|null,  // full-cadence floor (== start if no cliff)
+//       segments: [{ start, end, cadence: 'monthly'|'quarterly'|'sparse' }],
+//     }
 //     Used by the portfolio editor to resolve an option leg's real available
 //     date range (so an option-only portfolio's slider floors at the option
-//     collection's true history, not an artificial recent default).
+//     collection's true history, not an artificial recent default). The additive
+//     `recommended_start`/`segments` make the picker CADENCE-AWARE: a monthly
+//     cycle (e.g. W3) that only listed quarterly before ~2016 seeds the default
+//     window at the monthly floor and shades the quarterly era, instead of
+//     silently defaulting into it. `start`/`end` are byte-identical to before
+//     (backward-compatible passthrough).
 // ---------------------------------------------------------------------------
 
-export async function getOptionCoverage(root) {
+export async function getOptionCoverage(root, dataSource, expirationCycle) {
   const qp = new URLSearchParams({ root: String(root) });
+  // Emit data_source ONLY for v2 (v1 is the default) so the v1 request stays
+  // byte-identical to the pre-parameter path. v2 option history starts years
+  // after v1, so a v2 leg must resolve its span from the v2 warehouse or the
+  // seeded compute window would begin before v2 has data (E7 floor at compute).
+  if (dataSource === 'v2') qp.set('data_source', 'v2');
+  // Emit expiration_cycle ONLY when the caller passes a truthy cycle. Omitted →
+  // the URL is byte-identical to the pre-cycle path (the backend then reports
+  // whole-collection coverage). Provided → the span is scoped to that cycle
+  // (e.g. 'W3 Friday' data starts ~2016, years after the collection floor).
+  if (expirationCycle != null && String(expirationCycle).trim() !== '') {
+    qp.set('expiration_cycle', String(expirationCycle));
+  }
   return fetchClassified(`/options/coverage?${qp}`);
 }
 

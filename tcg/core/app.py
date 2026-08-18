@@ -67,7 +67,12 @@ async def lifespan(app: FastAPI):
         await dwh_pool.connect()
         services = await create_services(dwh_pool)
         app.state.market_data = services["market_data"]
+        # Explorer-only, object-id-keyed v2 service (the "Database v2" page).
         app.state.market_data_v2 = services["market_data_v2"]
+        # ``MarketDataService``-shaped view of tcg_instruments_v2 — the compute
+        # source bound when a request carries ``data_source="v2"``. Distinct
+        # from ``market_data_v2`` above; see ``tcg.data.create_services``.
+        app.state.market_data_v2_compat = services["market_data_v2_compat"]
 
         # --- tcg_app_data (PostgreSQL, read-write) for persistence ---
         # Built here (not lazily) so startup fails fast and the pool gets

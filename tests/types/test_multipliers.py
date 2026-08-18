@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+from types import MappingProxyType
+
+import pytest
 
 from tcg.types.multipliers import (
     FUTURES_NOTIONAL_MULTIPLIERS,
@@ -10,6 +13,15 @@ from tcg.types.multipliers import (
     resolve_multipliers,
     root_from_collection,
 )
+
+
+def test_multiplier_table_is_immutable() -> None:
+    # A5(1): the fallback table lives in the frozen ``tcg.types`` layer and must
+    # not be mutable module-global state — a stray write would silently corrupt
+    # sizing for every consumer. It is a read-only mapping.
+    assert isinstance(FUTURES_NOTIONAL_MULTIPLIERS, MappingProxyType)
+    with pytest.raises(TypeError):
+        FUTURES_NOTIONAL_MULTIPLIERS["SP_500"] = None  # type: ignore[index]
 
 
 def test_root_and_futures_name_mapping() -> None:

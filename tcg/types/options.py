@@ -351,7 +351,14 @@ class AtExpiry:
 
 @dataclass(frozen=True)
 class NDaysBeforeExpiry:
-    """Roll n calendar days before expiry (Phase 2 only)."""
+    """Roll n trading days before expiry.
+
+    Per SPEC §5.5/§5.6 (screenshots are authoritative — SPEC §0): "N TRADING
+    days before expiry", not calendar days. ``n=0`` is the same boundary as
+    ``AtExpiry`` (roll on/after the trading day at-or-before ``expiration``).
+    See ``tcg.engine.options.roll.roller`` for the trading-calendar source
+    used to resolve "n trading days before" a given expiration.
+    """
 
     n: int
 

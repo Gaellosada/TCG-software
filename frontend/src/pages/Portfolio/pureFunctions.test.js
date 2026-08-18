@@ -70,15 +70,15 @@ describe('toLongEquivalent', () => {
 
 describe('formatReturn', () => {
   it('formats positive return with + sign', () => {
-    expect(formatReturn(0.05)).toBe('+5.0%');
+    expect(formatReturn(0.05)).toBe('+5.00%');
   });
 
   it('formats negative return without extra sign', () => {
-    expect(formatReturn(-0.03)).toBe('-3.0%');
+    expect(formatReturn(-0.03)).toBe('-3.00%');
   });
 
-  it('formats zero as 0.0%', () => {
-    expect(formatReturn(0)).toBe('0.0%');
+  it('formats zero as 0.00%', () => {
+    expect(formatReturn(0)).toBe('0.00%');
   });
 
   it('returns dash for null', () => {
@@ -94,7 +94,7 @@ describe('formatReturn', () => {
   });
 
   it('handles small returns with precision', () => {
-    expect(formatReturn(0.001)).toBe('+0.1%');
+    expect(formatReturn(0.001)).toBe('+0.10%');
   });
 });
 

@@ -29,7 +29,7 @@ import logging
 from datetime import date
 from typing import Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
@@ -47,6 +47,7 @@ from tcg.core.api._models_options import (
     SmilePoint,
     SmileSeries,
 )
+from tcg.core.api._cadence import Segment, classify_cadence_segments
 from tcg.core.api._models import OptionStreamRef
 from tcg.core.api._options_wiring import (
     build_options_chain,
@@ -56,8 +57,11 @@ from tcg.core.api._options_wiring import (
 )
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import (
+    DataSource,
+    effective_data_source,
     error_response,
     get_market_data,
+    get_market_data_for,
     progress_clear,
     progress_register,
     progress_snapshot,
@@ -217,9 +221,18 @@ def _build_contract_row_with_greeks(
 
 @router.get("/roots")
 async def list_roots(
-    svc: MarketDataService = Depends(get_market_data),
+    request: Request,
+    data_source: DataSource = Query(
+        "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
 ) -> dict:
     """List every OPT_* collection with display metadata.
+
+    ``data_source`` selects the warehouse so the picker's Options tab offers
+    only the chosen source's real roots (v2 serves ``OPT_SP_500`` only; a
+    Databento re-ingest may widen this — the list is warehouse-driven, never
+    hardcoded). ``"v1"`` (default/omitted) is byte-identical to the fixed v1
+    dependency.
 
     Injects engine-side metadata onto each ``OptionRootInfo`` before
     serialization (the data layer can't reach the engine per the
@@ -232,6 +245,7 @@ async def list_roots(
         ``OptionsDataAccessError`` from the reader → 502 via the global
         TCG error handler.
     """
+    svc = get_market_data_for(request, data_source)
     roots = await svc.list_option_roots()
     blocked = blocked_roots()
     # The real (non-empty) ``expiration_cycle`` tags per root, so the frontend
@@ -284,17 +298,23 @@ async def list_roots(
 
 @router.get("/expirations")
 async def list_expirations(
+    request: Request,
     root: str = Query(..., description="OPT_* collection name"),
-    svc: MarketDataService = Depends(get_market_data),
+    data_source: DataSource = Query(
+        "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
 ) -> dict:
     """Distinct expirations available on *root*, sorted ascending.
 
     Backs the chain / smile date pickers so users can only choose dates
-    that actually have contracts.
+    that actually have contracts. ``data_source`` picks the warehouse so a v2
+    root offers only v2's expirations (which begin years after v1's). ``"v1"``
+    (default/omitted) is byte-identical to the fixed v1 dependency.
 
     Errors:
         ``OptionsDataAccessError`` from the reader → 502.
     """
+    svc = get_market_data_for(request, data_source)
     dates_ = await svc.list_option_expirations(root)
     return {"root": root, "expirations": [d.isoformat() for d in dates_]}
 
@@ -304,10 +324,49 @@ async def list_expirations(
 # ---------------------------------------------------------------------------
 
 
+async def _cycle_trade_date_coverage(
+    svc: MarketDataService, root: str, cycle: str
+) -> tuple[date | None, date | None]:
+    """Min/max ``trade_date`` over the contracts of ONE ``expiration_cycle``.
+
+    Cycle-scoped coverage cannot go through ``option_trade_date_coverage`` (a
+    collection-wide read), so it is derived source-agnostically from
+    :meth:`MarketDataService.option_cycle_trade_date_span` — an EXACT
+    ``min(trade_date)/max(trade_date)`` over just THIS cycle's bars, which BOTH
+    the v1 service and the v2 adapter expose with a ``cycle`` filter.  (This
+    supersedes deriving the extremes from the full per-date map
+    ``list_option_expirations_by_date``, which had to materialise every
+    settlement bar of the cycle — ~14M rows for W3 — only to keep min/max; the
+    aggregate returns the SAME two dates without the scan.)
+
+    No collection-coverage pre-fetch: the span reads the cycle's true unbounded
+    extent directly (v1 via a per-contract ``LATERAL`` PK min/max; v2 via an
+    object-scoped aggregate), which for the collection-wide window is
+    byte-identical to the previously window-bounded read but drops the cold
+    fan-out onto ``option_trade_date_coverage`` — critical for v2, whose
+    no-cycle coverage is a ~10s full ``fact_value`` scan that this path no
+    longer pays.  Returns ``(None, None)`` when the cycle lists no bar.
+    """
+    return await svc.option_cycle_trade_date_span(root, cycle=cycle)
+
+
 @router.get("/coverage")
 async def get_coverage(
+    request: Request,
     root: str = Query(..., description="OPT_* collection name"),
-    svc: MarketDataService = Depends(get_market_data),
+    data_source: DataSource = Query(
+        "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
+    expiration_cycle: str | None = Query(
+        None,
+        description=(
+            "Optional ``OptionContractDoc.expiration_cycle`` filter.  When "
+            "provided, coverage is scoped to the min/max ``trade_date`` of THAT "
+            "cycle only (e.g. an EW3 / \"W3 Friday\" cycle starts years after the "
+            "collection).  Empty string is coerced to ``None`` (collection-wide, "
+            "byte-identical to the pre-parameter path)."
+        ),
+    ),
 ) -> dict:
     """First/last bar ``trade_date`` for *root* (the collection's data span).
 
@@ -317,14 +376,61 @@ async def get_coverage(
     history (~2005/2006 for SPX/VIX) instead of an artificial recent default.
     ``start``/``end`` are ``null`` when the root has no usable contract.
 
+    ``data_source`` picks the warehouse the coverage is read from. This matters
+    because v2's option history starts YEARS after v1's (~2011 vs ~2005), so a
+    v2 run seeded from v1 coverage would begin before v2 has any data and fail
+    the E7 floor check at compute. The slider/compute window must therefore
+    reflect the SELECTED source's real span. ``"v1"`` returns the exact object
+    the default dependency would (byte-identical to the pre-parameter path).
+
+    ``expiration_cycle`` (optional) narrows the coverage to a single cycle.  A
+    specific cycle (e.g. EW3 / "W3 Friday") can start much later than the
+    collection (whose span is the union of ALL cycles), so an option leg pinned
+    to that cycle would otherwise resolve a portfolio range beginning before the
+    cycle has any data — producing a misleading flat pre-data segment.  When the
+    param is OMITTED (or empty) the behaviour is UNCHANGED and byte-identical to
+    the collection-wide path.
+
     Errors:
         ``OptionsDataAccessError`` from the reader → 502.
     """
-    first, last = await svc.option_trade_date_coverage(root)
+    svc = get_market_data_for(request, data_source)
+    cycle = expiration_cycle or None
+    if cycle is None:
+        first, last = await svc.option_trade_date_coverage(root)
+        # Collection-wide coverage is the union of ALL cycles → always dense.
+        # A single monthly segment is honest and keeps the default path
+        # zero-cost (no extra query, no classification).
+        if first is None or last is None:
+            recommended_start, segments = None, []
+        else:
+            recommended_start = first
+            segments = [Segment(first, last, "monthly")]
+    else:
+        first, last = await _cycle_trade_date_coverage(svc, root, cycle)
+        if first is None or last is None:
+            recommended_start, segments = None, []
+        else:
+            # +1 CHEAP dim scan (DISTINCT expirations) — NOT another fact join.
+            expiries = await svc.list_option_expirations_filtered(root, cycle=cycle)
+            recommended_start, segments = classify_cadence_segments(
+                expiries, first, last
+            )
     return {
         "root": root,
         "start": first.isoformat() if first else None,
         "end": last.isoformat() if last else None,
+        "recommended_start": (
+            recommended_start.isoformat() if recommended_start else None
+        ),
+        "segments": [
+            {
+                "start": s.start.isoformat(),
+                "end": s.end.isoformat(),
+                "cadence": s.cadence,
+            }
+            for s in segments
+        ],
     }
 
 
@@ -886,6 +992,19 @@ def option_stream_ref_to_instrument(
         nav_times=ref.nav_times,
         sizing_mode=ref.sizing_mode,
         futures_reference=ref.futures_reference,
+        # GAP C: None (unset) is treated as "apply the multiplier" (byte-identical);
+        # only an explicit False selects per-index-point sizing.
+        apply_contract_multiplier=ref.apply_contract_multiplier is not False,
+        # GAP A: thread the delta-hedge overlay into the engine instrument (was
+        # DROPPED here).  A disabled config maps to None (no hedge), so signal_exec /
+        # the fetcher never wire the F2 path for it — matching the portfolio path,
+        # which skips a ``delta_hedge`` whose ``enabled`` is False.
+        delta_hedge=(
+            ref.delta_hedge.to_spec()
+            if ref.delta_hedge is not None and ref.delta_hedge.enabled
+            else None
+        ),
+        data_source=ref.data_source,
     )
 
 
@@ -1036,7 +1155,7 @@ async def get_stream_progress(task_id: str) -> dict:
 async def materialise_streams(
     body: OptionStreamRequest,
     background_tasks: BackgroundTasks,
-    svc: MarketDataService = Depends(get_market_data),
+    request: Request,
 ) -> dict | JSONResponse:
     """Materialise one or more option stream refs over a date range.
 
@@ -1062,6 +1181,38 @@ async def materialise_streams(
         start_date, end_date = parse_iso_range(body.start, body.end)
     except ValueError as exc:
         return error_response("validation", str(exc))
+
+    # Per-instrument warehouse selection. Each ``OptionStreamRef`` carries its own
+    # ``data_source`` (default v1). ``materialise_option_streams`` runs EVERY
+    # stream through ONE service, so a single request must be uniform in source —
+    # a mix would force one warehouse to answer for the other (the exact
+    # silent-wrong-warehouse failure the v2 boundary exists to prevent). The
+    # ``request``-bound ``get_market_data_for`` is the same mechanism the sibling
+    # read endpoints use; an all-v1 request resolves to the same service the
+    # ``Depends`` default gave, so v1 behaviour is byte-identical.
+    sources = {
+        effective_data_source(entry.ref.data_source, "v1") for entry in body.streams
+    }
+    if len(sources) > 1:
+        return error_response(
+            "validation",
+            "an option-stream request cannot mix v1 and v2 data sources; "
+            "materialise each warehouse in its own request",
+        )
+    source = next(iter(sources))
+    if source == "v2":
+        # Reject a collection/cycle/stream v2 cannot serve HERE, with an
+        # actionable message, rather than let the engine degrade to all-NaN.
+        # Runs before the service is resolved so a bad request never depends on
+        # the v2 warehouse being reachable.
+        from tcg.core.api._v2_preconditions import check_v2_preconditions
+        from tcg.types.errors import ValidationError as _ValidationError
+
+        try:
+            check_v2_preconditions(body.model_dump(mode="json"), data_source=source)
+        except _ValidationError as exc:
+            return error_response("validation", str(exc))
+    svc = get_market_data_for(request, source)
 
     # Pre-flight: tautology + greeks-gated checks
     cached_root_metadata: dict[str, object] | None = None
@@ -1105,7 +1256,10 @@ async def materialise_streams(
         if total > 0:
             progress_task_id = body.task_id
             progress_register(progress_task_id, total)
-            progress_callback = lambda tid=progress_task_id: progress_tick(tid)
+
+            def progress_callback(tid: str = progress_task_id) -> None:
+                progress_tick(tid)
+
             background_tasks.add_task(progress_clear, progress_task_id)
 
     # ── 3. Materialise ──

@@ -35,7 +35,9 @@ import {
   createIndicator, updateIndicator, archiveIndicator,
   setIndicatorLocked, describePersistenceError, isLockedError,
 } from '../../api/persistence';
+import { useQueryClient } from '@tanstack/react-query';
 import { useIndicatorsList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
+import { queryKeys } from '../../queryKeys';
 import SaveStatus from '../../components/SaveStatus/SaveStatus';
 import { classifyFetchError } from '../../utils/fetchError';
 import { ABORTED, fetchKindToErrorType } from './errorTaxonomy';
@@ -268,6 +270,7 @@ function IndicatorsPage() {
   // on the selected indicator is NOT clobbered — see the merge below).
   const indicatorsQuery = useIndicatorsList();
   const invalidate = useInvalidatePersistence();
+  const queryClient = useQueryClient();
 
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
@@ -445,7 +448,25 @@ function IndicatorsPage() {
     if (signal && signal.aborted) return;
     setCloudError(null);
     lastHydratedPayloadRef.current = { id: selectedId, payload: payloadStr };
-  }, [selectedId]);
+    // AND patch the indicators LIST cache entry for this doc with the just-saved
+    // payload. On a REMOUNT (navigate away and back) local ``indicators`` state
+    // starts empty and the merge effect above adopts whatever the list query
+    // holds; the dirty-preservation there only shields an in-progress LOCAL edit,
+    // not a completed save + fresh mount. Without this patch the query kept the
+    // PRE-EDIT doc, so a reopen within the 10s stale window silently reverted the
+    // saved change even though the backend held the new version (the Portfolio-
+    // page bug fixed in da3029f). ``body`` is ``{ name, definition }`` — the same
+    // fields ``unpackBackendIndicator`` reads — so the patched entry re-hydrates
+    // to the edit; ``id``/``locked`` are preserved from the prior entry. The list
+    // is flat (no category argument). ``setQueryData`` is a PURE cache update
+    // (no refetch → no flicker).
+    queryClient.setQueryData(
+      queryKeys.persistence.indicators.list(),
+      (prev) => (Array.isArray(prev)
+        ? prev.map((d) => (d.id === selectedId ? { ...d, ...body, id: selectedId } : d))
+        : prev),
+    );
+  }, [selectedId, queryClient]);
 
   const {
     status: cloudStatus,

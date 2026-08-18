@@ -245,6 +245,23 @@ describe('migrateCondition — preserves compatible slots', () => {
     expect(next.window).toBe(1);
   });
 
+  it('gt (with consecutive_days) → cross_above drops the stale consecutive_days', () => {
+    // consecutive_days rides on plain comparators only; a cross op must not
+    // carry it over an op-switch (breaks the byte-identical wire discipline).
+    const current = {
+      op: 'gt',
+      lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+      rhs: { kind: 'constant', value: 0 },
+      consecutive_days: 3,
+    };
+    const next = migrateCondition(current, 'cross_above');
+    expect(next.op).toBe('cross_above');
+    expect('consecutive_days' in next).toBe(false);
+    expect(next.count).toBe(1);
+    expect(next.window).toBe(1);
+    expect(next.lhs).toEqual(current.lhs);
+  });
+
   it('cross_above → gt drops the count/window scalars', () => {
     const current = {
       op: 'cross_above',

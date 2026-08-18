@@ -230,6 +230,56 @@ class SqlInstrumentReader:
                 f"SQL error reading prices for '{instrument_id}' in '{collection}': {exc}"
             ) from exc
 
+    async def read_price_bounds(
+        self,
+        collection: str,
+        instrument_id: str,
+        *,
+        provider: str | None = None,
+    ) -> tuple[int | None, int | None]:
+        """Return one instrument's first/last available ``trade_date`` as
+        YYYYMMDD ints (``(min, max)``), or ``(None, None)`` when it has no bars.
+
+        This is the CHEAP replacement for hydrating the whole OHLCV history just
+        to read its endpoint dates (the portfolio cache-status range path). It
+        runs a MIN/MAX aggregate over the **same** join + ``source_collection`` /
+        ``symbol`` predicate + ``trade_date`` clamp as :meth:`read_prices`, so it
+        scans the identical row set. Because ``read_prices`` applies NO row
+        filtering (every fact row becomes a series point), its
+        ``dates[0]``/``dates[-1]`` are exactly this MIN/MAX — the bounds are
+        byte-identical to the full-series endpoints, keeping the resolved date
+        range (and thus the cache key) unchanged.
+
+        ``provider`` is accepted for parity with :meth:`read_prices`; dwh stores
+        one curated series per instrument, so it does not branch the query.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT MIN(f.trade_date) AS min_date,
+                                   MAX(f.trade_date) AS max_date
+                            FROM {SCHEMA}.fact_price_eod f
+                            JOIN {SCHEMA}.dim_instrument d
+                              ON d.instrument_id = f.instrument_id
+                            WHERE d.source_collection = %s
+                              AND d.symbol = %s
+                              AND f.trade_date BETWEEN %s AND %s""",
+                        (collection, instrument_id, _MIN_DATE, _MAX_DATE),
+                    )
+                    row = await cur.fetchone()
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DataAccessError(
+                f"SQL error reading price bounds for '{instrument_id}' "
+                f"in '{collection}': {exc}"
+            ) from exc
+
+        if not row or row["min_date"] is None or row["max_date"] is None:
+            return (None, None)
+        return (date_to_int(row["min_date"]), date_to_int(row["max_date"]))
+
     async def fetch_futures_contracts(
         self,
         collection: str,

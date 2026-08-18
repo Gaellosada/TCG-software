@@ -9,10 +9,10 @@
 // library-wide invariants (count, unique ids, kebab-case), and that the
 // derived spec from parseIndicatorSpec matches what the UI will show.
 //
-// Library shape (post Wave 2c additions): 11 entries — sma, ema, rsi,
+// Library shape (post strategy-repro F6 additions): 13 entries — sma, ema, rsi,
 // macd-{line,signal,histogram}, historical-vol, swing-pivots,
-// percentile-filtered-return, atm-contract-iv, term-structure-slope.
-// See ``docs/indicators.md``.
+// percentile-filtered-return, atm-contract-iv, term-structure-slope,
+// dstat, dstat-percentile. See ``docs/indicators.md``.
 
 import { describe, it, expect } from 'vitest';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
@@ -44,6 +44,9 @@ const EXPECTATIONS = {
   // for index or equity streams.
   'atm-contract-iv':            { params: [{ name: 'smoothing_window', type: 'int', default: 1 }],                                                                                                         seriesLabels: ['atm_iv'], ownPanel: true , compatibleAssetTypes: ['option'] },
   'term-structure-slope':       { params: [],                                                                                                                                                              seriesLabels: ['front_atm_iv', 'back_atm_iv'], ownPanel: true , compatibleAssetTypes: ['option'] },
+  // Strategy-repro (F6): DStat raw + rolling nearest-rank percentile line.
+  dstat:                        { params: [{ name: 'ma_window', type: 'int', default: 21 }, { name: 'vol_window', type: 'int', default: 63 }],                                                              seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
+  'dstat-percentile':           { params: [{ name: 'ma_window', type: 'int', default: 21 }, { name: 'vol_window', type: 'int', default: 63 }, { name: 'pct_window', type: 'int', default: 1260 }, { name: 'percentile', type: 'float', default: 95.0 }], seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
 };
 
 const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
@@ -54,8 +57,8 @@ const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
 const CATEGORIES = ['trend', 'momentum', 'volatility', 'pattern', 'statistical'];
 
 describe('DEFAULT_INDICATORS — library invariants', () => {
-  it('contains exactly 11 entries', () => {
-    expect(DEFAULT_INDICATORS).toHaveLength(11);
+  it('contains exactly 13 entries', () => {
+    expect(DEFAULT_INDICATORS).toHaveLength(13);
   });
 
   it('has unique ids', () => {

@@ -211,6 +211,56 @@ class TestTwoPortfolioLegs:
         assert not np.allclose(r_a, r_b)
 
 
+# ── B1 (P-F1-1): a composed child's own normalize_weights is threaded ──
+
+
+class TestComposedChildNormalizeWeights:
+    """VERIFY the P-F1-1 flag: a composed leg's child ``normalize_weights`` must
+    be honoured, not silently defaulted to normalized. ``_child_request`` copies
+    the whole child body (flag included) and re-runs it through the SAME
+    ``compute_portfolio`` engine, so a leveraged (Σ|w|>1, normalize=False) child
+    stays leveraged. If it were dropped, the two curves below would coincide."""
+
+    async def test_child_normalize_weights_false_is_leveraged(
+        self, client: AsyncClient
+    ):
+        # A single-instrument child at 200% notional. With normalize_weights=True
+        # the 200% collapses to 1.0 (1x); with False it is a raw 2.0x multiple.
+        def _child(normalize: bool) -> dict:
+            b = _pure_body(["up"], [200.0], rebalance="none")
+            b.update(start="2024-01-01", end="2024-12-31", normalize_weights=normalize)
+            return b
+
+        def _composed(child: dict) -> dict:
+            return {
+                "legs": {
+                    "block": {
+                        "type": "portfolio",
+                        "portfolio_id": "child",
+                        "portfolio": child,
+                    }
+                },
+                "weights": {"block": 100.0},
+                "rebalance": "none",
+                "return_type": "normal",
+                "start": "2024-01-01",
+                "end": "2024-12-31",
+            }
+
+        parent_norm = np.array(await _equity(client, _composed(_child(True))))
+        parent_lev = np.array(await _equity(client, _composed(_child(False))))
+
+        r_norm = parent_norm[-1] / parent_norm[0] - 1.0
+        r_lev = parent_lev[-1] / parent_lev[0] - 1.0
+
+        # The two curves must DIFFER (flag threaded, not dropped) …
+        assert not np.isclose(r_norm, r_lev)
+        # … and the leveraged child carries ~2x the normalized child's P&L,
+        # proving the child's OWN normalize_weights=False drives the leverage.
+        assert r_lev == pytest.approx(2.0 * r_norm, rel=1e-3)
+        assert r_norm > 0.0  # "up" trends up over the window (sanity)
+
+
 # ── Mixed parent: instrument leg + portfolio leg (composed ⊇ pure) ─────
 
 

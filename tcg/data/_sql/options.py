@@ -1440,6 +1440,88 @@ class SqlOptionsDataReader:
                 f"SQL error listing per-date expirations on '{root}': {exc}"
             ) from exc
 
+    async def cycle_trade_date_span(
+        self,
+        root: str,
+        start: date | None = None,
+        end: date | None = None,
+        cycle: str | Sequence[str] | None = None,
+    ) -> tuple[date | None, date | None]:
+        """EXACT ``(first, last)`` listed ``trade_date`` for ONE ``cycle``.
+
+        The bounded ``min/max`` counterpart of :meth:`list_expirations_by_date`
+        (SAME instrument routing: ``source_collection`` / ``asset_class`` /
+        ``expiration IS NOT NULL`` / cycle), but a two-value aggregate instead
+        of the full per-date DISTINCT map. ``min``/``max`` is identical to
+        ``min(keys)``/``max(keys)`` of that map for the same arguments; returns
+        ``(None, None)`` when the cycle lists no bar.
+
+        The naive shape — ``min/max(trade_date)`` over a hash join of ALL cycle
+        ``instrument_id``s — seq-scanned every ``fact_price_eod`` partition
+        (~108M option bars for W3) because the ``trade_date`` window spans the
+        whole collection and prunes nothing. Instead this computes the extreme
+        **per contract** (each a single-``instrument_id`` PK-index min/max —
+        a leaf scan) and aggregates the extremes with a ``LATERAL``. The result
+        is byte-IDENTICAL to the hash join (``min`` of per-contract ``min`` =
+        global ``min``) but reads only index leaves, and it is inherently robust
+        to phantom dim contracts (a listed-but-never-traded contract yields
+        ``NULL``, which the outer aggregate drops) — the reason a single
+        earliest-expiration "representative" heuristic is NOT safe here.
+
+        ``start``/``end`` are OPTIONAL. When given they bound the per-contract
+        aggregate (``expiration >= start`` on the dim + ``trade_date BETWEEN``);
+        when omitted the true unbounded cycle extent is returned. The two are
+        byte-identical whenever the window covers the data (the collection-wide
+        case), which is why the coverage handler no longer needs to pre-fetch a
+        window.
+        """
+        try:
+            dim_where = [
+                "source_collection = %s",
+                "asset_class = 'option'",
+                "expiration IS NOT NULL",
+            ]
+            params: list[Any] = [root]
+            if start is not None:
+                dim_where.append("expiration >= %s")
+                params.append(start)
+            _cycle_frag, _cycle_val = _cycle_predicate(cycle)
+            if _cycle_frag is not None:
+                dim_where.append(_cycle_frag)
+                params.append(_cycle_val)
+            td_where = ["f.instrument_id = i.instrument_id"]
+            if start is not None:
+                td_where.append("f.trade_date >= %s")
+                params.append(start)
+            if end is not None:
+                td_where.append("f.trade_date <= %s")
+                params.append(end)
+            sql = f"""
+                WITH ids AS (
+                    SELECT instrument_id
+                    FROM {SCHEMA}.dim_instrument
+                    WHERE {" AND ".join(dim_where)}
+                )
+                SELECT min(m.lo) AS lo, max(m.hi) AS hi
+                FROM ids i
+                CROSS JOIN LATERAL (
+                    SELECT min(f.trade_date) AS lo, max(f.trade_date) AS hi
+                    FROM {SCHEMA}.fact_price_eod f
+                    WHERE {" AND ".join(td_where)}
+                ) m
+            """
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    row = await cur.fetchone()
+            if row is None:
+                return None, None
+            return row["lo"], row["hi"]
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error reading cycle trade-date span on '{root}': {exc}"
+            ) from exc
+
     # ------------------------------------------------------------------
     # Internal: DTO builders
     # ------------------------------------------------------------------
