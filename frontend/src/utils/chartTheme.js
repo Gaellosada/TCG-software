@@ -28,6 +28,10 @@ const DARK_PALETTE = {
   modebarActiveColor: '#e4e8f0',
   markerSell: 'rgba(59, 130, 246, 0.5)',
   markerBuy: 'rgba(59, 130, 246, 0.5)',
+  // Mirrors index.css --success / --error (theme-invariant there today, but
+  // sourced here so a future per-theme divergence only needs one edit).
+  success: '#22c55e',
+  error: '#ef4444',
 };
 
 const LIGHT_PALETTE = {
@@ -49,6 +53,8 @@ const LIGHT_PALETTE = {
   modebarActiveColor: '#1f2937',
   markerSell: 'rgba(37, 99, 235, 0.5)',
   markerBuy: 'rgba(37, 99, 235, 0.5)',
+  success: '#22c55e',
+  error: '#ef4444',
 };
 
 const AXIS_KEYS = ['xaxis', 'xaxis2', 'xaxis3', 'yaxis', 'yaxis2', 'yaxis3'];

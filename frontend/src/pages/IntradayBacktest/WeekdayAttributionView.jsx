@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
 import Card from '../../components/Card';
 import Chart from '../../components/Chart';
+import useTheme from '../../hooks/useTheme';
+import { getChartColors } from '../../utils/chartTheme';
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/format';
 import { groupPnlByWeekday } from './weekdayAttribution';
 import styles from './IntradayBacktestPage.module.css';
@@ -38,18 +40,26 @@ function fmtPct(v) {
 
 export default function WeekdayAttributionView({ days }) {
   const buckets = useMemo(() => groupPnlByWeekday(days), [days]);
+  const theme = useTheme();
+
+  // Same positive/negative bar-color convention the app's Plotly charts use
+  // elsewhere (chartTheme's per-theme palette), not one-off hex literals.
+  // Plotly can't read CSS custom properties directly (see useTheme's
+  // docstring), so the palette is resolved here in JS and kept in sync with
+  // index.css's --success/--error tokens.
+  const { success, error } = useMemo(() => getChartColors(theme), [theme]);
 
   const barTraces = useMemo(() => [{
     x: buckets.map((b) => b.weekday),
     y: buckets.map((b) => b.sumUsd),
     type: 'bar',
     name: 'Total P&L (USD)',
-    marker: { color: buckets.map((b) => (b.sumUsd >= 0 ? '#10b981' : '#ef4444')) },
+    marker: { color: buckets.map((b) => (b.sumUsd >= 0 ? success : error)) },
     text: buckets.map((b) => `N=${b.n}`),
     textposition: 'outside',
     customdata: buckets.map((b) => b.n),
     hovertemplate: '<b>%{x}</b><br>Total P&L: %{y:$,.0f}<br>N=%{customdata}<extra></extra>',
-  }], [buckets]);
+  }], [buckets, success, error]);
 
   return (
     <Card

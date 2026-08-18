@@ -1385,3 +1385,70 @@ def test_f11_and_f12_compose():
     # [10:05, 10:10) band survives.
     assert res.hedge_trades
     assert all(w_open <= h.ts < w_close for h in res.hedge_trades)
+
+
+def test_f11_and_f12_compose_distinct_windows_early_extremum():
+    """F1.1 (12-min window) and F1.2 (6-min window -- DISTINCT from F1.1's, unlike
+    the AND-only compose test above where both reference the same rising series)
+    compose correctly when the running high is set EARLY (minute 2 of a 21-bar
+    session) and never approached/exceeded again until the very end.
+
+    This guards against a regression where the late-window suppression
+    accidentally keys off a "recent"/rolling extremum instead of the true
+    whole-session running high computed by ``_running_extremum`` -- the prior
+    compose test can't catch that because its strictly-rising price makes the
+    running high identical to "the current bar", so a buggy rolling-lookback
+    high would coincidentally still work there.
+    """
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    # 21 bars, 10:00..10:20 (off_ts = 10:20, per _short_day's convention).
+    prices = (
+        [5010.0, 5050.0, 5300.0]  # 10:00-10:02: early spike sets the HIGH
+        + [5000.0] * 10            # 10:03-10:12: flat, well below the high
+        + [5297.0]                 # 10:13: BUY toward the high -- near it, but
+                                    #   still OUTSIDE F1.2's 6-min window
+        + [5299.0] * 6              # 10:14-10:19: inside F1.2's window, still
+                                    #   near the same (early, unexceeded) high
+        + [5299.0]                 # 10:20: endpoint, never rehedges
+    )
+    assert len(prices) == 21
+    f11_open = resolve_et_to_utc(day, "10:08")   # off(10:20) - 12min (F1.1)
+    f12_open = resolve_et_to_utc(day, "10:14")   # off(10:20) - 6min (F1.2)
+    near_high_ts = resolve_et_to_utc(day, "10:13")
+
+    # Sanity: the running high is genuinely EARLY and constant across the whole
+    # late window -- not a value freshly set by "the current bar" (contrast the
+    # monotone-rising fixture used elsewhere in this file).
+    es_bars = _bars(entry, prices)
+    for late_ts in (near_high_ts, f12_open, resolve_et_to_utc(day, "10:19")):
+        assert _running_extremum(es_bars, late_ts) == (5300.0, 5000.0)
+
+    timing = HedgeTimingSpec(
+        only_within_minutes_before_close=12.0,
+        skip_near_extremum=SkipNearExtremumSpec(
+            enabled=True, window_minutes=6.0, tolerance=5.0))
+    res = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None, timing=timing)))
+
+    assert res.hedge_trades
+    # F1.1 alone gates everything before 10:08 (its window is wider than F1.2's).
+    assert all(h.ts >= f11_open for h in res.hedge_trades)
+    # The near-high BUY at 10:13 fires: ES is within F1.2's tolerance of the
+    # (early) running high, but 10:13 is OUTSIDE F1.2's 6-min window -- F1.2 is
+    # inert there. Proves the two gates' boundaries are independently applied,
+    # not "whichever gate is tighter always wins".
+    assert any(h.ts == near_high_ts for h in res.hedge_trades)
+    # Once inside F1.2's own window (>= 10:14), the same near-high BUY is
+    # suppressed on every remaining bar -- keyed off the EARLY extremum, not a
+    # freshly-made one -- so the late window ends up empty even though F1.1's
+    # (wider) window alone would still be open all the way through 10:20.
+    assert all(h.ts < f12_open for h in res.hedge_trades)
+
+    # Control: F1.1-only (identical window, F1.2 absent) DOES trade at/after
+    # 10:14 -- confirming the emptiness above is caused by F1.2's extremum
+    # check, not by a coincidental lack of price movement in the fixture.
+    f11_only = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None,
+        timing=HedgeTimingSpec(only_within_minutes_before_close=12.0))))
+    assert any(h.ts >= f12_open for h in f11_only.hedge_trades)

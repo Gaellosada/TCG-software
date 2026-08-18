@@ -72,7 +72,14 @@ export const HEDGE_SKIP_EXTREMUM_HELP = 'In the final window before the close, d
   + 'add a hedge that would BUY the ES future while it sits within the tolerance of '
   + 'the running session HIGH, nor SELL while within the tolerance of the running '
   + 'session LOW — i.e. avoid chasing a buy-the-high / sell-the-low fill into the '
-  + 'close. The running high/low use only bars up to now (no look-ahead).';
+  + 'close. The running high/low use only bars up to now (no look-ahead). If the '
+  + "current bar is missing the quote data this gate needs, it fails OPEN — the "
+  + 'hedge is NOT suppressed and executes normally.';
+
+// Caption for the Timing block (F1.1 + F1.2): both gates key "close" off the
+// trade's own exit time, not the literal 16:00 ET market close.
+export const HEDGE_TIMING_CLOSE_CAPTION = '"Close" here means this trade\'s exit '
+  + 'time (the hedge-window end), not necessarily 16:00 ET market close.';
 
 // Neutral hedge-timing block (both gates OFF): F1.1 blank (off) + F1.2 disabled.
 // Matches the engine/schema defaults so a default hedge behaves exactly as before.
@@ -431,6 +438,9 @@ export default function HedgeModule({ value, onChange }) {
         <div className={styles.conditionsHeader}>
           <span className={styles.conditionsTitle}>Timing</span>
         </div>
+        <span className={styles.sectionCaption} data-testid="hedge-timing-close-caption">
+          {HEDGE_TIMING_CLOSE_CAPTION}
+        </span>
         <div className={styles.moduleFields}>
           {/* F1.1 — only hedge in the final N minutes before close. */}
           <label className={styles.field}>

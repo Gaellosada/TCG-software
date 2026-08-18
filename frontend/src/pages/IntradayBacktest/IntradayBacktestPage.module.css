@@ -254,6 +254,15 @@
   color: var(--text-secondary);
 }
 
+/* Small muted caption under a section header — e.g. clarifying a term used by
+   the controls below it (see the Timing block's "close" caption). */
+.sectionCaption {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin: 0.15rem 0 0.5rem;
+}
+
 .addCondition {
   padding: 0.3rem 0.5rem;
   border: 1px solid var(--border-primary);
