@@ -1,0 +1,679 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  gap: 1rem;
+  padding: 24px 32px 48px;
+}
+
+/*
+ * The page is a flex column scroll container. Its direct children default to
+ * flex-shrink:1, so once the stacked content exceeds the viewport they SHRINK
+ * to fit instead of letting the container scroll — collapsing auto-height cards
+ * (the Aggregate tiles vanish) and clipping fixed-height ones (the equity
+ * chart). Pinning every child to flex-shrink:0 makes them keep their natural
+ * height so the container scrolls, which is the intended behaviour.
+ */
+.page > * {
+  flex-shrink: 0;
+}
+
+/* Explicit marker on result cards for the Part-A regression guard. */
+.resultCard {
+  flex-shrink: 0;
+}
+
+.pageHeader h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.pageHeader p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.cardBody {
+  padding: 16px;
+}
+
+.controlsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.9rem 1.2rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.field > span,
+.field > .fieldLabel {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.field input,
+.field select {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.field input:focus,
+.field select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.field input:disabled,
+.field select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Label row: field caption + inline ⓘ help affordance on one line. */
+.labelRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* ⓘ help glyph — matches the app tooltip pattern (OptionStreamForm .help). */
+.help {
+  display: inline-block;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  cursor: help;
+  text-transform: none;
+}
+
+.inlineRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ---------------------------------------------------------------------------
+ * Entry / Exit rule modules (v2) + Conditions builder.
+ * ------------------------------------------------------------------------- */
+.modulesRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.moduleColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.moduleHeading {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-primary);
+}
+
+.module {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+}
+
+.moduleFields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.6rem 0.8rem;
+}
+
+.conditionsBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border-top: 1px solid var(--border-primary);
+  padding-top: 0.6rem;
+}
+
+.conditionsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.conditionsTitle {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.addCondition {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.addCondition:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.conditionsEmpty {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.conditionsList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.conditionRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.conditionLabel {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  align-self: center;
+  min-width: 6rem;
+}
+
+.conditionParams {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.paramField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.paramField > span {
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+}
+
+.paramField input,
+.paramField select {
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.8rem;
+  max-width: 6.5rem;
+}
+
+.paramField input:focus,
+.paramField select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Per-custom-day header row + collapsible entry/exit override area. */
+.customDayHead {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.customDayOverride {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.8rem;
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Custom days — unified per-date rows (exclude or override entry/exit times).
+ * ------------------------------------------------------------------------- */
+.customDaysList {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.customDayRow {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  font-size: 0.8rem;
+}
+
+.customDayDate {
+  font-weight: 700;
+  color: var(--text-primary);
+  min-width: 5.5rem;
+}
+
+.customDayExclude {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.customDayExclude input {
+  accent-color: var(--accent);
+}
+
+.customDayTime {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.customDayTime:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.customDayDash,
+.customDayEt {
+  color: var(--text-muted);
+}
+
+.checkboxRow {
+  flex-direction: row;
+  align-items: center;
+}
+
+.checkboxRow input {
+  width: auto;
+  accent-color: var(--accent);
+}
+
+.chipRemove {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.chipRemove:hover {
+  color: var(--error);
+}
+
+.runRow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.runBtn {
+  padding: 6px 20px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.runBtn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.runBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.smallBtn {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.smallBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.error {
+  color: var(--error);
+  font-size: 0.9rem;
+}
+
+.progressBox {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+  max-width: 420px;
+}
+
+.progressText {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.progressTrack {
+  height: 8px;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
+.warnings {
+  margin: 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent-warm) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-warm) 40%, transparent);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+.warnings ul {
+  margin: 0.3rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.75rem;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.statLabel {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+}
+
+.statValue {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.positive { color: var(--success); }
+.negative { color: var(--error); }
+
+/* ---------------------------------------------------------------------------
+ * Month calendar grid (replaces the flat days table).
+ * Months stack/wrap on a responsive auto-fill grid; each month is a compact
+ * Mon–Fri (trading-week) calendar so days sit under the right weekday.
+ * ------------------------------------------------------------------------- */
+.calendar {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.6rem;
+}
+
+.monthBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.monthHeader {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+.weekdayRow {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 3px;
+}
+
+.weekday {
+  text-align: center;
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  padding-bottom: 1px;
+}
+
+.monthGrid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 3px;
+}
+
+/* Empty alignment placeholder (leading blanks / weekend columns don't exist).
+ * aspect-ratio is wide (not 1:1) so the row is roughly half as tall as the
+ * cell width — this is what compacts the whole calendar vertically. */
+.emptyCell {
+  aspect-ratio: 2.2 / 1;
+  border-radius: var(--radius-sm);
+}
+
+/* A weekday with no data in range (e.g. a market holiday) — a faint gap. */
+.gapCell {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  aspect-ratio: 2.2 / 1;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed color-mix(in srgb, var(--border-primary) 70%, transparent);
+  color: var(--text-muted);
+  font-size: 0.62rem;
+}
+
+.dayCell {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  aspect-ratio: 2.2 / 1;
+  min-width: 0;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  cursor: default;
+  overflow: hidden;
+}
+
+/* Top row of a day cell: optional early-exit marker (left) + day-of-month
+ * (right). Keeps the day number top-right as before while giving the trigger
+ * badge a home. */
+.domRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px;
+  width: 100%;
+}
+
+.dom {
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-left: auto;
+  line-height: 1;
+}
+
+/* Early-exit trigger marker (v3) — a small bolt on days that closed on a
+ * trigger. Coloured with the cool accent so it reads against any outcome tint. */
+.triggerBadge {
+  font-size: 0.6rem;
+  line-height: 1;
+  color: var(--accent);
+}
+
+/* A traded day that exited on a trigger — subtle accent outline so triggered
+ * days stand out at a glance without overriding the profit/loss fill. */
+.cellTriggered {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.cellPnl {
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cellTag {
+  font-size: 0.52rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  line-height: 1;
+}
+
+/* Profit — success tokens. */
+.cellProfit {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border-primary));
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+.cellProfit .cellPnl { color: var(--success); }
+
+/* Loss — error tokens. */
+.cellLoss {
+  border-color: color-mix(in srgb, var(--error) 40%, var(--border-primary));
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+}
+.cellLoss .cellPnl { color: var(--error); }
+
+/* Flat (traded, ~zero P&L) — neutral. */
+.cellFlat .cellPnl { color: var(--text-secondary); }
+
+/* Skipped — clearly distinct: muted warm, dashed, no P&L emphasis. */
+.cellSkipped {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent-warm) 45%, var(--border-primary));
+  background: color-mix(in srgb, var(--accent-warm) 10%, transparent);
+  color: var(--text-muted);
+}
+.cellSkipped .cellTag { color: var(--accent-warm); }
+.cellSkipped .dom { color: var(--text-secondary); }
+
+/* Excluded (user opted out) — a neutral, greyed "no trade" cell. Deliberately
+ * distinct from the warm dashed data-gap "skipped" cell: solid muted fill, no
+ * warm accent, so a reader can tell a chosen exclusion from a missing quote. */
+.cellExcluded {
+  border-style: solid;
+  border-color: var(--border-primary);
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+.cellExcluded .cellTag { color: var(--text-muted); }
+.cellExcluded .dom { color: var(--text-secondary); }
+
+/* Entry conditions unmet (v2) — a distinct skip: cool dashed tone, separate
+ * from the warm data-gap "skipped" and the neutral "excluded" cell. */
+.cellUnmet {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text-muted);
+}
+.cellUnmet .cellTag { color: var(--accent); }
+.cellUnmet .dom { color: var(--text-secondary); }
+
+.chartBox {
+  height: 340px;
+  width: 100%;
+}

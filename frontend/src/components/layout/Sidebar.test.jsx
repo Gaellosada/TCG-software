@@ -49,7 +49,7 @@ describe('navConfig', () => {
     expect(app.anchor).toBe('bottom');
   });
 
-  it('Manual section preserves order Database v1, Database v2, Indicators, Signals, Portfolio, Composed', () => {
+  it('Manual section preserves order Database v1, Database v2, Indicators, Signals, Portfolio, Composed, Intraday Backtest', () => {
     const manual = NAV_SECTIONS.find((s) => s.id === 'manual');
     expect(manual.items.map((i) => i.path)).toEqual([
       '/data',
@@ -58,6 +58,7 @@ describe('navConfig', () => {
       '/signals',
       '/portfolio',
       '/composed-portfolios',
+      '/intraday-backtest',
     ]);
   });
 });

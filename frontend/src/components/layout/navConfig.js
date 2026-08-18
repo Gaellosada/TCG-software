@@ -17,6 +17,7 @@ export const NAV_SECTIONS = [
       { path: '/signals',    label: 'Signals',    icon: 'signals' },
       { path: '/portfolio',  label: 'Portfolio',  icon: 'portfolio' },
       { path: '/composed-portfolios', label: 'Composed', icon: 'layers' },
+      { path: '/intraday-backtest', label: 'Intraday Backtest', icon: 'calendar' },
     ],
   },
   {

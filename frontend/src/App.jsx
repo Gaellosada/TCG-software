@@ -10,6 +10,7 @@ import DataV2Page from './pages/DataV2/DataV2Page';
 import IndicatorsPage from './pages/Indicators/IndicatorsPage';
 import SignalsPage from './pages/Signals/SignalsPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
+import IntradayBacktestPage from './pages/IntradayBacktest/IntradayBacktestPage';
 import SettingsPage from './pages/Settings/SettingsPage';
 import RunningSignalsPage from './pages/RunningSignals/RunningSignalsPage';
 import MongoDBAgentPage from './pages/MongoDBAgent/MongoDBAgentPage';
@@ -116,6 +117,16 @@ function App() {
                 <PageContainer>
                   <ErrorBoundary>
                     <PortfolioPage key="composed" mode="composed" />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/intraday-backtest"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <IntradayBacktestPage />
                   </ErrorBoundary>
                 </PageContainer>
               }

@@ -16,6 +16,7 @@ from tcg.core.api.data import router as data_router
 from tcg.core.api.data_v2 import router as data_v2_router
 from tcg.core.api.errors import tcg_error_handler
 from tcg.core.api.indicators import router as indicators_router
+from tcg.core.api.intraday_backtest import router as intraday_backtest_router
 from tcg.core.api.options import router as options_router
 from tcg.core.api.persistence import router as persistence_router
 from tcg.core.api.portfolio import router as portfolio_router
@@ -65,6 +66,10 @@ async def lifespan(app: FastAPI):
         # --- dwh (PostgreSQL, read-only) for ALL market-data reads ---
         dwh_pool = DwhConnectionPool(**load_dwh_config())
         await dwh_pool.connect()
+        # Raw read-only pool exposed for the intraday-backtest router, which
+        # reads full-timestamptz 1m facts via its own IntradayV2Reader (the
+        # shared v2 reader truncates ts to a date — unusable intraday).
+        app.state.dwh_pool = dwh_pool
         services = await create_services(dwh_pool)
         app.state.market_data = services["market_data"]
         # Explorer-only, object-id-keyed v2 service (the "Database v2" page).
@@ -331,6 +336,7 @@ def create_app() -> FastAPI:
     app.include_router(indicators_router)
     app.include_router(signals_router)
     app.include_router(options_router)
+    app.include_router(intraday_backtest_router)
     app.include_router(persistence_router)
     app.include_router(statistics_router)
     return app
