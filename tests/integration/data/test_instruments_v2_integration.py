@@ -24,10 +24,13 @@ Verifies:
   * options continuous on OPT_SP_500_EW3 selects by strike and by moneyness,
     and rejects delta with a clean ValidationError.
 
-ORDERING MATTERS. ``test_options_continuous_strike_live`` and
-``test_options_continuous_moneyness_live`` sit at the 60 s ``statement_timeout``
-boundary and a timeout there drops the SSM tunnel, so every test declared AFTER
-them skips with a connection error. Keep them last.
+Declaration order is NOT load-bearing. The ``svc`` fixture is function-scoped, so
+each test constructs, connects and closes its OWN ``DwhConnectionPool`` — a
+``statement_timeout`` (or any failure) in one test cannot poison a later test's
+fresh, independently-connected pool, and there is no shared tunnel to drop (the
+run target reaches Aurora directly; the old SSM tunnel / Mongo path is gone). The
+two options-continuous tests are merely the slowest, so they are kept last to
+fail fast on cost, not because anything after them would otherwise break.
 """
 
 from __future__ import annotations
