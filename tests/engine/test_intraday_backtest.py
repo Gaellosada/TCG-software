@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from tcg.engine.intraday_backtest import (
+    _leg_delta,
     aggregate_days,
     last_known_at_or_before,
     leg_bar_qualifies,
@@ -32,6 +33,7 @@ from tcg.engine.options.pricing import BS76Kernel
 from tcg.types.intraday import (
     ES_FUTURE_TICK_SIZE,
     ES_OPTION_TICK_SIZE,
+    es_option_tick,
     HedgeSpec,
     HedgeTargetSpec,
     HedgeTriggers,
@@ -500,6 +502,73 @@ def test_no_hedge_when_both_on_window_empty():
 def test_net_delta_atm_near_zero():
     nd = net_straddle_delta(BS76Kernel(), 5000.0, 5000.0, 1.0 / 365.0, 30.0, 30.0, side_sign=1)
     assert abs(nd) < 0.2
+
+
+# --------------------------------------------------------------------------- #
+# Real-kernel delta path (98arch-02): pin _leg_delta to known ATM values with
+# the REAL BS76Kernel so a call/put leg-flag swap fails (call ~ +0.5, put ~ -0.5).
+# --------------------------------------------------------------------------- #
+def test_leg_delta_real_kernel_atm_call_plus_put_minus_half():
+    k = BS76Kernel()
+    F = K = 5000.0
+    T = 1.0 / 365.0
+    sigma = 0.20
+    cm = k.price_call(F, K, T, 0.0, sigma)  # a genuine invertible ATM mark
+    pm = k.price_put(F, K, T, 0.0, sigma)
+    dc = _leg_delta(k, F, K, T, cm, "c", 0.0)
+    dp = _leg_delta(k, F, K, T, pm, "p", 0.0)
+    # Round-trips to the kernel's own delta at the recovered vol.
+    assert dc == pytest.approx(k.delta(F, K, T, 0.0, sigma, "c"), abs=1e-6)
+    assert dp == pytest.approx(k.delta(F, K, T, 0.0, sigma, "p"), abs=1e-6)
+    # ATM: call ~ +0.5, put ~ -0.5 — a leg swap would flip these signs.
+    assert 0.45 < dc < 0.55
+    assert -0.55 < dp < -0.45
+    assert dc > 0.0 > dp
+
+
+class _RaisingIVKernel(BS76Kernel):
+    """Real BS76 delta, but implied_vol always raises — forces the fallback."""
+
+    def implied_vol(self, *args, **kwargs):  # noqa: D401 - test stub
+        raise ValueError("forced inversion failure")
+
+
+def test_leg_delta_fallback_is_smooth_not_step_on_inversion_failure():
+    # eng-02: an IV-inversion failure near ATM must yield a SMOOTH Black-76 delta
+    # (~+/-0.5), never the old discontinuous 0<->|1| step across the strike.
+    k = _RaisingIVKernel()
+    F, K, T = 5000.2, 5000.0, 1.0 / 365.0  # a hair ITM for the call (near ATM)
+    dc = _leg_delta(k, F, K, T, mark=0.0, flag="c", rate=0.0, fallback_iv=0.20)
+    dp = _leg_delta(k, F, K, T, mark=0.0, flag="p", rate=0.0, fallback_iv=0.20)
+    # Old step returned call=+1.0, put=0.0 here; the fix returns ~+/-0.5.
+    assert 0.4 < dc < 0.6
+    assert -0.6 < dp < -0.4
+    # Even with NO carried IV the last-resort _FALLBACK_IV keeps it smooth.
+    dc_none = _leg_delta(k, F, K, T, mark=0.0, flag="c", rate=0.0, fallback_iv=None)
+    assert 0.4 < dc_none < 0.6
+    # Net straddle delta near ATM stays ~0 (not the ~+1 the step produced).
+    nd = net_straddle_delta(k, F, K, T, 0.0, 0.0, side_sign=1, fallback_iv=0.20)
+    assert abs(nd) < 0.2
+
+
+# --------------------------------------------------------------------------- #
+# Tier-aware ES-option tick at the max_spread floor (98iv-01): 0.05 for premium
+# <= 5.00, 0.25 above — so a typical (>5.00) ATM leg quoted one true tick wide
+# (0.25) is not spuriously rejected, while a cheap (<=5.00) leg still is.
+# --------------------------------------------------------------------------- #
+def test_max_spread_tick_tier_high_vs_low_premium():
+    ts = datetime(2025, 3, 3, 15, 0, tzinfo=UTC)
+    cond = [MaxSpreadCond(pct=0.5, min_ticks=1.0)]
+    # >5.00 leg, one true CME tick wide (0.25): floor=max(0.5%*15=0.075, 0.25)=0.25
+    # >= spread 0.25 -> PASS (old single-tier 0.05 gave floor 0.075 -> reject).
+    high = _q(ts, 15.0, bid=15.0, ask=15.25, bs=50, as_=50)  # spread 0.25
+    assert leg_bar_qualifies(high, cond, ES_OPTION_TICK_SIZE) is True
+    # <=5.00 leg genuinely ticks at 0.05: a 0.25 spread is 5 ticks -> FAIL.
+    cheap = _q(ts, 3.0, bid=2.875, ask=3.125, bs=50, as_=50)  # spread 0.25
+    assert leg_bar_qualifies(cheap, cond, ES_OPTION_TICK_SIZE) is False
+    # Tier boundary is inclusive at 5.00.
+    assert es_option_tick(5.00) == 0.05
+    assert es_option_tick(5.01) == 0.25
 
 
 # --------------------------------------------------------------------------- #

@@ -38,6 +38,7 @@ from tcg.types.intraday import (
     ES_MULTIPLIER,
     ES_OPTION_TICK_SIZE,
     ES_FUTURE_TICK_SIZE,
+    es_option_tick,
     ExitTrigger,
     HedgeSpec,
     HedgeTrade,
@@ -67,6 +68,12 @@ _YEAR_SECONDS = 365.0 * 24.0 * 3600.0
 _MIN_T_YEARS = 60.0 / _YEAR_SECONDS
 # ES options settle on the underlying-future close; model expiry at 16:00 ET.
 _EXPIRY_TIME_ET = time(16, 0)
+# Last-resort IV used to compute a Black-76 delta when a leg's own mark fails to
+# invert AND no carried entry ATM IV is available (a doubly-degenerate thin/
+# one-sided quote). A modest equity-index vol so the fallback delta is a SMOOTH
+# Black-76 number (~+/-0.5 ATM), never the old discontinuous 0<->|1| step that
+# over-hedged a near-ATM leg. Only reached when there is no market IV at all.
+_FALLBACK_IV = 0.20
 
 
 # --------------------------------------------------------------------------- #
@@ -188,7 +195,11 @@ def leg_bar_qualifies(
             if bar.bid is None or bar.ask is None:
                 return False
             spread = bar.ask - bar.bid
-            floor = max(c.pct / 100.0 * bar.price, c.min_ticks * tick_size)
+            # Tier-aware CME ES-option tick: 0.05 for premium <= 5.00, else 0.25.
+            # ``tick_size`` is the sourced low-tier increment; a >5.00 ATM leg
+            # quoted one true tick wide (0.25) must not be spuriously rejected.
+            tick = es_option_tick(bar.price, tick_size)
+            floor = max(c.pct / 100.0 * bar.price, c.min_ticks * tick)
             if spread > floor:
                 return False
         elif isinstance(c, MinQuoteSizeCond):
@@ -303,12 +314,16 @@ def _leg_delta(
     mark: float,
     flag: str,
     rate: float,
+    fallback_iv: float | None = None,
 ) -> float:
     """Black-76 delta for one leg: invert IV from the mark, then delta.
 
     On an IV-inversion failure (mark below intrinsic / above max, a stale or
-    one-sided quote) fall back to a moneyness delta so the hedge still has a
-    number rather than dropping the leg silently.
+    one-sided quote) still compute a proper Black-76 delta from a fallback vol
+    rather than a discontinuous moneyness step: prefer ``fallback_iv`` (the
+    carried entry ATM IV) if finite/positive, else a modest ``_FALLBACK_IV``.
+    This keeps a near-ATM leg's delta smooth (~+/-0.5) instead of snapping to
+    0 or +/-1 in exactly the sparse-quote regime this engine targets.
     """
     try:
         sigma = kernel.implied_vol(mark, forward, strike, t_years, rate, flag)
@@ -318,10 +333,15 @@ def _leg_delta(
                 return d
     except Exception:  # noqa: BLE001 - py_vollib raises Below/AboveException
         pass
-    # Fallback: intrinsic moneyness delta.
-    if flag == "c":
-        return 1.0 if forward > strike else (0.5 if forward == strike else 0.0)
-    return -1.0 if forward < strike else (-0.5 if forward == strike else 0.0)
+    # Fallback: a proper Black-76 delta from a carried/last-resort vol (smooth,
+    # ATM ~ +/-0.5), never a 0<->|1| step across the strike.
+    sigma = (
+        fallback_iv
+        if (fallback_iv is not None and math.isfinite(fallback_iv) and fallback_iv > 0.0)
+        else _FALLBACK_IV
+    )
+    d = kernel.delta(forward, strike, t_years, rate, sigma, flag)
+    return d if math.isfinite(d) else 0.0
 
 
 def net_straddle_delta(
@@ -333,10 +353,15 @@ def net_straddle_delta(
     put_mark: float,
     side_sign: int,
     rate: float = 0.0,
+    fallback_iv: float | None = None,
 ) -> float:
-    """Side-signed net delta of the straddle (long call+put => dc+dp)."""
-    dc = _leg_delta(kernel, forward, strike, t_years, call_mark, "c", rate)
-    dp = _leg_delta(kernel, forward, strike, t_years, put_mark, "p", rate)
+    """Side-signed net delta of the straddle (long call+put => dc+dp).
+
+    ``fallback_iv`` (the entry ATM IV, when available) is carried into each leg
+    so an IV-inversion failure yields a smooth Black-76 delta, not a step.
+    """
+    dc = _leg_delta(kernel, forward, strike, t_years, call_mark, "c", rate, fallback_iv)
+    dp = _leg_delta(kernel, forward, strike, t_years, put_mark, "p", rate, fallback_iv)
     return float(side_sign) * (dc + dp)
 
 
@@ -491,7 +516,8 @@ def find_trigger_fire(
         put_mark = pm.price if pm else put_fallback
         t_years = _year_fraction(ts, expiry_utc)
         net_delta = net_straddle_delta(
-            kernel, es_price, strike, t_years, call_mark, put_mark, side_sign, rate
+            kernel, es_price, strike, t_years, call_mark, put_mark, side_sign,
+            rate, iv_entry,
         )
 
         # Evaluate triggers at every bar strictly after entry (window is OPEN at
@@ -521,40 +547,28 @@ def find_trigger_fire(
                         type=_TRIGGER_TYPE[type(trig)], ts=ts, value=val
                     )
 
-        # Mirror the v4 hedge cadence so cum_hedge_pnl tracks the real hedge —
-        # same helpers as _run_hedge. The "< exit_ts" guard matches _run_hedge's
-        # "never rehedge at off_ts"; entry establishes the hedge unconditionally.
-        is_entry = i == 0
+        # Mirror the v4 hedge cadence so cum_hedge_pnl tracks the real hedge via
+        # the SAME per-bar step as _run_hedge (single source of truth). The
+        # endpoint here is exit_ts (the tentative close for the rehedge cadence).
         if hedge.enabled:
-            execute = False
-            if is_entry:
-                execute = True
-            elif ts < exit_ts:
-                sigma_h = (
-                    es_last * iv_entry * math.sqrt(t_years)
-                    if iv_entry is not None
-                    else None
-                )
-                if _hedge_considered(
+            _executed, hedged_qty, last_rehedge_ts, net_delta_last, es_last = (
+                _rehedge_step(
                     hedge,
+                    es_bar=es_bar,
                     ts=ts,
-                    last_rehedge_ts=last_rehedge_ts,
-                    net_delta=net_delta,
-                    net_delta_last=net_delta_last,
                     es_price=es_price,
+                    net_delta=net_delta,
+                    hedged_qty=hedged_qty,
+                    last_rehedge_ts=last_rehedge_ts,
+                    net_delta_last=net_delta_last,
                     es_last=es_last,
-                    sigma_bar=sigma_h,
-                ):
-                    new_qty = _target_hedged_qty(hedge, net_delta)
-                    if _hedge_conditions_pass(
-                        hedge.conditions, es_bar, new_qty - hedged_qty, es_tick
-                    ):
-                        execute = True
-            if execute:
-                hedged_qty = _target_hedged_qty(hedge, net_delta)
-                last_rehedge_ts = ts
-                net_delta_last = net_delta
-                es_last = es_price
+                    is_entry=(i == 0),
+                    endpoint_ts=exit_ts,
+                    iv_entry=iv_entry,
+                    t_years=t_years,
+                    es_tick=es_tick,
+                )
+            )
         if i + 1 < len(path) and hedge.enabled:
             next_price = path[i + 1].price
             cum_hedge_pnl += hedged_qty * (next_price - es_price)
@@ -664,6 +678,64 @@ def _hedge_conditions_pass(
     return True
 
 
+def _rehedge_step(
+    hedge: HedgeSpec,
+    *,
+    es_bar: IntradayBar,
+    ts: datetime,
+    es_price: float,
+    net_delta: float,
+    hedged_qty: float,
+    last_rehedge_ts: datetime,
+    net_delta_last: float,
+    es_last: float,
+    is_entry: bool,
+    endpoint_ts: datetime,
+    iv_entry: float | None,
+    t_years: float,
+    es_tick: float,
+) -> tuple[bool, float, datetime, float, float]:
+    """One bar of the v4 rehedge cadence: decide whether to (re)hedge and return
+    the resulting state. SHARED by :func:`_run_hedge` (the realized hedge) and
+    :func:`find_trigger_fire` (the pnl-trigger mirror) so both stay in lockstep
+    bar-for-bar — a single source of truth for the trigger-OR / condition-AND /
+    target machinery.
+
+    The entry bar (``is_entry``) establishes the hedge UNCONDITIONALLY; an
+    interior bar strictly before ``endpoint_ts`` CONSIDERS a rehedge if ANY
+    trigger fires (OR) and EXECUTES only if ALL conditions pass on ``es_bar``
+    (AND); ``endpoint_ts`` itself never rehedges (the close happens there).
+    ``sigma_bar`` uses ``es_last`` (the ES at the last hedge) as its reference.
+    Returns ``(executed, hedged_qty, last_rehedge_ts, net_delta_last, es_last)``
+    — the trailing four unchanged when no rehedge executes.
+    """
+    execute = False
+    if is_entry:
+        execute = True  # establish the hedge (unconditional)
+    elif ts < endpoint_ts:  # never rehedge exactly at the endpoint (closing there)
+        sigma_bar = (
+            es_last * iv_entry * math.sqrt(t_years) if iv_entry is not None else None
+        )
+        if _hedge_considered(
+            hedge,
+            ts=ts,
+            last_rehedge_ts=last_rehedge_ts,
+            net_delta=net_delta,
+            net_delta_last=net_delta_last,
+            es_price=es_price,
+            es_last=es_last,
+            sigma_bar=sigma_bar,
+        ):
+            new_qty = _target_hedged_qty(hedge, net_delta)
+            if _hedge_conditions_pass(
+                hedge.conditions, es_bar, new_qty - hedged_qty, es_tick
+            ):
+                execute = True
+    if execute:
+        return True, _target_hedged_qty(hedge, net_delta), ts, net_delta, es_price
+    return False, hedged_qty, last_rehedge_ts, net_delta_last, es_last
+
+
 def _run_hedge(
     *,
     es_bars: list[IntradayBar],
@@ -724,35 +796,25 @@ def _run_hedge(
             pm.price if pm else put_fallback,
             side_sign,
             rate,
+            iv_entry,
         )
-        is_entry = i == 0
-        execute = False
-        if is_entry:
-            execute = True  # establish the hedge (unconditional)
-        elif ts < off_ts:  # never rehedge exactly at off_ts (closing there)
-            sigma_bar = (
-                es_last * iv_entry * math.sqrt(t_years) if iv_entry is not None else None
-            )
-            if _hedge_considered(
-                hedge,
-                ts=ts,
-                last_rehedge_ts=last_rehedge_ts,
-                net_delta=net_delta,
-                net_delta_last=net_delta_last,
-                es_price=es_price,
-                es_last=es_last,
-                sigma_bar=sigma_bar,
-            ):
-                new_qty = _target_hedged_qty(hedge, net_delta)
-                if _hedge_conditions_pass(
-                    hedge.conditions, bar, new_qty - hedged_qty, es_tick
-                ):
-                    execute = True
-        if execute:
-            hedged_qty = _target_hedged_qty(hedge, net_delta)
-            last_rehedge_ts = ts
-            net_delta_last = net_delta
-            es_last = es_price
+        executed, hedged_qty, last_rehedge_ts, net_delta_last, es_last = _rehedge_step(
+            hedge,
+            es_bar=bar,
+            ts=ts,
+            es_price=es_price,
+            net_delta=net_delta,
+            hedged_qty=hedged_qty,
+            last_rehedge_ts=last_rehedge_ts,
+            net_delta_last=net_delta_last,
+            es_last=es_last,
+            is_entry=(i == 0),
+            endpoint_ts=off_ts,
+            iv_entry=iv_entry,
+            t_years=t_years,
+            es_tick=es_tick,
+        )
+        if executed:
             hedge_trades.append(
                 HedgeTrade(
                     ts=ts,

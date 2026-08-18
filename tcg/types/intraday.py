@@ -24,7 +24,25 @@ ES_MULTIPLIER: float = 50.0
 # in ``max_spread``. The dwh v2 schema has NO min-increment column anywhere
 # (checked ``information_schema`` on contract/object/serie — none exists), so
 # this documented CME ES-option constant is used. See PROBLEMS.md.
-ES_OPTION_TICK_SIZE: float = 0.05
+#
+# The real CME E-mini S&P 500 (ES) option tick is TWO-TIER (verified against the
+# CME contract spec, 2026-08): trades priced at or below 5.00 index points move
+# in 0.05 increments, above 5.00 in 0.25 increments. ``ES_OPTION_TICK_SIZE`` is
+# the LOW tier (the value the dwh sourcing method returns); the tier rule is
+# applied to the spread floor via :func:`es_option_tick` so a typical (>5.00)
+# ATM leg quoted one true tick wide (0.25) is not spuriously rejected.
+ES_OPTION_TICK_SIZE: float = 0.05  # low tier: premium <= ES_OPTION_TICK_TIER_PT
+ES_OPTION_TICK_SIZE_HIGH: float = 0.25  # high tier: premium > ES_OPTION_TICK_TIER_PT
+ES_OPTION_TICK_TIER_PT: float = 5.00  # premium (index pts) tier boundary
+
+
+def es_option_tick(mark: float, low_tick: float = ES_OPTION_TICK_SIZE) -> float:
+    """Tier-aware CME ES-option tick for a leg quoted at *mark* (index points).
+
+    ``low_tick`` (the sourced low-tier increment, 0.05) applies at or below the
+    5.00-point tier boundary; the coarse 0.25 tick applies strictly above it.
+    """
+    return low_tick if mark <= ES_OPTION_TICK_TIER_PT else ES_OPTION_TICK_SIZE_HIGH
 
 # Tick size (minimum price increment, index points) for the ES FUTURE — the
 # hedge instrument. CME ES futures trade in 0.25 index-point ticks. Used by the
@@ -339,12 +357,3 @@ class AggregateResult:
     sharpe: float
     max_drawdown_usd: float
     equity_curve: tuple[EquityPoint, ...] = ()
-
-
-@dataclass(frozen=True)
-class BacktestResult:
-    """Full backtest output: per-day results + aggregate + warnings."""
-
-    days: tuple[DayResult, ...]
-    aggregate: AggregateResult
-    warnings: tuple[str, ...] = field(default_factory=tuple)
