@@ -315,6 +315,23 @@ function firstBadNumericParam(entry, exit, hedge, customDays) {
     if (tgt.mode === 'ratio' && (!isPositive(tgt.ratio) || Number(tgt.ratio) > 1)) {
       return 'Hedge ratio must be in (0, 1]';
     }
+    // Timing gates (F1.1/F1.2) — mirror the backend Field constraints so Run is
+    // blocked with a named reason rather than a raw 422. Blank F1.1 = OFF (fine).
+    const tim = hedge.timing || {};
+    if (!isBlank(tim.only_within_minutes_before_close)
+        && !isPositive(tim.only_within_minutes_before_close)) {
+      return 'Hedge "only within minutes before close" must be greater than 0';
+    }
+    const ext = tim.skip_near_extremum || {};
+    if (ext.enabled) {
+      if (!isPositive(ext.window_minutes)) {
+        return 'Hedge skip-extremum window must be greater than 0';
+      }
+      const tol = Number(ext.tolerance);
+      if (isBlank(ext.tolerance) || Number.isNaN(tol) || tol < 0) {
+        return 'Hedge skip-extremum tolerance must be 0 or greater';
+      }
+    }
   }
 
   for (const c of customDays || []) {

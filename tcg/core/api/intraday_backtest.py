@@ -46,6 +46,7 @@ from tcg.types.intraday import (
     DayResult,
     HedgeSpec,
     HedgeTargetSpec,
+    HedgeTimingSpec,
     HedgeTriggers,
     MaxSpreadCond,
     MaxUnderlyingMoveCond,
@@ -56,6 +57,7 @@ from tcg.types.intraday import (
     PnlTrigger,
     SigmaMoveHedgeTrigger,
     SigmaMoveTrigger,
+    SkipNearExtremumSpec,
     UnderlyingMoveTrigger,
 )
 
@@ -218,16 +220,46 @@ class HedgeTargetModel(BaseModel):
     ratio: float = Field(default=1.0, gt=0, le=1.0)  # ratio in (0, 1]
 
 
+# --------------------------------------------------------------------------- #
+# Hedge-timing gates (W2/P1). Two session-relative knobs on the hedge module,
+# BOTH neutral by default so an unset hedge behaves exactly as before:
+#   F1.1 only_within_minutes_before_close — restrict hedging to the final N min.
+#   F1.2 skip_near_extremum — skip a buy-high / sell-low hedge in the late window.
+# --------------------------------------------------------------------------- #
+class SkipNearExtremumModel(BaseModel):
+    """F1.2. Default OFF => inert. ``window_minutes`` (>0) is how long before the
+    hedge-window close the gate is active; ``tolerance`` (>=0) is proximity to the
+    running extremum, in ES points or percent per ``tolerance_unit``."""
+
+    enabled: bool = False
+    window_minutes: float = Field(default=30.0, gt=0)
+    tolerance: float = Field(default=2.0, ge=0)
+    tolerance_unit: Literal["points", "percent"] = "points"
+
+
+class HedgeTimingModel(BaseModel):
+    """Session-relative hedge-timing gates. Fully neutral by default. F1.1's
+    ``only_within_minutes_before_close`` (>0, or ``null`` for OFF) restricts
+    hedging to the final N minutes before the hedge-window close."""
+
+    only_within_minutes_before_close: float | None = Field(default=None, gt=0)
+    skip_near_extremum: SkipNearExtremumModel = Field(
+        default_factory=SkipNearExtremumModel
+    )
+
+
 class HedgeConfig(BaseModel):
     """The v4 hedge module. ``instrument`` is a ``Literal`` so any value other
     than ``es_future`` is rejected 422 (the selector exists for future
-    instruments). ``band_edge`` target requires a ``delta_band`` trigger set."""
+    instruments). ``band_edge`` target requires a ``delta_band`` trigger set.
+    ``timing`` carries the F1.1/F1.2 hedge-timing gates (neutral by default)."""
 
     enabled: bool = True
     instrument: Literal["es_future"] = "es_future"
     triggers: HedgeTriggersModel = Field(default_factory=HedgeTriggersModel)
     conditions: list[HedgeCondition] = Field(default_factory=list)
     target: HedgeTargetModel = Field(default_factory=HedgeTargetModel)
+    timing: HedgeTimingModel = Field(default_factory=HedgeTimingModel)
 
     @model_validator(mode="after")
     def _band_edge_needs_band(self) -> "HedgeConfig":
@@ -260,6 +292,17 @@ def _to_engine_hedge(h: HedgeConfig) -> HedgeSpec:
         ),
         conditions=tuple(conds),
         target=HedgeTargetSpec(mode=h.target.mode, ratio=h.target.ratio),
+        timing=HedgeTimingSpec(
+            only_within_minutes_before_close=(
+                h.timing.only_within_minutes_before_close
+            ),
+            skip_near_extremum=SkipNearExtremumSpec(
+                enabled=h.timing.skip_near_extremum.enabled,
+                window_minutes=h.timing.skip_near_extremum.window_minutes,
+                tolerance=h.timing.skip_near_extremum.tolerance,
+                tolerance_unit=h.timing.skip_near_extremum.tolerance_unit,
+            ),
+        ),
     )
 
 
@@ -842,7 +885,7 @@ async def run_backtest(
 # tick-size handling, expiry/DTE resolution) namespaces the cache: bumping this
 # guarantees stale entries can never be served with ``from_cache: true``. BUMP on
 # ANY change to the intraday backtest compute output AND on each release.
-INTRADAY_COMPUTE_VERSION = "0.2.0"
+INTRADAY_COMPUTE_VERSION = "0.3.0"
 
 # A DISTINCT sqlite filename from the portfolio cache so the two do not share the
 # 200-entry LRU domain (they would otherwise evict each other's entries).

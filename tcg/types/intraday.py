@@ -238,6 +238,57 @@ class HedgeTargetSpec:
 
 
 @dataclass(frozen=True)
+class SkipNearExtremumSpec:
+    """F1.2 — skip a hedge near the RUNNING session extremum in the late session.
+
+    In the final ``window_minutes`` before the hedge-window close, SUPPRESS a
+    hedge that would BUY the ES future while ES is within ``tolerance`` of the
+    RUNNING session HIGH, and symmetrically SUPPRESS one that would SELL while
+    within ``tolerance`` of the RUNNING session LOW. This is the general symmetric
+    "don't buy the high / sell the low into the close" rule — agnostic to the
+    straddle side, keyed on the hedge TRADE's buy/sell direction.
+
+    ``enabled=False`` (the DEFAULT) => the gate is inert (baseline preserved).
+    The "session high/low" is the running extremum from session open up to and
+    INCLUDING the current bar only — never the full-day high (no look-ahead).
+
+    * ``window_minutes`` — how many minutes before the hedge-window close the gate
+      is active (default 30).
+    * ``tolerance`` — proximity to the running extremum that triggers the skip,
+      in ES index points (``tolerance_unit="points"``) or as a percent of the
+      current ES price (``tolerance_unit="percent"``). ``0`` => only exactly at
+      the extremum.
+    """
+
+    enabled: bool = False
+    window_minutes: float = 30.0
+    tolerance: float = 2.0
+    tolerance_unit: str = "points"  # "points" | "percent"
+
+
+@dataclass(frozen=True)
+class HedgeTimingSpec:
+    """Session-relative hedge-timing gates (F1.1 + F1.2). All neutral by DEFAULT
+    => a default HedgeSpec hedges exactly as before (regression-preserving).
+
+    * ``only_within_minutes_before_close`` (F1.1) — when set, a (re)hedge is only
+      CONSIDERED in the final N minutes before the hedge-window close; earlier
+      bars (including the entry hedge) are suppressed. ``None`` (default) => no
+      time restriction (today's behavior).
+    * ``skip_near_extremum`` (F1.2) — the late-session buy-high / sell-low skip.
+
+    "Hedge-window close" is the endpoint of the delta-hedge window for the day
+    (``straddle_off_ts`` in the realized hedge) — derived from the existing
+    session/bar range, needing no extra input and never peeking past it.
+    """
+
+    only_within_minutes_before_close: float | None = None
+    skip_near_extremum: SkipNearExtremumSpec = field(
+        default_factory=SkipNearExtremumSpec
+    )
+
+
+@dataclass(frozen=True)
 class HedgeSpec:
     """The full hedge module (v4). ``enabled=False`` => no hedge (hedge_pnl=0).
 
@@ -245,13 +296,16 @@ class HedgeSpec:
     later; the API rejects unknown instruments 422). ``conditions`` is a tuple of
     ``MaxSpreadCond`` / ``MinQuoteSizeCond`` / ``MinRehedgeDeltaCond`` — a
     considered rehedge EXECUTES only if ALL pass on the ES-future bar; else it is
-    DEFERRED (reconsidered next bar, last-hedge state unchanged)."""
+    DEFERRED (reconsidered next bar, last-hedge state unchanged). ``timing`` adds
+    the session-relative hedge-timing gates (F1.1/F1.2); its default is fully
+    neutral so an existing HedgeSpec behaves identically."""
 
     enabled: bool = False
     instrument: str = "es_future"
     triggers: HedgeTriggers = field(default_factory=HedgeTriggers)
     conditions: tuple = ()
     target: HedgeTargetSpec = field(default_factory=HedgeTargetSpec)
+    timing: HedgeTimingSpec = field(default_factory=HedgeTimingSpec)
 
 
 @dataclass(frozen=True)

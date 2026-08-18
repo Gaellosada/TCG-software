@@ -43,6 +43,7 @@ from tcg.types.intraday import (
     es_option_tick,
     ExitTrigger,
     HedgeSpec,
+    HedgeTimingSpec,
     HedgeTrade,
     IntradayBar,
     LegResult,
@@ -522,8 +523,14 @@ def find_trigger_fire(
     net_delta_last = 0.0
     es_last = es_entry
     cum_hedge_pnl = 0.0  # hedge MTM realized reaching the current point
+    # F1.2 running-extremum context is computed only when the gate is armed, so a
+    # default (F1.2-off) hedge pays zero overhead and stays bit-identical.
+    f12_on = hedge.enabled and hedge.timing.skip_near_extremum.enabled
     for i, es_bar in enumerate(path):
         ts, es_price = es_bar.ts, es_bar.price
+        running_high, running_low = (
+            _running_extremum(es_bars, ts) if f12_on else (None, None)
+        )
         cm = last_known_at_or_before(call_marks, ts)
         pm = last_known_at_or_before(put_marks, ts)
         call_mark = cm.price if cm else call_fallback
@@ -583,6 +590,8 @@ def find_trigger_fire(
                     iv_entry=iv_entry,
                     t_years=t_years,
                     es_tick=es_tick,
+                    running_high=running_high,
+                    running_low=running_low,
                 )
             )
         if i + 1 < len(path) and hedge.enabled:
@@ -676,6 +685,87 @@ def _target_hedged_qty(hedge: HedgeSpec, net_delta: float) -> float:
     return -net_delta
 
 
+def _running_extremum(
+    es_bars: list[IntradayBar], ts: datetime
+) -> tuple[float | None, float | None]:
+    """Running ``(high, low)`` of the ES session over bars with ``bar.ts <= ts``.
+
+    NO LOOK-AHEAD by construction: only bars AT OR BEFORE ``ts`` contribute, so
+    the extremum is the session high/low "so far" (from the fetched session start
+    — anchored at ~09:30 — up to and INCLUDING the current bar), never a value set
+    by a later bar. Assumes ``es_bars`` is ascending in ``ts`` (the reader returns
+    them sorted) and breaks at the first bar strictly after ``ts``. Returns
+    ``(None, None)`` when no bar is at or before ``ts``.
+    """
+    hi = -math.inf
+    lo = math.inf
+    seen = False
+    for bar in es_bars:
+        if bar.ts <= ts:
+            if bar.price > hi:
+                hi = bar.price
+            if bar.price < lo:
+                lo = bar.price
+            seen = True
+        else:
+            break
+    if not seen:
+        return None, None
+    return hi, lo
+
+
+def _hedge_time_gate_ok(
+    timing: HedgeTimingSpec, ts: datetime, close_ts: datetime
+) -> bool:
+    """F1.1 time-anchored gate. ``True`` => (re)hedging is allowed at ``ts``.
+
+    When ``only_within_minutes_before_close`` is set, a (re)hedge is only
+    considered in the final N minutes before ``close_ts`` (the hedge-window
+    close); earlier bars are suppressed. ``None`` (default) => always allowed
+    (no time restriction — baseline behavior).
+    """
+    n = timing.only_within_minutes_before_close
+    if n is None:
+        return True
+    return (close_ts - ts).total_seconds() <= n * 60.0
+
+
+def _skip_near_extremum(
+    timing: HedgeTimingSpec,
+    *,
+    ts: datetime,
+    close_ts: datetime,
+    es_price: float,
+    running_high: float | None,
+    running_low: float | None,
+    delta_change: float,
+) -> bool:
+    """F1.2 gate. ``True`` => SUPPRESS this hedge (buy-high / sell-low skip).
+
+    Active only in the final ``window_minutes`` before ``close_ts``. Suppresses a
+    BUY (``delta_change > 0``) when ES is within ``tolerance`` of the RUNNING
+    session HIGH, and a SELL (``delta_change < 0``) when within ``tolerance`` of
+    the RUNNING session LOW. A zero-size trade has no direction and is never
+    suppressed. Fails OPEN (does not suppress) when the running extremum is
+    unavailable — the hedge is never blocked on missing session context.
+    """
+    spec = timing.skip_near_extremum
+    if not spec.enabled:
+        return False
+    if (close_ts - ts).total_seconds() > spec.window_minutes * 60.0:
+        return False  # outside the late-session window
+    if running_high is None or running_low is None:
+        return False  # no session context -> cannot evaluate -> do not suppress
+    tol = spec.tolerance
+    if spec.tolerance_unit == "percent":
+        tol = tol / 100.0 * es_price
+    if delta_change > 0.0:  # a BUY of ES
+        return (running_high - es_price) <= tol
+    if delta_change < 0.0:  # a SELL of ES
+        return (es_price - running_low) <= tol
+    return False
+
+
 def _hedge_considered(
     hedge: HedgeSpec,
     *,
@@ -750,6 +840,8 @@ def _rehedge_step(
     iv_entry: float | None,
     t_years: float,
     es_tick: float,
+    running_high: float | None = None,
+    running_low: float | None = None,
 ) -> tuple[bool, float, datetime, float, float]:
     """One bar of the v4 rehedge cadence: decide whether to (re)hedge and return
     the resulting state. SHARED by :func:`_run_hedge` (the realized hedge) and
@@ -764,10 +856,30 @@ def _rehedge_step(
     ``sigma_bar`` uses ``es_last`` (the ES at the last hedge) as its reference.
     Returns ``(executed, hedged_qty, last_rehedge_ts, net_delta_last, es_last)``
     — the trailing four unchanged when no rehedge executes.
+
+    Session-relative hedge-timing gates (both neutral by default, so a HedgeSpec
+    with a default ``timing`` behaves bit-identically to before):
+
+    * F1.1 ``only_within_minutes_before_close`` — an AND-gate applied FIRST to
+      EVERY decision (entry included): outside the final-N-minutes window nothing
+      hedges (``endpoint_ts`` is the hedge-window close).
+    * F1.2 ``skip_near_extremum`` — suppresses an otherwise-executing directional
+      hedge that would BUY near the running session high / SELL near the running
+      low in the late window. ``running_high`` / ``running_low`` are the running
+      extrema at/before ``ts`` (no look-ahead); the caller passes them only when
+      F1.2 is enabled, else ``None`` (the gate is inert).
     """
+    timing = hedge.timing
+    # F1.1: no hedging outside the final-N-minutes window (applies to the
+    # establishing entry hedge too, so "hedge only near the close" truly holds).
+    if not _hedge_time_gate_ok(timing, ts, endpoint_ts):
+        return False, hedged_qty, last_rehedge_ts, net_delta_last, es_last
+
     execute = False
+    target_qty = hedged_qty
     if is_entry:
-        execute = True  # establish the hedge (unconditional)
+        execute = True  # establish the hedge (unconditional, modulo the gates)
+        target_qty = _target_hedged_qty(hedge, net_delta)
     elif ts < endpoint_ts:  # never rehedge exactly at the endpoint (closing there)
         sigma_bar = (
             es_last * iv_entry * math.sqrt(t_years) if iv_entry is not None else None
@@ -782,13 +894,26 @@ def _rehedge_step(
             es_last=es_last,
             sigma_bar=sigma_bar,
         ):
-            new_qty = _target_hedged_qty(hedge, net_delta)
+            target_qty = _target_hedged_qty(hedge, net_delta)
             if _hedge_conditions_pass(
-                hedge.conditions, es_bar, new_qty - hedged_qty, es_tick
+                hedge.conditions, es_bar, target_qty - hedged_qty, es_tick
             ):
                 execute = True
+
+    # F1.2: suppress a directional buy-high / sell-low hedge in the late window.
+    if execute and _skip_near_extremum(
+        timing,
+        ts=ts,
+        close_ts=endpoint_ts,
+        es_price=es_price,
+        running_high=running_high,
+        running_low=running_low,
+        delta_change=target_qty - hedged_qty,
+    ):
+        execute = False
+
     if execute:
-        return True, _target_hedged_qty(hedge, net_delta), ts, net_delta, es_price
+        return True, target_qty, ts, net_delta, es_price
     return False, hedged_qty, last_rehedge_ts, net_delta_last, es_last
 
 
@@ -850,8 +975,14 @@ def _run_hedge(
     last_rehedge_ts = on_ts
     net_delta_last = 0.0
     es_last = on_price
+    # F1.2 running-extremum context is computed only when the gate is armed, so a
+    # default (F1.2-off) hedge pays zero overhead and stays bit-identical.
+    f12_on = hedge.enabled and hedge.timing.skip_near_extremum.enabled
     for i, bar in enumerate(path):
         ts, es_price = bar.ts, bar.price
+        running_high, running_low = (
+            _running_extremum(es_bars, ts) if f12_on else (None, None)
+        )
         # Delta marks carry-forward: LAST KNOWN option quote at/before ``ts`` —
         # never a quote printed after ``ts`` (no look-ahead).
         cm = last_known_at_or_before(call_marks, ts)
@@ -884,6 +1015,8 @@ def _run_hedge(
             iv_entry=iv_entry,
             t_years=t_years,
             es_tick=es_tick,
+            running_high=running_high,
+            running_low=running_low,
         )
         if executed:
             hedge_trades.append(

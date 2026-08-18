@@ -274,6 +274,12 @@ describe('IntradayBacktestPage', () => {
       },
       conditions: [],
       target: { mode: 'zero', ratio: 1.0 },
+      timing: {
+        only_within_minutes_before_close: null,
+        skip_near_extremum: {
+          enabled: false, window_minutes: 30, tolerance: 2, tolerance_unit: 'points',
+        },
+      },
     });
     // Old flat hedge fields must NOT leak at the top of `hedge`.
     expect(lastRunBody.hedge.interval_minutes).toBeUndefined();
@@ -771,6 +777,50 @@ describe('IntradayBacktestPage', () => {
     // Old flat fields are gone.
     expect(h.interval_minutes).toBeUndefined();
     expect(h.delta_band).toBeUndefined();
+  });
+
+  it('renders the hedge-timing gates (F1.1 window + F1.2 skip-near-extremum) and serializes them', async () => {
+    await renderReady();
+    // Timing block present with both controls; F1.1 shows an "off" hint when blank.
+    expect(screen.getByTestId('hedge-timing-block')).toBeTruthy();
+    expect(screen.getByTestId('hedge-only-before-off')).toBeTruthy();
+    // F1.2 sub-fields are disabled until the enable toggle is checked.
+    expect(screen.getByTestId('hedge-skip-extremum-window').disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2025-02-01' } });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-03-31' } });
+
+    // F1.1: restrict hedging to the final 60 min before close.
+    fireEvent.change(screen.getByLabelText('Only hedge within minutes before close'), { target: { value: '60' } });
+    expect(screen.queryByTestId('hedge-only-before-off')).toBeNull();  // no longer off
+
+    // F1.2: enable, then set window + tolerance + unit.
+    fireEvent.click(screen.getByTestId('hedge-skip-extremum-enable'));
+    expect(screen.getByTestId('hedge-skip-extremum-window').disabled).toBe(false);
+    fireEvent.change(screen.getByLabelText('Skip extremum window minutes'), { target: { value: '20' } });
+    fireEvent.change(screen.getByLabelText('Skip extremum tolerance'), { target: { value: '0.25' } });
+    fireEvent.change(screen.getByLabelText('Skip extremum tolerance unit'), { target: { value: 'percent' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(lastRunBody).not.toBeNull());
+
+    expect(lastRunBody.hedge.timing).toEqual({
+      only_within_minutes_before_close: 60,
+      skip_near_extremum: {
+        enabled: true, window_minutes: 20, tolerance: 0.25, tolerance_unit: 'percent',
+      },
+    });
+  });
+
+  it('serializes a blank F1.1 window as null (off), never 0', async () => {
+    await renderReady();
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2025-02-01' } });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-03-31' } });
+    // Leave F1.1 blank and F1.2 disabled (defaults).
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(lastRunBody).not.toBeNull());
+    expect(lastRunBody.hedge.timing.only_within_minutes_before_close).toBeNull();
+    expect(lastRunBody.hedge.timing.skip_near_extremum.enabled).toBe(false);
   });
 
   it('clears interval + band to null and serializes the σ-only "wait for 1σ" payload', async () => {

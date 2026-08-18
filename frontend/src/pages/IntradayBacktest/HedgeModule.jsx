@@ -61,8 +61,35 @@ export const SIGMA_MOVE_HELP = 'Rehedge when the underlying has moved ≥ n×σ 
   + 'it shrinks intraday as expiry nears. Enable this and turn the timed and band '
   + 'triggers off to "wait for a 1σ move before hedging".';
 
+// In-app help for the F1.1 time-anchored hedge window.
+export const HEDGE_ONLY_BEFORE_CLOSE_HELP = 'Restrict ALL hedging to the final N '
+  + 'minutes before the position closes: earlier bars (including the opening hedge) '
+  + 'never rehedge, so the straddle runs unhedged until this window opens. Blank = '
+  + 'off (hedge the whole session). E.g. 60 = "only hedge in the last hour".';
+
+// In-app help for the F1.2 skip-near-extremum gate.
+export const HEDGE_SKIP_EXTREMUM_HELP = 'In the final window before the close, do NOT '
+  + 'add a hedge that would BUY the ES future while it sits within the tolerance of '
+  + 'the running session HIGH, nor SELL while within the tolerance of the running '
+  + 'session LOW — i.e. avoid chasing a buy-the-high / sell-the-low fill into the '
+  + 'close. The running high/low use only bars up to now (no look-ahead).';
+
+// Neutral hedge-timing block (both gates OFF): F1.1 blank (off) + F1.2 disabled.
+// Matches the engine/schema defaults so a default hedge behaves exactly as before.
+export function defaultHedgeTiming() {
+  return {
+    only_within_minutes_before_close: '',  // blank = off
+    skip_near_extremum: {
+      enabled: false,
+      window_minutes: 30,
+      tolerance: 2,
+      tolerance_unit: 'points',
+    },
+  };
+}
+
 // Default hedge module (matches the prior flat defaults: enabled, 15-min
-// interval, 0.10 band; σ-move off; hedge-to-neutral).
+// interval, 0.10 band; σ-move off; hedge-to-neutral; timing gates OFF).
 export function defaultHedgeModule() {
   return {
     enabled: true,
@@ -74,6 +101,7 @@ export function defaultHedgeModule() {
     },
     conditions: [],
     target: { mode: 'zero', ratio: 1.0 },
+    timing: defaultHedgeTiming(),
   };
 }
 
@@ -130,6 +158,23 @@ export function serializeHedge(h) {
       mode: tgt.mode || 'zero',
       ratio: Number(tgt.ratio),
     },
+    timing: serializeHedgeTiming(m.timing),
+  };
+}
+
+// Serialize the hedge-timing block to the PINNED wire shape. F1.1's
+// only_within_minutes_before_close serializes blank -> null (OFF), never 0.
+export function serializeHedgeTiming(timing) {
+  const t = timing || {};
+  const ext = t.skip_near_extremum || {};
+  return {
+    only_within_minutes_before_close: numOrNull(t.only_within_minutes_before_close),
+    skip_near_extremum: {
+      enabled: Boolean(ext.enabled),
+      window_minutes: Number(ext.window_minutes),
+      tolerance: Number(ext.tolerance),
+      tolerance_unit: ext.tolerance_unit || 'points',
+    },
   };
 }
 
@@ -141,10 +186,17 @@ export default function HedgeModule({ value, onChange }) {
   const target = v.target || {};
   const enabled = Boolean(v.enabled);
 
+  const timing = v.timing || defaultHedgeTiming();
+  const extremum = timing.skip_near_extremum || {};
+
   const set = (patch) => onChange({ ...v, ...patch });
   const setTrigger = (patch) => set({ triggers: { ...triggers, ...patch } });
   const setSigma = (patch) => setTrigger({ sigma_move: { ...sigma, ...patch } });
   const setTarget = (patch) => set({ target: { ...target, ...patch } });
+  const setTiming = (patch) => set({ timing: { ...timing, ...patch } });
+  const setExtremum = (patch) => setTiming({
+    skip_near_extremum: { ...extremum, ...patch },
+  });
 
   const addCondition = (type) => {
     if (!type) return;
@@ -371,6 +423,110 @@ export default function HedgeModule({ value, onChange }) {
             />
           </label>
         )}
+      </div>
+
+      {/* Timing gates (F1.1 + F1.2): session-relative restrictions on WHEN a
+          hedge may fire. Both neutral by default. */}
+      <div className={styles.conditionsBlock} data-testid="hedge-timing-block">
+        <div className={styles.conditionsHeader}>
+          <span className={styles.conditionsTitle}>Timing</span>
+        </div>
+        <div className={styles.moduleFields}>
+          {/* F1.1 — only hedge in the final N minutes before close. */}
+          <label className={styles.field}>
+            <span className={styles.labelRow}>
+              Only hedge within (min before close)
+              {isBlank(timing.only_within_minutes_before_close) && (
+                <span className={styles.statLabel} data-testid="hedge-only-before-off"> · off</span>
+              )}
+              <span
+                className={styles.help}
+                data-testid="hedge-only-before-help"
+                role="img"
+                aria-label={HEDGE_ONLY_BEFORE_CLOSE_HELP}
+                title={HEDGE_ONLY_BEFORE_CLOSE_HELP}
+              >
+                ⓘ
+              </span>
+            </span>
+            <input
+              type="number"
+              min={0}
+              aria-label="Only hedge within minutes before close"
+              data-testid="hedge-only-before-close"
+              placeholder="off (blank)"
+              value={timing.only_within_minutes_before_close ?? ''}
+              disabled={sub}
+              onChange={(e) => setTiming({
+                only_within_minutes_before_close: e.target.value,
+              })}
+            />
+          </label>
+        </div>
+
+        {/* F1.2 — skip a buy-high / sell-low hedge near the running extremum. */}
+        <div className={styles.moduleFields}>
+          <label className={`${styles.field} ${styles.checkboxRow}`}>
+            <input
+              type="checkbox"
+              aria-label="Skip hedge near session extremum"
+              data-testid="hedge-skip-extremum-enable"
+              checked={Boolean(extremum.enabled)}
+              disabled={sub}
+              onChange={(e) => setExtremum({ enabled: e.target.checked })}
+            />
+            <span className={styles.labelRow}>
+              Skip hedge near session extremum
+              <span
+                className={styles.help}
+                data-testid="hedge-skip-extremum-help"
+                role="img"
+                aria-label={HEDGE_SKIP_EXTREMUM_HELP}
+                title={HEDGE_SKIP_EXTREMUM_HELP}
+              >
+                ⓘ
+              </span>
+            </span>
+          </label>
+          <label className={styles.field}>
+            <span>Window (min before close)</span>
+            <input
+              type="number"
+              min={0}
+              aria-label="Skip extremum window minutes"
+              data-testid="hedge-skip-extremum-window"
+              value={extremum.window_minutes ?? ''}
+              disabled={sub || !extremum.enabled}
+              onChange={(e) => setExtremum({ window_minutes: e.target.value })}
+            />
+          </label>
+          <label className={styles.field}>
+            <span>Tolerance</span>
+            <input
+              type="number"
+              step="0.25"
+              min={0}
+              aria-label="Skip extremum tolerance"
+              data-testid="hedge-skip-extremum-tolerance"
+              value={extremum.tolerance ?? ''}
+              disabled={sub || !extremum.enabled}
+              onChange={(e) => setExtremum({ tolerance: e.target.value })}
+            />
+          </label>
+          <label className={styles.field}>
+            <span>Tolerance unit</span>
+            <select
+              aria-label="Skip extremum tolerance unit"
+              data-testid="hedge-skip-extremum-unit"
+              value={extremum.tolerance_unit || 'points'}
+              disabled={sub || !extremum.enabled}
+              onChange={(e) => setExtremum({ tolerance_unit: e.target.value })}
+            >
+              <option value="points">ES points</option>
+              <option value="percent">percent</option>
+            </select>
+          </label>
+        </div>
       </div>
     </div>
   );
