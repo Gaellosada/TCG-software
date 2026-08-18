@@ -49,10 +49,11 @@ describe('navConfig', () => {
     expect(app.anchor).toBe('bottom');
   });
 
-  it('Manual section preserves order Data, Indicators, Signals, Portfolio, Composed', () => {
+  it('Manual section preserves order Database v1, Database v2, Indicators, Signals, Portfolio, Composed', () => {
     const manual = NAV_SECTIONS.find((s) => s.id === 'manual');
     expect(manual.items.map((i) => i.path)).toEqual([
       '/data',
+      '/data-v2',
       '/indicators',
       '/signals',
       '/portfolio',
@@ -112,7 +113,7 @@ describe('<Sidebar>', () => {
 
   it('does NOT apply active state to non-matching routes', () => {
     renderSidebar({ initialPath: '/portfolio' });
-    const link = screen.getByRole('link', { name: /^data$/i });
+    const link = screen.getByRole('link', { name: /^database v1$/i });
     expect(link.className).not.toMatch(/\bactive\b/);
   });
 });
