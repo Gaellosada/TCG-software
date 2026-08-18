@@ -271,6 +271,18 @@ describe('ObjectDetail filter state in the URL', () => {
     expect((await screen.findByLabelText(/expiration/i)).value).toBe('');
   });
 
+  it('degrades year-zero expiration the backend cannot represent', async () => {
+    // ``0000-01-01`` round-trips fine through JS Date, but Python's
+    // ``date.fromisoformat`` rejects it (year must be in 1..9999), so it would
+    // still 400 the tab. Drop it like any other out-of-range date.
+    renderAt('/data-v2?expiration_min=0000-01-01&serie_type=bbba');
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    expect(lastSent().expirationMin).toBeUndefined();
+    expect(lastSent().expirationMax).toBeUndefined();
+    expect(lastSent()).toMatchObject({ serieType: 'bbba' });
+    expect((await screen.findByLabelText(/expiration/i)).value).toBe('');
+  });
+
   it('accepts a valid leap-day expiration', async () => {
     // The validator must not over-reject: 2024 IS a leap year, so Feb 29 is real.
     renderAt('/data-v2?expiration_min=2024-02-29&serie_type=bbba');

@@ -70,13 +70,16 @@ function urlEnum(params, key) {
  * than NaN, so it would keep a date the backend rejects and silently shift it.
  * Round-tripping through ``toISOString`` catches that: a rolled-over date no
  * longer equals the input. ``T00:00:00Z`` pins the parse to UTC so it is not
- * shifted by the host time zone.
+ * shifted by the host time zone. One more divergence: JS accepts year 0, but
+ * Python's ``date`` is bounded to 1..9999 — so ``0000-01-01`` round-trips here
+ * yet 400s the backend, hence the explicit year >= 1 guard.
  */
 function urlIsoDate(raw) {
   if (!raw) return '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return '';
   const d = new Date(`${raw}T00:00:00Z`);
-  return (!Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === raw) ? raw : '';
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== raw) return '';
+  return d.getUTCFullYear() >= 1 ? raw : '';
 }
 
 /**
