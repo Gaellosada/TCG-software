@@ -311,6 +311,40 @@ describe('IntradayBacktestPage', () => {
     expect(override.entry.snap_tolerance_minutes).toBeUndefined();
   });
 
+  it('defaults the transaction-cost model OFF and hides the fallback input', async () => {
+    await renderReady();
+    const toggle = screen.getByLabelText('Enable transaction cost');
+    expect(toggle.checked).toBe(false);
+    // The fallback-cost input only appears once the model is enabled.
+    expect(screen.queryByLabelText('One-sided fallback cost points')).toBeNull();
+  });
+
+  it('wires the enabled cost model + fallback into the run payload', async () => {
+    await renderReady();
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2025-02-01' } });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-03-31' } });
+
+    // Default OFF cost still serializes explicitly (participates in the cache key).
+    // Enable it and set a one-sided fallback.
+    fireEvent.click(screen.getByLabelText('Enable transaction cost'));
+    const fallback = screen.getByLabelText('One-sided fallback cost points');
+    fireEvent.change(fallback, { target: { value: '0.25' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(lastRunBody).not.toBeNull());
+
+    expect(lastRunBody.cost).toEqual({ enabled: true, fallback_cost_pts: 0.25 });
+  });
+
+  it('serializes the cost model OFF by default in the run payload', async () => {
+    await renderReady();
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2025-02-01' } });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2025-03-31' } });
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(lastRunBody).not.toBeNull());
+    expect(lastRunBody.cost).toEqual({ enabled: false, fallback_cost_pts: 0 });
+  });
+
   it('hides the per-day override toggle when a custom day is excluded', async () => {
     await renderReady();
     fireEvent.change(screen.getByTestId('custom-day-input'), { target: { value: '2025-02-17' } });

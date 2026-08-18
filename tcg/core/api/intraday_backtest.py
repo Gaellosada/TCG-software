@@ -42,6 +42,7 @@ from tcg.types.intraday import (
     WINDOW_MAX_DATE,
     WINDOW_MIN_DATE,
     AggregateResult,
+    CostModel,
     DayResult,
     HedgeSpec,
     HedgeTargetSpec,
@@ -262,6 +263,26 @@ def _to_engine_hedge(h: HedgeConfig) -> HedgeSpec:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Transaction-cost model (P0.2). A configurable, DEFAULT-OFF half-spread crossing
+# on the option legs + ES hedge. As a normal RunRequest field it participates in
+# the DiskResultCache key (a changed cost => a new key => a fresh compute), which
+# is correct: cost changes the result. Default off keeps the mid-fill baseline.
+# --------------------------------------------------------------------------- #
+class CostModelConfig(BaseModel):
+    """Half-spread transaction-cost knob. ``enabled=False`` (default) reproduces
+    the prior mid-fill P&L. ``fallback_cost_pts`` (index points, >= 0) is the
+    fixed per-side cost charged when a fill bar has no two-sided quote."""
+
+    enabled: bool = False
+    fallback_cost_pts: float = Field(default=0.0, ge=0)
+
+
+def _to_engine_cost(c: CostModelConfig) -> CostModel:
+    """Mirror the validated Pydantic cost model into the engine dataclass."""
+    return CostModel(enabled=c.enabled, fallback_cost_pts=c.fallback_cost_pts)
+
+
 class EntryExitModule(BaseModel):
     """A full entry- or exit-rule module: time + its own snap tolerance + an
     AND-ed list of conditions (the 4 discriminated types).
@@ -328,6 +349,9 @@ class RunRequest(BaseModel):
     dte: int = Field(default=0, ge=0)
     straddle_side: Literal["long", "short"] = "long"
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
+    # Transaction-cost model (P0.2). Default OFF => mid fills (prior behavior).
+    # A real field (NOT stripped from the cache key): cost changes the result.
+    cost: CostModelConfig = Field(default_factory=CostModelConfig)
     # Unified per-date control (exclude + full per-day override).
     custom_days: list[CustomDay] = Field(default_factory=list)
     # Durable-cache opt-out (Settings parity with the portfolio path). It selects
@@ -600,6 +624,9 @@ def _serialize_day(r: DayResult) -> dict[str, Any]:
             "hedge_pnl_pts": r.pnl.hedge_pnl_pts,
             "total_pnl_pts": r.pnl.total_pnl_pts,
             "total_pnl_usd": r.pnl.total_pnl_usd,
+            "cost_pts": r.pnl.cost_pts,
+            "cost_usd": r.pnl.cost_usd,
+            "n_fallback_fills": r.pnl.n_fallback_fills,
         }
     return out
 
@@ -614,6 +641,8 @@ def _serialize_aggregate(a: AggregateResult) -> dict[str, Any]:
         "win_rate": a.win_rate,
         "sharpe": a.sharpe,
         "max_drawdown_usd": a.max_drawdown_usd,
+        "total_cost_usd": a.total_cost_usd,
+        "n_fallback_fills": a.n_fallback_fills,
         "equity_curve": [
             {"date": _int_to_iso(p.date), "cum_pnl_usd": p.cum_pnl_usd}
             for p in a.equity_curve
@@ -737,6 +766,7 @@ async def _process_day(
         es_tick=es_tick,
         es_day_open=es_day_open,
         multiplier=ES_MULTIPLIER,
+        cost=_to_engine_cost(req.cost),
     )
 
 
@@ -812,7 +842,7 @@ async def run_backtest(
 # tick-size handling, expiry/DTE resolution) namespaces the cache: bumping this
 # guarantees stale entries can never be served with ``from_cache: true``. BUMP on
 # ANY change to the intraday backtest compute output AND on each release.
-INTRADAY_COMPUTE_VERSION = "0.1.0"
+INTRADAY_COMPUTE_VERSION = "0.2.0"
 
 # A DISTINCT sqlite filename from the portfolio cache so the two do not share the
 # 200-entry LRU domain (they would otherwise evict each other's entries).

@@ -255,6 +255,38 @@ class HedgeSpec:
 
 
 @dataclass(frozen=True)
+class CostModel:
+    """Transaction-cost model for the option legs AND the ES delta-hedge.
+
+    ``enabled=False`` (the DEFAULT) => ZERO cost: every fill is taken at the bbba
+    two-sided MID exactly as before, so a cost-off run reproduces the prior
+    mid-fill P&L bit-for-bit (regression-preserving).
+
+    When ``enabled=True`` an ADVERSE half-spread crossing is charged on every
+    fill: a BUY fills at ``mid + half_spread`` and a SELL at ``mid - half_spread``
+    where ``half_spread = (ask - bid)/2`` from the SAME bbba bar used for the
+    mark. The magnitude of the charge is ``half_spread`` per unit crossed and it
+    ALWAYS reduces P&L, independent of side (a long entry buys / a short entry
+    sells — both cross the spread adversely).
+
+    One-sided / last-trade bars have no two-sided quote (``bid`` or ``ask``
+    ``None``), so the half-spread is UNDEFINED. A fixed ``fallback_cost_pts`` per
+    fill side (index points, default ``0.0``) is charged instead, and every such
+    fill is COUNTED (``n_fallback_fills``) so the fallback's coverage is
+    measurable rather than silently mid-filled. For the ES hedge the per-unit
+    cost (spread or fallback) scales by the size of the ES trade the rehedge
+    makes; ``n_fallback_fills`` counts fallback TRADE events (size-independent).
+    """
+
+    enabled: bool = False
+    fallback_cost_pts: float = 0.0
+
+
+# A disabled cost model: the ``simulate_day`` default (mid fills, zero cost).
+COST_DISABLED = CostModel(enabled=False)
+
+
+@dataclass(frozen=True)
 class MarkSnapshot:
     """Straddle marks at a single instant (entry or exit)."""
 
@@ -304,12 +336,23 @@ class HedgeTrade:
 
 @dataclass(frozen=True)
 class DayPnl:
-    """Per-day P&L, in index points and dollars (points x multiplier)."""
+    """Per-day P&L, in index points and dollars (points x multiplier).
+
+    ``option_pnl_pts`` and ``hedge_pnl_pts`` are GROSS (mid-fill) P&L. When a
+    :class:`CostModel` is enabled, ``cost_pts`` (>= 0) is the total transaction
+    cost charged across the option + hedge fills and ``total_pnl_pts`` is NET of
+    it (``option + hedge - cost``); cost-off runs carry ``cost_pts == 0.0`` and
+    ``total == option + hedge`` exactly as before. ``n_fallback_fills`` counts
+    fills that hit the fixed fallback (a one-sided / last-trade bar).
+    """
 
     option_pnl_pts: float
     hedge_pnl_pts: float
     total_pnl_pts: float
     total_pnl_usd: float
+    cost_pts: float = 0.0
+    cost_usd: float = 0.0
+    n_fallback_fills: int = 0
 
 
 @dataclass(frozen=True)
@@ -357,3 +400,8 @@ class AggregateResult:
     sharpe: float
     max_drawdown_usd: float
     equity_curve: tuple[EquityPoint, ...] = ()
+    # Transaction-cost coverage (0 when the cost model is off): total cost
+    # charged across all traded days and the count of fills that fell back to the
+    # fixed per-side cost because their bar had no two-sided quote.
+    total_cost_usd: float = 0.0
+    n_fallback_fills: int = 0

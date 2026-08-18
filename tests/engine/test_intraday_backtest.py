@@ -976,3 +976,185 @@ def test_hedge_default_none_is_disabled():
     res = simulate_day(**kw)
     assert res.hedge_trades == () and res.pnl.hedge_pnl_pts == 0.0
     assert res.status == "ok"
+
+
+# --------------------------------------------------------------------------- #
+# P0.2 — half-spread transaction-cost model (adverse crossing from bbba)
+# --------------------------------------------------------------------------- #
+from tcg.engine.intraday_backtest import crossing_fill_price  # noqa: E402
+from tcg.types.intraday import COST_DISABLED, CostModel  # noqa: E402
+
+
+def test_crossing_fill_price_buy_pays_half_sell_receives_half():
+    # A BUY crosses UP (mid + half); a SELL crosses DOWN (mid - half).
+    assert crossing_fill_price(30.0, 0.4, is_buy=True) == pytest.approx(30.4)
+    assert crossing_fill_price(30.0, 0.4, is_buy=False) == pytest.approx(29.6)
+    # Zero half-spread => the mid, either direction (no cost).
+    assert crossing_fill_price(30.0, 0.0, is_buy=True) == 30.0
+    assert crossing_fill_price(30.0, 0.0, is_buy=False) == 30.0
+
+
+def _cost_option_day(*, side="long", cost=None):
+    """A no-hedge day with EXPLICIT two-sided entry/exit option quotes so the
+    half-spread per fill is known: call 30->50, put 30->5."""
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:05")
+    es = _bars(entry, [5000.0] * 6)
+    # call: entry mid 30 (half 0.5), exit mid 50 (half 0.4)
+    calls = [_q(entry, 30.0, bid=29.5, ask=30.5, bs=10, as_=10),
+             _q(exit_, 50.0, bid=49.6, ask=50.4, bs=10, as_=10)]
+    # put: entry mid 30 (half 0.2), exit mid 5 (half 0.1)
+    puts = [_q(entry, 30.0, bid=29.8, ask=30.2, bs=10, as_=10),
+            _q(exit_, 5.0, bid=4.9, ask=5.1, bs=10, as_=10)]
+    kw = dict(
+        date_int=20250303, side=side, strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=_hspec(enabled=False),
+    )
+    if cost is not None:
+        kw["cost"] = cost
+    return kw
+
+
+def test_cost_off_reproduces_mid_fill_pnl():
+    # Cost OFF (default AND explicit disabled) must reproduce the mid-fill P&L
+    # bit-for-bit — the regression guard for the 113 baseline.
+    base = simulate_day(**_cost_option_day())  # no cost kwarg
+    off = simulate_day(**_cost_option_day(cost=COST_DISABLED))
+    assert off.pnl.option_pnl_pts == base.pnl.option_pnl_pts == pytest.approx(-5.0)
+    assert off.pnl.total_pnl_pts == base.pnl.total_pnl_pts == pytest.approx(-5.0)
+    assert off.pnl.total_pnl_usd == base.pnl.total_pnl_usd == pytest.approx(-250.0)
+    assert off.pnl.cost_pts == 0.0 and off.pnl.n_fallback_fills == 0
+
+
+def test_long_straddle_roundtrip_cost_is_sum_of_four_half_spreads():
+    res = simulate_day(**_cost_option_day(cost=CostModel(enabled=True)))
+    # Gross option P&L unchanged (mid marks): call +20, put -25 => -5.
+    assert res.pnl.option_pnl_pts == pytest.approx(-5.0)
+    # Cost = call_entry 0.5 + call_exit 0.4 + put_entry 0.2 + put_exit 0.1 = 1.2.
+    assert res.pnl.cost_pts == pytest.approx(1.2)
+    assert res.pnl.n_fallback_fills == 0
+    # Net P&L is reduced by the cost; USD nets too.
+    assert res.pnl.total_pnl_pts == pytest.approx(-6.2)
+    assert res.pnl.total_pnl_usd == pytest.approx(-310.0)
+    assert res.pnl.cost_usd == pytest.approx(60.0)
+
+
+def test_short_straddle_cost_is_symmetric_and_reduces_pnl():
+    res = simulate_day(**_cost_option_day(side="short", cost=CostModel(enabled=True)))
+    # Gross short option P&L = +5 (straddle 60 -> 55). Same 1.2 cost still REDUCES.
+    assert res.pnl.option_pnl_pts == pytest.approx(5.0)
+    assert res.pnl.cost_pts == pytest.approx(1.2)
+    assert res.pnl.total_pnl_pts == pytest.approx(3.8)
+    assert res.pnl.n_fallback_fills == 0
+
+
+def test_one_sided_bar_uses_fixed_fallback_and_counts_it():
+    # Quote-less (last-trade-only) option bars: half-spread undefined => the fixed
+    # per-side fallback (0.3 pts) is charged on each of the 4 fills and counted.
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:05")
+    es = _bars(entry, [5000.0] * 6)
+    calls = [IntradayBar(entry, 30.0), IntradayBar(exit_, 50.0)]  # no bid/ask
+    puts = [IntradayBar(entry, 30.0), IntradayBar(exit_, 5.0)]
+    res = simulate_day(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=_hspec(enabled=False),
+        cost=CostModel(enabled=True, fallback_cost_pts=0.3),
+    )
+    assert res.pnl.option_pnl_pts == pytest.approx(-5.0)  # gross unchanged
+    assert res.pnl.n_fallback_fills == 4                  # all 4 fills fell back
+    assert res.pnl.cost_pts == pytest.approx(1.2)         # 4 * 0.3
+    assert res.pnl.total_pnl_pts == pytest.approx(-6.2)
+
+
+def test_fallback_zero_default_costs_nothing_but_still_counts():
+    # fallback default 0.0: quote-less fills add no cost, but coverage is still
+    # measurable (the fills are counted).
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:05")
+    es = _bars(entry, [5000.0] * 6)
+    calls = [IntradayBar(entry, 30.0), IntradayBar(exit_, 50.0)]
+    puts = [IntradayBar(entry, 30.0), IntradayBar(exit_, 5.0)]
+    res = simulate_day(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=_hspec(enabled=False),
+        cost=CostModel(enabled=True),  # fallback_cost_pts=0.0
+    )
+    assert res.pnl.cost_pts == 0.0
+    assert res.pnl.n_fallback_fills == 4
+    assert res.pnl.total_pnl_pts == pytest.approx(-5.0)
+
+
+def _cost_hedge_day():
+    """A hedged day with TWO-SIDED ES quotes (half_es=0.25) and zero-spread
+    option quotes (so option cost is 0), real kernel + moving ES so several
+    rehedges re-trade the ES position."""
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    prices = [5000.0, 5010.0, 5020.0, 5030.0, 5040.0]
+    exit_ = entry + timedelta(minutes=len(prices) - 1)
+    es = [_esq(entry + timedelta(minutes=i), p, bid=p - 0.25, ask=p + 0.25, bs=50, as_=50)
+          for i, p in enumerate(prices)]
+    # Option marks: two-sided but ZERO spread (half 0) at entry and exit bars so
+    # the option leg contributes no cost and no fallback.
+    n = len(prices)
+    calls = [_q(entry + timedelta(minutes=i), 30.0, bid=30.0, ask=30.0, bs=10, as_=10)
+             for i in range(n)]
+    puts = [_q(entry + timedelta(minutes=i), 30.0, bid=30.0, ask=30.0, bs=10, as_=10)
+            for i in range(n)]
+    return dict(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=_hspec(enabled=True, interval_minutes=1.0, delta_band=1e9),
+    )
+
+
+def test_hedge_cost_accrues_per_rehedge_at_es_half_spread():
+    kw = _cost_hedge_day()
+    off = simulate_day(**kw)
+    on = simulate_day(**kw, cost=CostModel(enabled=True))
+    assert len(on.hedge_trades) >= 2  # entry + >=1 interior rehedge
+    # Reconstruct the expected hedge cost: 0.25 (half_es) * sum of |trade size|,
+    # trade size = change in ES position at each executed rehedge (from 0).
+    prev = 0.0
+    sum_abs_dq = 0.0
+    for h in on.hedge_trades:
+        sum_abs_dq += abs(h.hedge_qty - prev)
+        prev = h.hedge_qty
+    assert on.pnl.cost_pts == pytest.approx(0.25 * sum_abs_dq)
+    assert on.pnl.n_fallback_fills == 0        # every ES bar is two-sided
+    # Cost strictly reduces P&L vs the cost-off run; gross legs are unchanged.
+    assert on.pnl.hedge_pnl_pts == pytest.approx(off.pnl.hedge_pnl_pts)
+    assert on.pnl.total_pnl_pts == pytest.approx(
+        off.pnl.total_pnl_pts - on.pnl.cost_pts
+    )
+
+
+def test_aggregate_sums_cost_and_fallback_across_days():
+    d1 = simulate_day(**_cost_option_day(cost=CostModel(enabled=True)))
+    d2 = simulate_day(
+        date_int=20250304, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=_bars(resolve_et_to_utc(date(2025, 3, 4), "10:00"), [5000.0] * 6),
+        call_marks=[IntradayBar(resolve_et_to_utc(date(2025, 3, 4), "10:00"), 30.0),
+                    IntradayBar(resolve_et_to_utc(date(2025, 3, 4), "10:05"), 50.0)],
+        put_marks=[IntradayBar(resolve_et_to_utc(date(2025, 3, 4), "10:00"), 30.0),
+                   IntradayBar(resolve_et_to_utc(date(2025, 3, 4), "10:05"), 5.0)],
+        entry_ts=resolve_et_to_utc(date(2025, 3, 4), "10:00"),
+        exit_ts=resolve_et_to_utc(date(2025, 3, 4), "10:05"),
+        entry_tol=10.0, exit_tol=10.0, hedge=_hspec(enabled=False),
+        cost=CostModel(enabled=True, fallback_cost_pts=0.3),
+    )
+    agg = aggregate_days([d1, d2])
+    # d1: cost 1.2 pts, 0 fallback; d2: cost 1.2 pts (4*0.3), 4 fallback.
+    assert agg.total_cost_usd == pytest.approx((1.2 + 1.2) * 50.0)
+    assert agg.n_fallback_fills == 4

@@ -32,6 +32,8 @@ from tcg.engine.options.pricing import BS76Kernel
 from tcg.engine.options.pricing.protocol import PricingKernel
 from tcg.types.intraday import (
     AggregateResult,
+    COST_DISABLED,
+    CostModel,
     DayPnl,
     DayResult,
     EquityPoint,
@@ -590,6 +592,34 @@ def _triggered_leg_exit(
 
 
 # --------------------------------------------------------------------------- #
+# Transaction cost — adverse half-spread crossing from the bbba bar (P0.2)
+# --------------------------------------------------------------------------- #
+def crossing_fill_price(mid: float, half_spread: float, *, is_buy: bool) -> float:
+    """Fill price when crossing the spread from the mark ``mid``.
+
+    A BUY lifts the offer: ``mid + half_spread``. A SELL hits the bid:
+    ``mid - half_spread``. ``half_spread`` is ``(ask - bid)/2`` (>= 0), so the
+    crossing is ALWAYS adverse and reduces P&L. With ``half_spread == 0`` the
+    fill is the mid (no cost), either direction.
+    """
+    return mid + half_spread if is_buy else mid - half_spread
+
+
+def _fill_half_spread(bar: IntradayBar, cost: CostModel) -> tuple[float, bool]:
+    """Per-unit crossing cost (index points) at *bar* and whether the fixed
+    fallback was used.
+
+    Two-sided bar -> ``((ask - bid)/2, False)``. One-sided / last-trade bar
+    (``bid`` or ``ask`` ``None``, so the half-spread is UNDEFINED) ->
+    ``(fallback_cost_pts, True)`` — never a silent mid fill. The returned cost is
+    floored at 0 so a crossed/locked book can never pay the trader.
+    """
+    if bar.bid is not None and bar.ask is not None:
+        return max(0.0, (bar.ask - bar.bid) / 2.0), False
+    return max(0.0, cost.fallback_cost_pts), True
+
+
+# --------------------------------------------------------------------------- #
 # Per-day simulation (pure)
 # --------------------------------------------------------------------------- #
 def _es_at(es_bars: list[IntradayBar], ts: datetime) -> IntradayBar | None:
@@ -745,6 +775,7 @@ def _run_hedge(
     off_ts: datetime,
     on_price: float,
     off_price: float,
+    on_bar: IntradayBar | None,
     strike: float,
     expiry_utc: datetime,
     side_sign: int,
@@ -755,21 +786,34 @@ def _run_hedge(
     call_fallback: float,
     put_fallback: float,
     kernel: PricingKernel,
-) -> tuple[list[HedgeTrade], float]:
+    cost: CostModel = COST_DISABLED,
+) -> tuple[list[HedgeTrade], float, float, int]:
     """Delta-hedge the COMBINED net delta over the BOTH-ON window
     ``[on_ts, off_ts]`` (single-leg legging windows are UNHEDGED, per DESIGN).
 
     v4 module: the entry hedge at ``on_ts`` establishes the position
     unconditionally (applying ``target``); each interior ES bar CONSIDERS a
     rehedge if ANY trigger fires (OR) and EXECUTES only if ALL conditions pass on
-    that ES bar (AND) — else it DEFERS. Returns ``(hedge_trades, hedge_pnl_pts)``.
+    that ES bar (AND) — else it DEFERS.
+
+    When ``cost`` is enabled, each EXECUTED rehedge pays an adverse half-spread on
+    the ES trade it makes: ``|delta position change| * half_spread`` where the
+    half-spread is read from the EXECUTING ES bar (the real interior bar, or
+    ``on_bar`` — the real ES bar at the entry — for the establishing hedge; the
+    synthetic path anchors are never used for cost). A one-sided ES bar charges
+    the fixed fallback per unit and counts as one fallback trade. Returns
+    ``(hedge_trades, hedge_pnl_pts, hedge_cost_pts, n_fallback_trades)``.
     """
     hedge_trades: list[HedgeTrade] = []
     hedge_pnl_pts = 0.0
+    hedge_cost_pts = 0.0
+    n_fallback = 0
 
     # Interior points carry their real ES bar (with quote fields for conditions);
     # the on/off anchors are synthetic price-only endpoints (entry is
-    # unconditional; off never rehedges — both bypass conditions).
+    # unconditional; off never rehedges — both bypass conditions). ``on_bar`` is
+    # the REAL ES bar at the entry, used only to cost the establishing hedge at a
+    # true spread rather than the quote-less synthetic anchor.
     path: list[IntradayBar] = [IntradayBar(ts=on_ts, price=on_price)]
     for bar in es_bars:
         if on_ts < bar.ts < off_ts:
@@ -798,6 +842,7 @@ def _run_hedge(
             rate,
             iv_entry,
         )
+        prev_qty = hedged_qty
         executed, hedged_qty, last_rehedge_ts, net_delta_last, es_last = _rehedge_step(
             hedge,
             es_bar=bar,
@@ -823,11 +868,19 @@ def _run_hedge(
                     hedge_qty=hedged_qty,
                 )
             )
+            if cost.enabled:
+                # Cost the ES trade at the executing bar's spread. The entry hedge
+                # (synthetic anchor) uses the real ``on_bar`` quote when supplied.
+                fill_bar = on_bar if (i == 0 and on_bar is not None) else bar
+                half, used_fb = _fill_half_spread(fill_bar, cost)
+                hedge_cost_pts += abs(hedged_qty - prev_qty) * half
+                if used_fb:
+                    n_fallback += 1
         if i + 1 < len(path):
             next_price = path[i + 1].price
             hedge_pnl_pts += hedged_qty * (next_price - es_price)
 
-    return hedge_trades, hedge_pnl_pts
+    return hedge_trades, hedge_pnl_pts, hedge_cost_pts, n_fallback
 
 
 def simulate_day(
@@ -854,6 +907,7 @@ def simulate_day(
     rate: float = 0.0,
     tz: str = _ET,
     kernel: PricingKernel | None = None,
+    cost: CostModel | None = None,
 ) -> DayResult:
     """Simulate one trading day with INDEPENDENT per-leg entry/exit (v2).
 
@@ -869,6 +923,7 @@ def simulate_day(
         raise ValueError("exit_ts must be after entry_ts")
     kernel = kernel or BS76Kernel()
     hedge = hedge or _HEDGE_DISABLED
+    cost = cost or COST_DISABLED
     side_sign = 1 if side == "long" else -1
 
     # ES "day open" reference for max_underlying_move (recon: first ES bar of
@@ -1009,8 +1064,10 @@ def simulate_day(
     # --- Delta hedge over the BOTH-ON window ---------------------------- #
     hedge_trades: list[HedgeTrade] = []
     hedge_pnl_pts = 0.0
+    hedge_cost_pts = 0.0
+    n_hedge_fallback = 0
     if hedge.enabled and straddle_off_ts > straddle_on_ts and es_on and es_off:
-        hedge_trades, hedge_pnl_pts = _run_hedge(
+        hedge_trades, hedge_pnl_pts, hedge_cost_pts, n_hedge_fallback = _run_hedge(
             es_bars=es_bars,
             call_marks=call_marks,
             put_marks=put_marks,
@@ -1018,6 +1075,7 @@ def simulate_day(
             off_ts=straddle_off_ts,
             on_price=es_on.price,
             off_price=es_off.price,
+            on_bar=es_on,
             strike=strike,
             expiry_utc=expiry_utc,
             side_sign=side_sign,
@@ -1028,14 +1086,32 @@ def simulate_day(
             call_fallback=c_entry.price,
             put_fallback=p_entry.price,
             kernel=kernel,
+            cost=cost,
         )
 
-    total_pnl_pts = option_pnl_pts + hedge_pnl_pts
+    # --- Transaction cost on the four option fills (adverse half-spread) --- #
+    # Charged per fill regardless of side: a long entry buys / a short entry
+    # sells — either way crossing the spread reduces P&L by the half-spread.
+    option_cost_pts = 0.0
+    n_option_fallback = 0
+    if cost.enabled:
+        for fill_bar in (c_entry, p_entry, c_exit, p_exit):
+            half, used_fb = _fill_half_spread(fill_bar, cost)
+            option_cost_pts += half
+            if used_fb:
+                n_option_fallback += 1
+
+    cost_pts = option_cost_pts + hedge_cost_pts
+    n_fallback_fills = n_option_fallback + n_hedge_fallback
+    total_pnl_pts = option_pnl_pts + hedge_pnl_pts - cost_pts
     pnl = DayPnl(
         option_pnl_pts=option_pnl_pts,
         hedge_pnl_pts=hedge_pnl_pts,
         total_pnl_pts=total_pnl_pts,
         total_pnl_usd=total_pnl_pts * multiplier,
+        cost_pts=cost_pts,
+        cost_usd=cost_pts * multiplier,
+        n_fallback_fills=n_fallback_fills,
     )
     return DayResult(
         date=date_int,
@@ -1075,6 +1151,10 @@ def aggregate_days(results: list[DayResult]) -> AggregateResult:
     mean = float(pnls.mean()) if n_traded else 0.0
     win_rate = float(np.mean(pnls > 0.0)) if n_traded else None
 
+    # Transaction-cost coverage across traded days (0 when the model is off).
+    total_cost_usd = float(sum(r.pnl.cost_usd for r in traded))
+    n_fallback_fills = int(sum(r.pnl.n_fallback_fills for r in traded))
+
     if n_traded > 1:
         std = float(np.std(pnls, ddof=1))
         sharpe = (
@@ -1107,4 +1187,6 @@ def aggregate_days(results: list[DayResult]) -> AggregateResult:
         sharpe=sharpe,
         max_drawdown_usd=max_dd,
         equity_curve=tuple(equity),
+        total_cost_usd=total_cost_usd,
+        n_fallback_fills=n_fallback_fills,
     )

@@ -76,6 +76,10 @@ function buildRunPayload({ form, hedge, entry, exit, customDays }) {
     expiry_mode: form.expiry_mode,
     dte: Number(form.dte) || 0,
     straddle_side: form.straddle_side,
+    cost: {
+      enabled: Boolean(form.cost_enabled),
+      fallback_cost_pts: Number(form.cost_fallback_pts) || 0,
+    },
     hedge: serializeHedge(hedge),
     entry: serializeModule(entry),
     exit: serializeModule(exit),
@@ -780,6 +784,32 @@ export default function IntradayBacktestPage() {
               <option value="short">Short (collect premium)</option>
             </select>
           </label>
+
+          {/* Transaction cost (P0.2): adverse half-spread crossing on the option
+              legs + ES hedge, default OFF (mid fills). When on, a fixed per-side
+              fallback (points) covers fills with no two-sided quote. */}
+          <label className={`${styles.field} ${styles.checkboxRow}`}>
+            <input
+              type="checkbox"
+              aria-label="Enable transaction cost"
+              checked={Boolean(form.cost_enabled)}
+              onChange={(e) => setField('cost_enabled', e.target.checked)}
+            />
+            <span>Half-spread transaction cost</span>
+          </label>
+          {form.cost_enabled && (
+            <label className={styles.field}>
+              <span>One-sided fallback cost (pts/side)</span>
+              <input
+                type="number"
+                min={0}
+                step="0.05"
+                aria-label="One-sided fallback cost points"
+                value={form.cost_fallback_pts}
+                onChange={(e) => setField('cost_fallback_pts', e.target.value)}
+              />
+            </label>
+          )}
 
         </div>
 

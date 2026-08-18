@@ -61,6 +61,11 @@ export const DEFAULT_FORM = Object.freeze({
   expiry_mode: '0DTE',
   dte: 0,
   straddle_side: 'long',
+  // P0.2 transaction-cost model: default OFF (mid fills). ``cost_fallback_pts``
+  // is the fixed per-side cost (index points) charged when a fill bar has no
+  // two-sided quote.
+  cost_enabled: false,
+  cost_fallback_pts: 0,
 });
 
 function isObj(x) {
@@ -156,6 +161,10 @@ function sanitiseForm(raw) {
     dte: Number.isFinite(dteNum) ? dteNum : DEFAULT_FORM.dte,
     straddle_side: (f.straddle_side === 'long' || f.straddle_side === 'short')
       ? f.straddle_side : DEFAULT_FORM.straddle_side,
+    cost_enabled: Boolean(f.cost_enabled),
+    cost_fallback_pts: (Number.isFinite(Number(f.cost_fallback_pts))
+      && Number(f.cost_fallback_pts) >= 0)
+      ? Number(f.cost_fallback_pts) : DEFAULT_FORM.cost_fallback_pts,
   };
 }
 

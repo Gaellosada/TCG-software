@@ -131,3 +131,26 @@ async def test_run_backtest_end_to_end(reader):
     # option P&L reconciles with the two per-leg pnl_pts.
     leg_sum = d0["legs"]["call"]["pnl_pts"] + d0["legs"]["put"]["pnl_pts"]
     assert d0["pnl"]["option_pnl_pts"] == pytest.approx(leg_sum)
+    # P0.2: cost OFF (default) => zero cost, net == gross, and the new coverage
+    # fields are present in the wire shape.
+    assert d0["pnl"]["cost_pts"] == 0.0 and d0["pnl"]["n_fallback_fills"] == 0
+    assert d0["pnl"]["total_pnl_pts"] == pytest.approx(
+        d0["pnl"]["option_pnl_pts"] + d0["pnl"]["hedge_pnl_pts"]
+    )
+    assert result["aggregate"]["total_cost_usd"] == 0.0
+    assert result["aggregate"]["n_fallback_fills"] == 0
+
+    # P0.2: the SAME request with the half-spread cost model ON must charge a
+    # non-negative cost on the REAL bbba spreads and reduce net P&L accordingly.
+    req_cost = req.model_copy(
+        update={"cost": {"enabled": True, "fallback_cost_pts": 0.0}}
+    )
+    result_cost = await run_backtest(reader, req_cost)
+    dc = [d for d in result_cost["days"] if d["status"] == "ok"][0]
+    assert dc["pnl"]["cost_pts"] >= 0.0
+    # gross legs unchanged vs the cost-off run; net is gross minus the cost.
+    assert dc["pnl"]["option_pnl_pts"] == pytest.approx(d0["pnl"]["option_pnl_pts"])
+    assert dc["pnl"]["total_pnl_pts"] == pytest.approx(
+        dc["pnl"]["option_pnl_pts"] + dc["pnl"]["hedge_pnl_pts"] - dc["pnl"]["cost_pts"]
+    )
+    assert result_cost["aggregate"]["total_cost_usd"] >= 0.0

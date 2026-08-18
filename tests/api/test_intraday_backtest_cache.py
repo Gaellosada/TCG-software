@@ -127,6 +127,42 @@ def test_different_body_changes_key() -> None:
     assert ib._intraday_cache_key(a) != ib._intraday_cache_key(b)
 
 
+# --------------------------------------------------------------------------- #
+# P0.2 cost-model field — round-trip, default OFF, cache-key participation
+# --------------------------------------------------------------------------- #
+def test_cost_model_defaults_off_and_round_trips() -> None:
+    req = ib.RunRequest(**_body())
+    assert req.cost.enabled is False
+    assert req.cost.fallback_cost_pts == 0.0
+    # Round-trips through JSON serialization (cache-key canonicalization path).
+    dumped = req.model_dump(mode="json")
+    assert dumped["cost"] == {"enabled": False, "fallback_cost_pts": 0.0}
+    back = ib.RunRequest(**{**_body(), "cost": dumped["cost"]})
+    assert back.cost == req.cost
+
+
+def test_cost_model_participates_in_cache_key() -> None:
+    off = ib.RunRequest(**_body())  # default OFF
+    on = ib.RunRequest(**_body(cost={"enabled": True, "fallback_cost_pts": 0.25}))
+    on2 = ib.RunRequest(**_body(cost={"enabled": True, "fallback_cost_pts": 0.25}))
+    # A changed cost model changes the content key (cost changes the result);
+    # two equal cost bodies hash equal (deterministic canonicalization).
+    assert ib._intraday_cache_key(off) != ib._intraday_cache_key(on)
+    assert ib._intraday_cache_key(on) == ib._intraday_cache_key(on2)
+    # A default-OFF explicit cost hashes identically to the implicit default.
+    explicit_off = ib.RunRequest(
+        **_body(cost={"enabled": False, "fallback_cost_pts": 0.0})
+    )
+    assert ib._intraday_cache_key(off) == ib._intraday_cache_key(explicit_off)
+
+
+def test_cost_model_rejects_negative_fallback() -> None:
+    import pytest as _pytest
+
+    with _pytest.raises(Exception):
+        ib.RunRequest(**_body(cost={"enabled": True, "fallback_cost_pts": -1.0}))
+
+
 def test_intraday_and_portfolio_caches_are_distinct_files() -> None:
     # Different sqlite filename so the two caches never share the LRU domain.
     assert "intraday_results" in ib._default_cache_path()
