@@ -15,12 +15,16 @@ import styles from '../Data/ChartBase.module.css';
  *   - bbba   → one line per best_bid/ask value field
  *   - (fallback) → one line per numeric field present in ``fields``
  *
- * The response carries ``points: { ts:[...], <field>:[...] }`` where ``ts`` are
- * YYYYMMDD integers (e.g. 20240618). They are converted to YYYY-MM-DD strings
- * via ``formatDateInt`` before being used as the Plotly x axis — the shared
- * Chart forces ``xaxis.type:'date'``, so raw ints would be read as epoch-ms and
- * collapse the whole series onto 1970. All rendering goes through the shared
- * Chart component (no forked v2 chart).
+ * The response carries ``points: { ts:[...], <field>:[...] }`` plus a
+ * server-declared ``grain`` that says how to read ``ts``:
+ *   - ``daily``    → YYYYMMDD integers (e.g. 20240618), converted to YYYY-MM-DD
+ *     strings via ``formatDateInt``. The shared Chart forces
+ *     ``xaxis.type:'date'``, so raw ints would be read as epoch-ms and collapse
+ *     the whole series onto 1970.
+ *   - ``intraday`` → ISO 8601 strings (e.g. 2024-06-18T14:31:00Z), used as-is;
+ *     Plotly parses them onto the datetime axis with their time-of-day intact.
+ * A missing ``grain`` falls back to ``daily`` (v1-shaped payloads). All
+ * rendering goes through the shared Chart component (no forked v2 chart).
  */
 const OHLC_FIELDS = ['open', 'high', 'low', 'close'];
 
@@ -43,8 +47,14 @@ function SeriesChartV2({ serieId, serieType, label, downloadFilename }) {
 
     const type = data.type || serieType;
     const fields = Array.isArray(data.fields) ? data.fields : Object.keys(points).filter((k) => k !== 'ts');
-    // ts are YYYYMMDD ints — convert to YYYY-MM-DD strings for the date x axis.
-    const x = ts.map(formatDateInt);
+    // x-axis grain is server-declared. Daily series send YYYYMMDD ints, which
+    // need formatting; intraday series send ISO 8601 strings, which Plotly puts
+    // on a datetime axis as-is. Reformatting those would throw away the
+    // time-of-day — the whole point of a minute series. The strings are not
+    // fixed width (the backend emits microseconds when the ts carries them), so
+    // pass them through rather than parsing or slicing.
+    const grain = data.grain || 'daily';
+    const x = grain === 'intraday' ? ts.slice() : ts.map(formatDateInt);
     const t = [];
 
     // ── bar: OHLC (candlestick/line) + optional volume ──

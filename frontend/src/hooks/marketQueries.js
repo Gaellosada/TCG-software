@@ -52,6 +52,8 @@ import {
 import {
   listObjectsV2,
   getObjectDetailV2,
+  getObjectFacetsV2,
+  getObjectSeriesV2,
   getSeriesV2,
   getContinuousFuturesV2,
   getV2FuturesCycles,
@@ -270,7 +272,11 @@ export function useObjectsV2(options = {}) {
   );
 }
 
-/** GET /data-v2/objects/{id} — object detail (contracts + series). */
+/**
+ * GET /data-v2/objects/{id} — object metadata only (no contracts, no series).
+ * Currently has no component caller; retained as the mirror of a live endpoint.
+ * Series come from `useObjectSeriesV2`, dimensions from `useObjectFacetsV2`.
+ */
 export function useObjectDetailV2(objectId, options = {}) {
   return asAsyncResult(
     useQuery({
@@ -278,6 +284,51 @@ export function useObjectDetailV2(objectId, options = {}) {
       queryFn: ({ signal }) => getObjectDetailV2(objectId, { signal }),
       enabled: objectId != null && (options.enabled ?? true),
       ...options,
+    }),
+  );
+}
+
+/** GET /data-v2/objects/{id}/facets — drives the series filter panel. */
+export function useObjectFacetsV2(objectId, options = {}) {
+  return asAsyncResult(
+    useQuery({
+      queryKey: queryKeys.market.v2.facets(objectId),
+      queryFn: ({ signal }) => getObjectFacetsV2(objectId, { signal }),
+      ...options,
+      // NOTE: computed AFTER the spread, unlike the hooks above. With
+      // ``enabled`` written before ``...options`` a caller's ``enabled: true``
+      // silently REPLACES the whole expression, so the id/filters guard stops
+      // applying (verified: the hook then fetches with a null id). Placing it
+      // last makes ``options.enabled`` narrow the guard and never widen it,
+      // which is what the ``?? true`` was always meant to express.
+      enabled: objectId != null && (options.enabled ?? true),
+    }),
+  );
+}
+
+/**
+ * GET /data-v2/objects/{id}/series — one filtered page.
+ *
+ * ``filters`` null → disabled. That is what gates the first load: nothing is
+ * fetched until the user applies a filter, so an unbounded request can never
+ * be issued. Once a filter exists every change refetches automatically — each
+ * query is bounded by ``limit`` (default 50, backend cap 500).
+ *
+ * ``keepPreviousData`` keeps the current page visible while the next one loads,
+ * matching ``useSeriesV2``'s behaviour.
+ */
+export function useObjectSeriesV2(objectId, filters, options = {}) {
+  return asAsyncResult(
+    useQuery({
+      queryKey: queryKeys.market.v2.seriesList(objectId, filters),
+      queryFn: ({ signal }) => getObjectSeriesV2(objectId, { ...filters, signal }),
+      placeholderData: keepPreviousData,
+      ...options,
+      // Computed AFTER the spread on purpose — see useObjectFacetsV2. Here it
+      // is load-bearing rather than tidy: if a caller's ``enabled: true`` could
+      // replace this expression, it would re-open the unbounded first request
+      // that this whole endpoint exists to prevent.
+      enabled: objectId != null && filters != null && (options.enabled ?? true),
     }),
   );
 }

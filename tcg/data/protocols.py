@@ -228,6 +228,23 @@ class MarketDataServiceV2(Protocol):
 
     async def get_object_detail(self, object_id: int) -> dict: ...
 
+    async def get_object_facets(self, object_id: int) -> dict: ...
+
+    async def list_object_series(
+        self,
+        object_id: int,
+        *,
+        expiration_min: date | None = None,
+        expiration_max: date | None = None,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        option_type: str = "both",
+        serie_type: str = "any",
+        freq: str = "any",
+        skip: int = 0,
+        limit: int = 50,
+    ) -> dict: ...
+
     async def get_series(
         self,
         serie_id: int,

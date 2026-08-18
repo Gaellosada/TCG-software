@@ -10,7 +10,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import numpy as np
 import pytest
@@ -19,7 +19,13 @@ from tcg.data._options_continuous_v2 import (
     _front_close_by_date,
     resolve_options_continuous_v2,
 )
-from tcg.data._sql.instruments_v2 import FACT_DISPATCH, _bounds, _ts_to_int
+from tcg.data._sql.instruments_v2 import (
+    FACT_DISPATCH,
+    _bounds,
+    _ts_to_int,
+    _ts_to_iso,
+    grain_for_freq,
+)
 from tcg.data.service_v2 import DefaultMarketDataServiceV2
 from tcg.types.errors import ValidationError
 from tcg.types.market import (
@@ -75,6 +81,30 @@ def test_ts_to_int_and_bounds():
     assert lower == date(2024, 1, 1)
     # upper is exclusive = end + 1 day so an inclusive end date is captured.
     assert upper == date(2024, 6, 19)
+
+
+def test_grain_for_freq_daily_is_date_grain():
+    assert grain_for_freq("daily") == "daily"
+
+
+def test_grain_for_freq_minute_is_intraday():
+    assert grain_for_freq("1m") == "intraday"
+
+
+def test_grain_for_freq_unknown_defaults_to_intraday():
+    # Deliberate: emitting a full timestamp is lossless, collapsing one to a
+    # date destroys information. A future '5m'/'1h' must not silently collapse.
+    assert grain_for_freq("5m") == "intraday"
+    assert grain_for_freq(None) == "intraday"
+
+
+def test_ts_to_iso_normalises_to_utc_z():
+    ts = datetime(2026, 3, 12, 14, 31, tzinfo=timezone.utc)
+    assert _ts_to_iso(ts) == "2026-03-12T14:31:00Z"
+
+
+def test_ts_to_iso_treats_naive_as_utc():
+    assert _ts_to_iso(datetime(2026, 3, 12, 14, 31)) == "2026-03-12T14:31:00Z"
 
 
 # --------------------------------------------------------------------------- #
@@ -402,13 +432,33 @@ class _FakeReaderService:
     """Fake v2 reader for service-level shaping/error tests."""
 
     def __init__(
-        self, *, obj=None, serie=None, facts=None, contracts=None, series=None
+        self,
+        *,
+        obj=None,
+        serie=None,
+        facts=None,
+        series=None,
+        facets=None,
+        filtered=None,
     ):
         self._obj = obj
         self._serie = serie
-        self._facts = facts or ([], {})
-        self._contracts = contracts or []
+        self._facts = facts or ("daily", [], {})
         self._series = series or []
+        self._facets_data = facets
+        self._filtered = filtered if filtered is not None else ([], 0)
+        self.last_freq = None
+        self.last_facets_object_id = None
+        self.filter_calls = []
+        # Whether the unbounded whole-object series read was actually issued.
+        # ``get_object_detail`` must not issue it — see
+        # ``test_get_object_detail_ships_metadata_only``.
+        #
+        # There is deliberately no ``contracts_calls`` counterpart: the real
+        # reader has no ``list_contracts`` any more, so this fake must not
+        # either. A fake carrying methods the real class lacks lets a test pass
+        # against code that would ``AttributeError`` in production.
+        self.series_calls = []
 
     async def get_object(self, object_id):
         return self._obj
@@ -416,14 +466,23 @@ class _FakeReaderService:
     async def get_serie(self, serie_id):
         return self._serie
 
-    async def list_contracts(self, object_id):
-        return list(self._contracts)
-
     async def list_series(self, object_id):
+        self.series_calls.append(object_id)
         return list(self._series)
 
-    async def read_serie_facts(self, serie_id, serie_type, *, start, end):
+    async def read_serie_facts(
+        self, serie_id, serie_type, *, freq=None, start=None, end=None
+    ):
+        self.last_freq = freq
         return self._facts
+
+    async def fetch_object_facets(self, object_id):
+        self.last_facets_object_id = object_id
+        return self._facets_data
+
+    async def list_series_filtered(self, object_id, **kwargs):
+        self.filter_calls.append((object_id, kwargs))
+        return self._filtered
 
 
 def _make_service(reader):
@@ -435,17 +494,46 @@ def _make_service(reader):
     return svc
 
 
-async def test_get_object_detail_shapes_object_contracts_series():
+_EW2_OBJECT = {
+    "object_id": 12,
+    "kind": "option",
+    "symbol": "OPT_SP_500_EW2",
+    "name": "S&P 500 E-mini EW2 Weekly Options (CME)",
+    "cycle": "weekly",
+    "underlying_object_id": 6,
+}
+
+
+async def test_get_object_detail_ships_metadata_only():
+    """The 38 MB payload is gone: bulk lists moved to the paginated endpoint.
+
+    The fake is deliberately loaded with a serie so this cannot pass vacuously —
+    under the old implementation the ``series`` key is present and populated.
+
+    ``reader.series_calls == []`` is the load-bearing line, and the only one that
+    discriminates the regression that matters. The brief prescribed ``"contracts"
+    not in out`` / ``"series" not in out``; those hold for an empty dict, a
+    malformed response or an error payload, so the exact-equality form replaced
+    them. But note that even the exact-equality form is blind to the real trap: a
+    version that fetches both lists and then discards them returns precisely
+    ``{"object": obj}`` while still paying the whole 36 s. Only the call counter
+    sees that.
+
+    There is no ``contracts_calls`` counterpart because ``list_contracts`` has
+    been deleted from the reader. That protection is now structural rather than
+    tested: the equivalent regression cannot be written at all — it raises
+    ``AttributeError`` instead of silently costing 36 s — which is strictly
+    stronger than an assertion. An assertion here would read as protection while
+    protecting nothing, so it is gone rather than kept for symmetry.
+    """
     reader = _FakeReaderService(
-        obj={"object_id": 7, "kind": "option", "symbol": "OPT_SP_500"},
-        contracts=[{"contract_id": 1, "contract_code": "X"}],
-        series=[{"serie_id": 9, "type": "value"}],
+        obj=_EW2_OBJECT,
+        series=[{"serie_id": 9, "contract_id": 1, "type": "bbba"}],
     )
-    svc = _make_service(reader)
-    detail = await svc.get_object_detail(7)
-    assert detail["object"]["symbol"] == "OPT_SP_500"
-    assert detail["contracts"] == [{"contract_id": 1, "contract_code": "X"}]
-    assert detail["series"] == [{"serie_id": 9, "type": "value"}]
+    out = await _make_service(reader).get_object_detail(12)
+    assert out == {"object": _EW2_OBJECT}
+    assert out["object"]["object_id"] == 12
+    assert reader.series_calls == []
 
 
 async def test_get_object_detail_missing_object_raises_404():
@@ -454,8 +542,154 @@ async def test_get_object_detail_missing_object_raises_404():
         await svc.get_object_detail(999)
 
 
+# --------------------------------------------------------------------------- #
+# Object facets (the filter form's aggregate)
+#
+# The reader is faked out here, so these only pin what the SERVICE adds:
+# existence-checking the object, stamping ``object_id``/``kind``, and splicing
+# the reader's aggregate through untouched. The aggregate's own shaping
+# (isoformat, Decimal -> float, sorted option types, the series total) is pinned
+# against the REAL reader in
+# ``tests/unit/data/sql/test_sql_instruments_v2_facets.py``.
+# --------------------------------------------------------------------------- #
+_EW2_FACETS = {
+    "expirations": [{"expiration": "2026-09-11", "contracts": 146}],
+    "strike_min": 15.0,
+    "strike_max": 10600.0,
+    "option_types": ["call", "put"],
+    "serie_types": [
+        {"type": "bar", "freq": "1m", "series": 96106},
+        {"type": "bbba", "freq": "1m", "series": 96106},
+    ],
+    "totals": {"contracts": 96106, "series": 200672},
+}
+
+
+async def test_get_object_facets_returns_object_kind_and_facets():
+    reader = _FakeReaderService(obj=_EW2_OBJECT, facets=_EW2_FACETS)
+    out = await _make_service(reader).get_object_facets(12)
+    assert out["object_id"] == 12
+    assert out["kind"] == "option"
+    assert out["totals"]["series"] == 200672
+    assert out["option_types"] == ["call", "put"]
+    # Every facet key the frontend filter form reads must survive the splice —
+    # a service that cherry-picked a subset would still pass the asserts above.
+    assert set(out) == {"object_id", "kind", *_EW2_FACETS}
+
+
+async def test_get_object_facets_queries_the_requested_object():
+    """The aggregate must be read for the id the caller asked for.
+
+    Guards a plausible confusion between the route's ``object_id`` and something
+    derived from the object row; here the two differ, so passing the wrong one is
+    visible.
+    """
+    reader = _FakeReaderService(obj={**_EW2_OBJECT, "object_id": 999}, facets={})
+    out = await _make_service(reader).get_object_facets(12)
+    assert reader.last_facets_object_id == 12
+    assert out["object_id"] == 12
+
+
+async def test_get_object_facets_unknown_object_raises_not_found():
+    reader = _FakeReaderService(obj=None, facets=_EW2_FACETS)
+    with pytest.raises(DataNotFoundError):
+        await _make_service(reader).get_object_facets(999)
+
+
+# --------------------------------------------------------------------------- #
+# Filtered, paginated series page (the facets form's other half)
+#
+# Reader faked out, so these pin only what the SERVICE adds: existence-checking
+# the object, forwarding every filter unaltered, and wrapping the reader's
+# ``(rows, total)`` into the PaginatedResult shape. The SQL's own semantics
+# (WHERE / ORDER BY / LIMIT-OFFSET) are pinned in
+# ``tests/unit/data/sql/test_sql_instruments_v2_series_page.py`` (text + shaping)
+# and executed for real in
+# ``tests/integration/data/test_instruments_v2_integration.py``.
+# --------------------------------------------------------------------------- #
+_EW2_PAGE_ROWS = [
+    {
+        "serie_id": 1433194,
+        "contract_id": 77,
+        "type": "bbba",
+        "freq": "1m",
+        "source": "DATABENTO:GLBX.MDP3:bbo-1m",
+        "contract_code": "EW2H6 P6260.20260313",
+        "expiration": "2026-03-13",
+        "strike": 6260.0,
+        "option_type": "put",
+    }
+]
+
+
+async def test_list_object_series_returns_paginated_shape():
+    reader = _FakeReaderService(obj=_EW2_OBJECT, filtered=(_EW2_PAGE_ROWS, 195))
+    svc = _make_service(reader)
+    out = await svc.list_object_series(12, serie_type="bbba", skip=0, limit=50)
+    assert out["total"] == 195
+    assert out["skip"] == 0
+    assert out["limit"] == 50
+    assert len(out["items"]) == 1
+    assert out["items"][0]["contract_code"] == "EW2H6 P6260.20260313"
+    # No key silently added or dropped — Task 5's client destructures all four.
+    assert set(out) == {"items", "total", "skip", "limit"}
+
+
+async def test_list_object_series_forwards_every_filter():
+    reader = _FakeReaderService(obj=_EW2_OBJECT, filtered=(_EW2_PAGE_ROWS, 195))
+    svc = _make_service(reader)
+    out = await svc.list_object_series(
+        12,
+        expiration_min=date(2026, 3, 1),
+        expiration_max=date(2026, 3, 31),
+        strike_min=6000.0,
+        strike_max=7000.0,
+        option_type="put",
+        serie_type="bbba",
+        freq="1m",
+        skip=50,
+        limit=100,
+    )
+    object_id, kwargs = reader.filter_calls[0]
+    assert object_id == 12
+    # Every filter, not a subset: a forwarder that dropped or transposed any one
+    # of these would narrow (or widen) the page silently. The min/max values
+    # differ pairwise so a transposition is visible.
+    assert kwargs == {
+        "expiration_min": date(2026, 3, 1),
+        "expiration_max": date(2026, 3, 31),
+        "strike_min": 6000.0,
+        "strike_max": 7000.0,
+        "option_type": "put",
+        "serie_type": "bbba",
+        "freq": "1m",
+        "skip": 50,
+        "limit": 100,
+    }
+    # skip/limit are ECHOED from the request, not hardcoded to the defaults.
+    # test_list_object_series_returns_paginated_shape passes skip=0/limit=50 —
+    # exactly the defaults — so only a non-default pair discriminates here.
+    assert out["skip"] == 50
+    assert out["limit"] == 100
+
+
+async def test_list_object_series_unknown_object_raises_not_found():
+    reader = _FakeReaderService(obj=None, filtered=(_EW2_PAGE_ROWS, 195))
+    with pytest.raises(DataNotFoundError):
+        await _make_service(reader).list_object_series(999)
+
+
+async def test_list_object_series_empty_result_is_not_an_error():
+    """A narrow filter is a result, not an error."""
+    reader = _FakeReaderService(obj=_EW2_OBJECT, filtered=([], 0))
+    out = await _make_service(reader).list_object_series(12, strike_min=999_999.0)
+    assert out["items"] == []
+    assert out["total"] == 0
+
+
 async def test_get_series_bar_type_dispatches_bar_fields():
     facts = (
+        "daily",
         [20240102, 20240103],
         {
             "open": [1.0, 2.0],
@@ -479,7 +713,7 @@ async def test_get_series_bar_type_dispatches_bar_fields():
 async def test_get_series_value_type_dispatches_value_field():
     reader = _FakeReaderService(
         serie={"serie_id": 8, "type": "value"},
-        facts=([20240102], {"value": [42.0]}),
+        facts=("daily", [20240102], {"value": [42.0]}),
     )
     svc = _make_service(reader)
     out = await svc.get_series(8)
@@ -490,7 +724,7 @@ async def test_get_series_value_type_dispatches_value_field():
 
 async def test_get_series_empty_stream_ok():
     reader = _FakeReaderService(
-        serie={"serie_id": 8, "type": "value"}, facts=([], {"value": []})
+        serie={"serie_id": 8, "type": "value"}, facts=("daily", [], {"value": []})
     )
     svc = _make_service(reader)
     out = await svc.get_series(8)
@@ -501,6 +735,44 @@ async def test_get_series_missing_serie_raises_404():
     svc = _make_service(_FakeReaderService(serie=None))
     with pytest.raises(DataNotFoundError):
         await svc.get_series(404)
+
+
+@pytest.mark.parametrize(
+    ("freq", "grain", "ts"),
+    [
+        ("daily", "daily", [20240102]),
+        ("1m", "intraday", ["2026-06-01T14:31:00Z"]),
+    ],
+)
+async def test_get_series_forwards_freq_and_echoes_grain(freq, grain, ts):
+    """The service's two jobs at this seam: pass ``serie.freq`` DOWN to the reader
+    (that is what selects the grain) and surface the returned ``grain`` UP in the
+    response, whatever it is.
+
+    Both grains are exercised because a service that hardcoded or mis-derived one
+    of them would still satisfy the other, and Task 8 dispatches the chart axis on
+    exactly this string. Echoing is the whole contract here: hardcoding
+    ``"intraday"`` fails the daily case and vice versa.
+
+    It deliberately asserts nothing about how a ts is rendered — with the reader
+    faked out, any such assertion would only re-read this test's own literals.
+    Grain resolution itself is covered against the REAL reader in
+    ``tests/unit/data/sql/test_sql_instruments_v2_grain.py``.
+    """
+    reader = _FakeReaderService(
+        serie={
+            "serie_id": 1,
+            "object_id": 16,
+            "contract_id": 42,
+            "type": "value",
+            "freq": freq,
+            "source": "TEST",
+        },
+        facts=(grain, ts, {"value": [610.5]}),
+    )
+    out = await _make_service(reader).get_series(1)
+    assert reader.last_freq == freq
+    assert out["grain"] == grain
 
 
 async def test_get_continuous_options_rejects_non_option():

@@ -42,16 +42,69 @@ class DefaultMarketDataServiceV2:
         return await self._reader.list_objects()
 
     async def get_object_detail(self, object_id: int) -> dict:
-        """Return ``{object, contracts, series}`` for one object.
+        """Return ``{object}`` for one object — metadata only.
+
+        Contracts and series are NOT included: on the large option roots that
+        was 96 106 contracts + 200 672 series in a single 38 239 859-byte
+        response taking ~36 s (measured twice on object 12, byte-identical).
+        Both now come from :meth:`list_object_series` (filtered + paginated)
+        and :meth:`get_object_facets` (aggregated).
 
         Raises ``DataNotFoundError`` if the object does not exist.
         """
         obj = await self._reader.get_object(object_id)
         if obj is None:
             raise DataNotFoundError(f"Object {object_id} not found in v2")
-        contracts = await self._reader.list_contracts(object_id)
-        series = await self._reader.list_series(object_id)
-        return {"object": obj, "contracts": contracts, "series": series}
+        return {"object": obj}
+
+    async def get_object_facets(self, object_id: int) -> dict:
+        """Return the filterable dimensions of one object (for the filter form).
+
+        Raises ``DataNotFoundError`` if the object does not exist.
+        """
+        obj = await self._reader.get_object(object_id)
+        if obj is None:
+            raise DataNotFoundError(f"Object {object_id} not found in v2")
+        facets = await self._reader.fetch_object_facets(object_id)
+        return {"object_id": object_id, "kind": obj["kind"], **facets}
+
+    async def list_object_series(
+        self,
+        object_id: int,
+        *,
+        expiration_min: date | None = None,
+        expiration_max: date | None = None,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        option_type: str = "both",
+        serie_type: str = "any",
+        freq: str = "any",
+        skip: int = 0,
+        limit: int = 50,
+    ) -> dict:
+        """One filtered, paginated page of an object's series.
+
+        Returns the ``PaginatedResult`` shape (``items``/``total``/``skip``/
+        ``limit``). Raises ``DataNotFoundError`` if the object does not exist —
+        but a filter matching nothing is NOT an error: it returns an empty
+        ``items`` with ``total: 0``.
+        """
+        obj = await self._reader.get_object(object_id)
+        if obj is None:
+            raise DataNotFoundError(f"Object {object_id} not found in v2")
+        items, total = await self._reader.list_series_filtered(
+            object_id,
+            expiration_min=expiration_min,
+            expiration_max=expiration_max,
+            strike_min=strike_min,
+            strike_max=strike_max,
+            option_type=option_type,
+            serie_type=serie_type,
+            freq=freq,
+            skip=skip,
+            limit=limit,
+        )
+        return {"items": items, "total": total, "skip": skip, "limit": limit}
 
     async def get_series(
         self,
@@ -62,22 +115,24 @@ class DefaultMarketDataServiceV2:
     ) -> dict:
         """Read one serie's facts, fact table dispatched by ``serie.type``.
 
-        Returns ``{serie_id, type, fields, points:{ts, <field>...}}``. Raises
-        ``DataNotFoundError`` if the serie does not exist.
+        Returns ``{serie_id, type, grain, fields, points:{ts, <field>...}}``.
+        ``grain`` is ``"daily"`` or ``"intraday"``, resolved from ``serie.freq``.
+        Raises ``DataNotFoundError`` if the serie does not exist.
         """
         serie = await self._reader.get_serie(serie_id)
         if serie is None:
             raise DataNotFoundError(f"Serie {serie_id} not found in v2")
         serie_type = serie["type"]
-        ts_ints, cols = await self._reader.read_serie_facts(
-            serie_id, serie_type, start=start, end=end
+        grain, ts_values, cols = await self._reader.read_serie_facts(
+            serie_id, serie_type, freq=serie.get("freq"), start=start, end=end
         )
         fields = list(FACT_DISPATCH[serie_type][1])
-        points: dict[str, list] = {"ts": ts_ints}
+        points: dict[str, list] = {"ts": ts_values}
         points.update({f: cols[f] for f in fields})
         return {
             "serie_id": serie_id,
             "type": serie_type,
+            "grain": grain,
             "fields": fields,
             "points": points,
         }
