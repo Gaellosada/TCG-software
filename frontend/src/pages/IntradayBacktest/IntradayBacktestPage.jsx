@@ -18,12 +18,18 @@ import HedgeModule, {
   defaultHedgeModule,
   serializeHedge,
   hedgeTriggersAllOff,
+  isBlank,
 } from './HedgeModule';
 import styles from './IntradayBacktestPage.module.css';
 
 // Progress poll cadence (ms). Kept small so the "X / N days" readout tracks the
 // backend job closely without hammering it.
 const POLL_INTERVAL_MS = 400;
+
+// A single transient /progress failure (502/timeout/network blip) must NOT tear
+// down a run whose backend job is still alive: tolerate this many CONSECUTIVE
+// poll errors before giving up (any successful poll resets the count).
+const MAX_CONSECUTIVE_POLL_ERRORS = 4;
 
 // ---------------------------------------------------------------------------
 // Intraday Options Backtesting page (v1).
@@ -207,6 +213,72 @@ function cellTitle(iso, data) {
   return parts.join('  •  ');
 }
 
+// Params the backend requires strictly > 0 (Field(gt=0)); a blank field
+// serializes via Number('')→0 and would 422. Keyed by condition/trigger type.
+const POSITIVE_CONDITION_FIELDS = {
+  max_spread: [['pct', 'Max spread %']],
+  min_quote_size: [['size', 'Min quote size']],
+  min_premium: [['points', 'Min premium']],
+  max_underlying_move: [['pct', 'Max underlying move %']],
+  min_rehedge_delta: [['threshold', 'Min rehedge delta']],
+};
+const POSITIVE_TRIGGER_FIELDS = {
+  underlying_move: [['amount', 'Underlying move amount']],
+  sigma_move: [['n', 'Sigma move n']],
+  net_delta: [['threshold', 'Net delta threshold']],
+  pnl: [['amount', 'P&L amount']],
+};
+
+function isPositive(v) {
+  return !isBlank(v) && Number(v) > 0;
+}
+
+// First blank/≤0 numeric param across the entry, exit and hedge modules (and
+// their custom-day overrides), or null when all are valid. Mirrors the backend
+// Field(gt=0) / ratio in (0,1] constraints so Run is blocked with a specific,
+// param-naming reason instead of a raw 422.
+function firstBadNumericParam(entry, exit, hedge, customDays) {
+  const scanModule = (label, mod) => {
+    if (!mod) return null;
+    for (const c of mod.conditions || []) {
+      for (const [f, fl] of POSITIVE_CONDITION_FIELDS[c.type] || []) {
+        if (!isPositive(c[f])) return `${label} ${fl} must be greater than 0`;
+      }
+    }
+    for (const t of mod.triggers || []) {
+      for (const [f, fl] of POSITIVE_TRIGGER_FIELDS[t.type] || []) {
+        if (!isPositive(t[f])) return `${label} ${fl} must be greater than 0`;
+      }
+    }
+    return null;
+  };
+
+  const core = scanModule('Entry', entry) || scanModule('Exit', exit);
+  if (core) return core;
+
+  for (const c of (hedge && hedge.conditions) || []) {
+    for (const [f, fl] of POSITIVE_CONDITION_FIELDS[c.type] || []) {
+      if (!isPositive(c[f])) return `Hedge ${fl} must be greater than 0`;
+    }
+  }
+  if (hedge && hedge.enabled) {
+    const sig = (hedge.triggers && hedge.triggers.sigma_move) || {};
+    if (sig.enabled && !isPositive(sig.n)) return 'Hedge σ-move n must be greater than 0';
+    const tgt = hedge.target || {};
+    if (tgt.mode === 'ratio' && (!isPositive(tgt.ratio) || Number(tgt.ratio) > 1)) {
+      return 'Hedge ratio must be in (0, 1]';
+    }
+  }
+
+  for (const c of customDays || []) {
+    if (c.exclude) continue;
+    const bad = scanModule(`Custom day ${c.date} entry`, c.entry)
+      || scanModule(`Custom day ${c.date} exit`, c.exit);
+    if (bad) return bad;
+  }
+  return null;
+}
+
 export default function IntradayBacktestPage() {
   const [meta, setMeta] = useState(null);
   const [metaError, setMetaError] = useState(null);
@@ -230,11 +302,17 @@ export default function IntradayBacktestPage() {
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState(null);
   const [progress, setProgress] = useState(null); // { days_done, total_days }
+  // Soft "reconnecting…" state: a transient poll error is being tolerated while
+  // the backend job (presumed alive) is retried. Cleared on the next good poll.
+  const [reconnecting, setReconnecting] = useState(false);
 
   // Poll bookkeeping: the active interval id and an in-flight guard so a slow
   // poll can never overlap the next tick.
   const pollRef = useRef(null);
   const inFlightRef = useRef(false);
+  // Consecutive failed polls; reset to 0 on any success. Only after
+  // MAX_CONSECUTIVE_POLL_ERRORS do we treat the run as failed.
+  const consecutiveErrorsRef = useRef(0);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -337,8 +415,17 @@ export default function IntradayBacktestPage() {
     if (hedge.enabled && hedgeTriggersAllOff(hedge)) {
       return 'Enable at least one hedge trigger (interval, band, or σ-move)';
     }
+    // Mirror the backend HedgeConfig invariant: band_edge target needs a band.
+    if (hedge.enabled && hedge.target && hedge.target.mode === 'band_edge'
+        && isBlank(hedge.triggers && hedge.triggers.delta_band)) {
+      return 'Hedge to band edge requires a Delta band';
+    }
+    // Mirror the backend Field(gt=0) / ratio-in-(0,1] param constraints so a
+    // blank/≤0 numeric param blocks Run with a named reason, not a raw 422.
+    const badParam = firstBadNumericParam(entry, exit, hedge, customDays);
+    if (badParam) return badParam;
     return null;
-  }, [running, form, entry.time, exit.time, hedge]);
+  }, [running, form, entry, exit, hedge, customDays]);
 
   // Async run: start a background job, then poll its progress until done/error.
   // Validation failures (400) surface synchronously from the start call.
@@ -346,6 +433,8 @@ export default function IntradayBacktestPage() {
     setRunError(null);
     setResult(null);
     setProgress({ days_done: 0, total_days: 0 });
+    setReconnecting(false);
+    consecutiveErrorsRef.current = 0;
     setRunning(true);
 
     const fail = (err) => {
@@ -353,6 +442,7 @@ export default function IntradayBacktestPage() {
       setRunError(err && err.message ? err.message : 'Backtest failed.');
       setRunning(false);
       setProgress(null);
+      setReconnecting(false);
     };
 
     let jobId;
@@ -373,6 +463,9 @@ export default function IntradayBacktestPage() {
       inFlightRef.current = true;
       try {
         const p = await getIntradayBacktestProgress(jobId);
+        // A good poll: clear any transient-error state and reset the counter.
+        consecutiveErrorsRef.current = 0;
+        setReconnecting(false);
         setProgress({ days_done: p.days_done, total_days: p.total_days });
         if (p.status === 'done') {
           stopPolling();
@@ -386,7 +479,15 @@ export default function IntradayBacktestPage() {
           setProgress(null);
         }
       } catch (err) {
-        fail(err);
+        // Tolerate transient failures: the backend job keeps running, so a
+        // single blip must not discard it. Only give up after N consecutive
+        // misses; meanwhile show a soft "reconnecting…" state and keep polling.
+        consecutiveErrorsRef.current += 1;
+        if (consecutiveErrorsRef.current >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          fail(err);
+        } else {
+          setReconnecting(true);
+        }
       } finally {
         inFlightRef.current = false;
       }
@@ -650,6 +751,11 @@ export default function IntradayBacktestPage() {
           <div className={styles.progressBox} data-testid="run-progress" role="status">
             <span className={styles.progressText}>
               Running… {progress.days_done} / {progress.total_days} days
+              {reconnecting && (
+                <span className={styles.statLabel} data-testid="run-reconnecting">
+                  {' '}· reconnecting…
+                </span>
+              )}
             </span>
             <div
               className={styles.progressTrack}

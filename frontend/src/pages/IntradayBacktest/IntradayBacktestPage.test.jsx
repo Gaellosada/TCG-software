@@ -817,4 +817,106 @@ describe('IntradayBacktestPage', () => {
     expect(screen.getByTestId('hedge-add-condition').disabled).toBe(true);
     expect(screen.getByTestId('hedge-target').disabled).toBe(true);
   });
+
+  // -------------------------------------------------------------------------
+  // 98fe-01 — band_edge target with the delta band OFF must be caught client-
+  // side (mirrors the backend HedgeConfig invariant) instead of a raw 422.
+  // -------------------------------------------------------------------------
+  it('blocks Run when hedge target is band_edge but the delta band is blank', async () => {
+    await renderReady();
+    fireEvent.change(screen.getByTestId('hedge-target'), { target: { value: 'band_edge' } });
+    // Clear the delta band (interval stays 15 so it is not an "all triggers off").
+    fireEvent.change(screen.getByLabelText('Delta band'), { target: { value: '' } });
+
+    const runBtn = screen.getByRole('button', { name: /run backtest/i });
+    expect(runBtn.disabled).toBe(true);
+    expect(runBtn.getAttribute('title')).toMatch(/band edge requires a delta band/i);
+
+    // Restoring a band clears the block.
+    fireEvent.change(screen.getByLabelText('Delta band'), { target: { value: '0.1' } });
+    expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // 98fe-03 — numeric params the backend requires strictly > 0 (and ratio in
+  // (0,1]) must block Run with a specific, param-naming reason.
+  // -------------------------------------------------------------------------
+  it('blocks Run on a blank or non-positive numeric param, naming the offender', async () => {
+    await renderReady();
+    // Add an entry min_premium then clear it → blank ≤0.
+    fireEvent.change(screen.getByTestId('entry-add-condition'), { target: { value: 'min_premium' } });
+    fireEvent.change(screen.getByLabelText('entry min_premium points'), { target: { value: '' } });
+    let runBtn = screen.getByRole('button', { name: /run backtest/i });
+    expect(runBtn.disabled).toBe(true);
+    expect(runBtn.getAttribute('title')).toMatch(/min premium/i);
+
+    // An explicit 0 is also rejected (backend requires > 0).
+    fireEvent.change(screen.getByLabelText('entry min_premium points'), { target: { value: '0' } });
+    expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(true);
+
+    // A positive value re-enables Run.
+    fireEvent.change(screen.getByLabelText('entry min_premium points'), { target: { value: '0.5' } });
+    expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
+  });
+
+  it('blocks Run when the hedge ratio is outside (0, 1]', async () => {
+    await renderReady();
+    fireEvent.change(screen.getByTestId('hedge-target'), { target: { value: 'ratio' } });
+    fireEvent.change(screen.getByTestId('hedge-ratio'), { target: { value: '1.5' } });
+    const runBtn = screen.getByRole('button', { name: /run backtest/i });
+    expect(runBtn.disabled).toBe(true);
+    expect(runBtn.getAttribute('title')).toMatch(/ratio must be in \(0, 1\]/i);
+    // 0 is also rejected; a valid ratio re-enables.
+    fireEvent.change(screen.getByTestId('hedge-ratio'), { target: { value: '0' } });
+    expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(true);
+    fireEvent.change(screen.getByTestId('hedge-ratio'), { target: { value: '0.5' } });
+    expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // 98fe-02 — a single transient progress-poll error must NOT abort a run whose
+  // backend job is still alive; only N consecutive misses give up.
+  // -------------------------------------------------------------------------
+  it('tolerates a single transient progress-poll error without aborting the run', async () => {
+    let polls = 0;
+    const fn = vi.fn((url) => {
+      const u = String(url);
+      if (u.endsWith('/intraday-backtest/meta')) return jsonResp(META);
+      if (u.endsWith('/intraday-backtest/run-async')) return jsonResp({ job_id: 'job-blip' });
+      if (u.includes('/intraday-backtest/progress/')) {
+        polls += 1;
+        if (polls === 1) return Promise.reject(new TypeError('transient network blip'));
+        return jsonResp({ status: 'done', days_done: 3, total_days: 3, result: RUN_RESPONSE, error: null });
+      }
+      return Promise.reject(new Error(`unexpected fetch: ${u}`));
+    });
+    vi.stubGlobal('fetch', fn);
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+
+    // The run survives the blip and completes on the next good poll.
+    await waitFor(() => expect(screen.getByTestId('days-grid')).toBeTruthy(), { timeout: 4000 });
+    expect(screen.getAllByTestId('day-cell').length).toBe(3);
+    expect(screen.queryByRole('alert')).toBeNull(); // never surfaced as failed
+  });
+
+  it('aborts the run only after N consecutive progress-poll errors', async () => {
+    const fn = vi.fn((url) => {
+      const u = String(url);
+      if (u.endsWith('/intraday-backtest/meta')) return jsonResp(META);
+      if (u.endsWith('/intraday-backtest/run-async')) return jsonResp({ job_id: 'job-down' });
+      if (u.includes('/intraday-backtest/progress/')) {
+        return Promise.reject(new TypeError('backend down'));
+      }
+      return Promise.reject(new Error(`unexpected fetch: ${u}`));
+    });
+    vi.stubGlobal('fetch', fn);
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+
+    // After the 4th consecutive miss the run fails with an error alert.
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy(), { timeout: 6000 });
+    expect(screen.queryByTestId('days-grid')).toBeNull();
+    expect(screen.getByRole('button', { name: /run backtest/i }).disabled).toBe(false);
+  });
 });
