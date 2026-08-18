@@ -31,7 +31,6 @@ from tcg.engine.intraday_backtest import (
 )
 from tcg.engine.options.pricing import BS76Kernel
 from tcg.types.intraday import (
-    ES_FUTURE_TICK_SIZE,
     ES_OPTION_TICK_SIZE,
     es_option_tick,
     HedgeSpec,
@@ -290,7 +289,6 @@ def test_independent_legs_fill_at_different_timestamps():
     exit_ = resolve_et_to_utc(day, "10:20")
     es = _bars(entry, [5000.0] * 25)
     # CALL prints a two-sided quote at t; PUT's first two-sided quote at t+3.
-    tight = dict(bid=None)  # unused
     calls = [_q(entry, 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
              _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50)]
     puts = [_q(entry, 30.0),  # last-trade-only -> fails max_spread
