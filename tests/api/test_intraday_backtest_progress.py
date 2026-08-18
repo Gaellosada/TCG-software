@@ -69,7 +69,9 @@ def fake_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     recorded: dict[str, Any] = {"seq": None, "called": 0}
 
-    async def _fake(reader: Any, req: Any, progress_cb: Any = None) -> dict[str, Any]:
+    async def _fake(
+        reader: Any, req: Any, progress_cb: Any = None, daily_reader: Any = None
+    ) -> dict[str, Any]:
         recorded["called"] += 1
         total = ib.count_trading_days(req)  # same denominator the endpoint pins
         seq: list[int] = []

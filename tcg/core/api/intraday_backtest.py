@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tcg.core.cache import DiskResultCache, canonical_hash
+from tcg.data._sql.daily_series import DailySeriesReader
 from tcg.data._sql.intraday_v2 import IntradayV2Reader
 from tcg.engine.intraday_backtest import (
     aggregate_days,
@@ -37,6 +38,7 @@ from tcg.engine.intraday_backtest import (
     simulate_day,
     snap_nearest,
 )
+from tcg.engine.regime import realized_vol_by_date
 from tcg.types.intraday import (
     ES_MULTIPLIER,
     WINDOW_MAX_DATE,
@@ -326,6 +328,38 @@ def _to_engine_cost(c: CostModelConfig) -> CostModel:
     return CostModel(enabled=c.enabled, fallback_cost_pts=c.fallback_cost_pts)
 
 
+# --------------------------------------------------------------------------- #
+# Vol-regime SIGNAL provider (F2.1). Default-OFF. When ``emit_signals`` is on the
+# per-day response carries realized-vol H20/H30/H100 (COMPUTED in the pure engine
+# from IND_SP_500 daily closes via the P0.3 daily-series seam) plus VVIX
+# passthrough. This is ONLY the signals — NO side-decision, NO thresholds (that is
+# the separate F2.2 task). Generic so VIX1D (F2.3) is a pure drop-in: add one
+# symbol field + one fetch; the per-date assembly loop never changes.
+# --------------------------------------------------------------------------- #
+class RegimeConfig(BaseModel):
+    """Regime-signal emission knob. ``emit_signals=False`` (default) => no extra
+    dwh fetch and NO ``regime`` key on any day (response byte-identical to the
+    pre-feature baseline). ``rv_windows`` are the realized-vol lookbacks (trading
+    days, each >= 2); ``sp500_symbol`` is the daily close series RV is computed
+    from and ``vvix_symbol`` the passthrough VVIX series — both dwh
+    ``dim_instrument`` symbols read through the P0.3 generic seam."""
+
+    emit_signals: bool = False
+    rv_windows: list[int] = Field(default_factory=lambda: [20, 30, 100])
+    sp500_symbol: str = "IND_SP_500"
+    vvix_symbol: str = "IND_VVIX"
+
+    @field_validator("rv_windows")
+    @classmethod
+    def _valid_windows(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("rv_windows must be non-empty")
+        for w in v:
+            if w < 2:
+                raise ValueError(f"each rv_window must be >= 2 (got {w})")
+        return v
+
+
 class EntryExitModule(BaseModel):
     """A full entry- or exit-rule module: time + its own snap tolerance + an
     AND-ed list of conditions (the 4 discriminated types).
@@ -395,6 +429,11 @@ class RunRequest(BaseModel):
     # Transaction-cost model (P0.2). Default OFF => mid fills (prior behavior).
     # A real field (NOT stripped from the cache key): cost changes the result.
     cost: CostModelConfig = Field(default_factory=CostModelConfig)
+    # Vol-regime signal provider (F2.1). Default OFF => no extra fetch, no
+    # ``regime`` field on any day (baseline preserved). When ON it participates
+    # in the cache key; when OFF it is stripped so an off-request hashes
+    # identically regardless of its (inert) sub-config (see _intraday_cache_key).
+    regime: RegimeConfig = Field(default_factory=RegimeConfig)
     # Unified per-date control (exclude + full per-day override).
     custom_days: list[CustomDay] = Field(default_factory=list)
     # Durable-cache opt-out (Settings parity with the portfolio path). It selects
@@ -590,6 +629,82 @@ def _pick_expiry(all_exps: list[date], day: date, mode: str, dte: int) -> date |
 
 
 # --------------------------------------------------------------------------- #
+# Vol-regime signal assembly (F2.1). PURE join here (unit-testable, no dwh); the
+# async fetch that feeds it is ``_fetch_regime_signals`` below. Boundary: RV math
+# is in the pure ENGINE (``tcg.engine.regime``); the FETCH via the P0.3 data
+# reader + this join live in CORE — engine never imports data.
+# --------------------------------------------------------------------------- #
+def build_regime_signal_map(
+    day_dates: list[int],
+    rv_by_date: dict[int, dict[str, float | None]],
+    passthrough_by_name: dict[str, dict[int, float]],
+    windows: list[int],
+) -> dict[int, dict[str, float | None]]:
+    """Per-day regime-signal map: ``{date_int: {"h20":.., "vvix":.., ...}}``.
+
+    A pure join of the computed RV signals (``rv_by_date`` keyed ``h<w>``) with
+    each passthrough series (VVIX now, VIX1D later) onto the backtest ``day_dates``
+    — a date missing from a series carries ``None`` for that signal (never a
+    fabricated value). Adding VIX1D is a NEW entry in ``passthrough_by_name`` with
+    NO change to this loop (the structural drop-in the F2.1 brief requires).
+    """
+    rv_keys = [f"h{w}" for w in windows]
+    out: dict[int, dict[str, float | None]] = {}
+    for d in day_dates:
+        di = int(d)
+        rv = rv_by_date.get(di) or {}
+        sig: dict[str, float | None] = {k: rv.get(k) for k in rv_keys}
+        for name, series in passthrough_by_name.items():
+            sig[name] = series.get(di)
+        out[di] = sig
+    return out
+
+
+def _null_regime_signals(
+    day_dates: list[int], windows: list[int], passthrough_names: tuple[str, ...]
+) -> dict[int, dict[str, float | None]]:
+    """An all-``None`` regime map (same keys as a real one) for the degradation
+    path — emit_signals is ON but the daily series could not be read. Keeps the
+    response shape valid rather than crashing a good options backtest."""
+    rv_keys = [f"h{w}" for w in windows]
+    keys = rv_keys + list(passthrough_names)
+    return {int(d): {k: None for k in keys} for d in day_dates}
+
+
+async def _fetch_regime_signals(
+    daily_reader: DailySeriesReader,
+    req: RunRequest,
+    day_dates: list[int],
+) -> dict[int, dict[str, float | None]]:
+    """Fetch daily series through the P0.3 seam, compute RV, join with VVIX.
+
+    Fetches IND_SP_500 with a lookback long enough to warm up the largest RV
+    window (so RV is available from the FIRST backtest day), computes RV in the
+    pure engine, and joins VVIX passthrough. VIX1D DROP-IN (F2.3) is exactly:
+    add a ``vix1d_symbol`` to :class:`RegimeConfig`, one more ``read_series``
+    call, and one ``passthrough["vix1d"] = ...`` line — the assembly is unchanged.
+    """
+    reg = req.regime
+    windows = reg.rv_windows
+    lo = min(day_dates)
+    hi = max(day_dates)
+    start = date.fromisoformat(_int_to_iso(lo))
+    end = date.fromisoformat(_int_to_iso(hi))
+    # Calendar lookback covering the largest window in trading days plus slack
+    # for weekends/holidays, so the first backtest day already has full history.
+    lookback = timedelta(days=max(windows) * 2 + 30)
+
+    sp = await daily_reader.read_series(reg.sp500_symbol, start=start - lookback, end=end)
+    rv_by_date = realized_vol_by_date(sp.dates, sp.values, windows)
+
+    vvix = await daily_reader.read_series(reg.vvix_symbol, start=start, end=end)
+    passthrough: dict[str, dict[int, float]] = {
+        "vvix": dict(zip(vvix.dates, vvix.values))
+    }
+    return build_regime_signal_map(day_dates, rv_by_date, passthrough, windows)
+
+
+# --------------------------------------------------------------------------- #
 # Serialization (frozen dataclass -> wire dict)
 # --------------------------------------------------------------------------- #
 def _iso(dt: datetime) -> str:
@@ -607,7 +722,10 @@ def _serialize_leg(leg: Any) -> dict[str, Any]:
     }
 
 
-def _serialize_day(r: DayResult) -> dict[str, Any]:
+def _serialize_day(
+    r: DayResult,
+    regime_by_date: dict[int, dict[str, float | None]] | None = None,
+) -> dict[str, Any]:
     out: dict[str, Any] = {
         "date": _int_to_iso(r.date),
         "status": r.status,
@@ -671,6 +789,11 @@ def _serialize_day(r: DayResult) -> dict[str, Any]:
             "cost_usd": r.pnl.cost_usd,
             "n_fallback_fills": r.pnl.n_fallback_fills,
         }
+    # F2.1: attach per-day regime signals ONLY when emission is on. When off,
+    # ``regime_by_date`` is None and NO key is added -> the day dict is
+    # byte-identical to the pre-feature baseline (regression guard).
+    if regime_by_date is not None:
+        out["regime"] = regime_by_date.get(r.date)
     return out
 
 
@@ -817,6 +940,7 @@ async def run_backtest(
     reader: IntradayV2Reader,
     req: RunRequest,
     progress_cb: Callable[[int, int], None] | None = None,
+    daily_reader: DailySeriesReader | None = None,
 ) -> dict[str, Any]:
     """Full run: resolve days, fetch marks per day, simulate, aggregate.
 
@@ -825,6 +949,11 @@ async def run_backtest(
     1 to ``total_days``). Excluded days are appended to the results but never
     tick progress: ``total_days`` is the exceptions-removed weekday count, the
     authoritative denominator shared with :func:`count_trading_days`.
+
+    ``daily_reader`` (the P0.3 generic daily-series seam) is used ONLY when
+    ``req.regime.emit_signals`` is on, to fetch IND_SP_500 / VVIX and attach
+    per-day regime signals. When emission is off it is never touched — no extra
+    dwh fetch — and the response is byte-identical to the pre-feature baseline.
     """
     plans = resolve_day_plans(req)
     start = plans[0].day
@@ -864,6 +993,30 @@ async def run_backtest(
         if progress_cb is not None:
             progress_cb(days_done, total_days)
 
+    # F2.1 regime signals: computed ONLY when emission is on. Off => no fetch,
+    # regime_by_date stays None, and no ``regime`` key is added downstream.
+    regime_by_date: dict[int, dict[str, float | None]] | None = None
+    if req.regime.emit_signals:
+        day_dates = [r.date for r in results]
+        if daily_reader is not None and day_dates:
+            try:
+                regime_by_date = await _fetch_regime_signals(
+                    daily_reader, req, day_dates
+                )
+            except Exception:  # noqa: BLE001 — a signal-fetch glitch must not fail a good backtest
+                logger.exception(
+                    "regime signal fetch failed; emitting null regime signals"
+                )
+                regime_by_date = _null_regime_signals(
+                    day_dates, req.regime.rv_windows, ("vvix",)
+                )
+        else:
+            # emit on but no reader wired / no days: emit null-valued signals so
+            # the response shape is still complete (never a silent omission).
+            regime_by_date = _null_regime_signals(
+                day_dates, req.regime.rv_windows, ("vvix",)
+            )
+
     aggregate = aggregate_days(results)
     return {
         "params_echo": req.model_dump(),
@@ -871,7 +1024,7 @@ async def run_backtest(
             "min_date": WINDOW_MIN_DATE.isoformat(),
             "max_date": WINDOW_MAX_DATE.isoformat(),
         },
-        "days": [_serialize_day(r) for r in results],
+        "days": [_serialize_day(r, regime_by_date) for r in results],
         "aggregate": _serialize_aggregate(aggregate),
         "warnings": _warnings(results),
     }
@@ -885,7 +1038,7 @@ async def run_backtest(
 # tick-size handling, expiry/DTE resolution) namespaces the cache: bumping this
 # guarantees stale entries can never be served with ``from_cache: true``. BUMP on
 # ANY change to the intraday backtest compute output AND on each release.
-INTRADAY_COMPUTE_VERSION = "0.3.0"
+INTRADAY_COMPUTE_VERSION = "0.4.0"
 
 # A DISTINCT sqlite filename from the portfolio cache so the two do not share the
 # 200-entry LRU domain (they would otherwise evict each other's entries).
@@ -960,8 +1113,18 @@ def _intraday_cache_key(req: RunRequest) -> str:
     equal, toggling ``use_cache`` never changes identity, and a version bump
     invalidates every stale entry. Used by BOTH the run path and the read-only
     cache endpoints so their keys always coincide.
+
+    The ``regime`` block AUTO-participates in the key when emission is ON (its
+    windows/symbols then change the result), but is STRIPPED when
+    ``emit_signals`` is off: an off-regime has ZERO effect on the output, so a
+    default-off request must hash identically regardless of its (inert)
+    ``rv_windows`` / symbol sub-config — and identically to a pre-feature body.
     """
     payload = _strip_use_cache(req.model_dump(mode="json"))
+    if isinstance(payload, dict):
+        reg = payload.get("regime")
+        if isinstance(reg, dict) and not reg.get("emit_signals", False):
+            payload.pop("regime", None)
     return canonical_hash({"_cv": INTRADAY_COMPUTE_VERSION, "body": payload})
 
 
@@ -1010,6 +1173,7 @@ async def _run_job(
     reader: IntradayV2Reader,
     req: RunRequest,
     cache_key: str | None = None,
+    daily_reader: DailySeriesReader | None = None,
 ) -> None:
     """Background task body: run the backtest, streaming progress into ``job``.
 
@@ -1024,7 +1188,9 @@ async def _run_job(
         job.total_days = total
 
     try:
-        result = await run_backtest(reader, req, progress_cb=_cb)
+        result = await run_backtest(
+            reader, req, progress_cb=_cb, daily_reader=daily_reader
+        )
         job.result = result
         job.days_done = job.total_days
         if cache_key is not None:
@@ -1073,7 +1239,8 @@ async def get_meta(request: Request) -> dict[str, Any]:
 @router.post("/run")
 async def post_run(request: Request, req: RunRequest) -> dict[str, Any]:
     reader = IntradayV2Reader(request.app.state.dwh_pool)
-    return await run_backtest(reader, req)
+    daily_reader = DailySeriesReader(request.app.state.dwh_pool)
+    return await run_backtest(reader, req, daily_reader=daily_reader)
 
 
 @router.post("/run-async")
@@ -1118,11 +1285,14 @@ async def post_run_async(request: Request, req: RunRequest) -> dict[str, str]:
             return {"job_id": job_id}
 
     reader = IntradayV2Reader(request.app.state.dwh_pool)
+    daily_reader = DailySeriesReader(request.app.state.dwh_pool)
     job = _Job(status="running", days_done=0, total_days=total_days)
     _prune_jobs()
     job_id = _new_job_id()
     _JOBS[job_id] = job
-    job.task = asyncio.create_task(_run_job(job, reader, req, cache_key))
+    job.task = asyncio.create_task(
+        _run_job(job, reader, req, cache_key, daily_reader=daily_reader)
+    )
     return {"job_id": job_id}
 
 
