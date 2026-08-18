@@ -6,7 +6,17 @@ import {
   getIntradayBacktestMeta,
   startIntradayBacktest,
   getIntradayBacktestProgress,
+  getIntradayBacktestCachedResult,
 } from '../../api/intradayBacktest';
+import {
+  DEFAULT_FORM,
+  serializeConfig,
+  deepEqual,
+  listSims,
+  saveSim,
+  loadSim,
+  deleteSim,
+} from './storage';
 import EntryExitModule, {
   defaultEntryModule,
   defaultExitModule,
@@ -51,14 +61,47 @@ const MAX_CONSECUTIVE_POLL_ERRORS = 4;
 // The flat entry_time / exit_time / snap_tolerance_minutes are gone (DESIGN.md
 // v2), and the flat hedge fields are gone (DESIGN.md v4). Entry, Exit and Hedge
 // are now full "rule modules" held in their own state; the form keeps only the
-// scalar params below.
-const DEFAULT_FORM = {
-  start_date: '',
-  end_date: '',
-  expiry_mode: '0DTE',
-  dte: 0,
-  straddle_side: 'long',
-};
+// scalar params below. DEFAULT_FORM now lives in ``storage.js`` (single source
+// of truth for both the seed and the load-time sanitiser).
+
+// Build the PINNED v2 request payload (DESIGN.md) from a config snapshot. Pure
+// (module scope) so it can be called with EITHER the live page state (via
+// buildPayload) OR a just-loaded saved config, without waiting for a setState
+// to flush. Entry/exit are objects { time, snap_tolerance_minutes, conditions };
+// custom_days carry full per-day overrides.
+function buildRunPayload({ form, hedge, entry, exit, customDays }) {
+  return {
+    start_date: form.start_date,
+    end_date: form.end_date,
+    expiry_mode: form.expiry_mode,
+    dte: Number(form.dte) || 0,
+    straddle_side: form.straddle_side,
+    hedge: serializeHedge(hedge),
+    entry: serializeModule(entry),
+    exit: serializeModule(exit),
+    custom_days: customDays.map((c) => {
+      if (c.exclude) return { date: c.date, exclude: true };
+      const out = { date: c.date };
+      const e = serializePartialModule(c.entry);
+      const x = serializePartialModule(c.exit);
+      if (e) out.entry = e;
+      if (x) out.exit = x;
+      return out;
+    }),
+  };
+}
+
+// Short, safe display of the ISO savedAt timestamp for a saved-sim row.
+function formatSavedAt(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleString();
+  } catch {
+    return '';
+  }
+}
 
 function clampToWindow(value, win) {
   if (!value || !win) return value;
@@ -306,6 +349,15 @@ export default function IntradayBacktestPage() {
   // the backend job (presumed alive) is retried. Cleared on the next good poll.
   const [reconnecting, setReconnecting] = useState(false);
 
+  // Saved simulations (config only) — persisted in localStorage via ./storage.
+  const [savedSims, setSavedSims] = useState(() => listSims());
+  const [simName, setSimName] = useState('');
+  // Canonical config snapshot captured when a sim is loaded or saved. null =
+  // nothing loaded → no dirty marker. The unsaved-changes indicator compares the
+  // live config to this by VALUE (order-independent), never by identity.
+  const [loadedSnapshot, setLoadedSnapshot] = useState(null);
+  const [activeSimId, setActiveSimId] = useState(null);
+
   // Poll bookkeeping: the active interval id and an in-flight guard so a slow
   // poll can never overlap the next tick.
   const pollRef = useRef(null);
@@ -379,29 +431,89 @@ export default function IntradayBacktestPage() {
     setCustomDays((prev) => prev.filter((c) => c.date !== date));
   }, []);
 
-  // Build the PINNED v2 request payload (DESIGN.md). Entry/exit are objects
-  // { time, snap_tolerance_minutes, conditions:[{type,...}] }; custom_days carry
-  // full per-day overrides (excluded rows: date+exclude; override rows: date +
-  // any partial entry/exit the user set).
-  const buildPayload = useCallback(() => ({
-    start_date: form.start_date,
-    end_date: form.end_date,
-    expiry_mode: form.expiry_mode,
-    dte: Number(form.dte) || 0,
-    straddle_side: form.straddle_side,
-    hedge: serializeHedge(hedge),
-    entry: serializeModule(entry),
-    exit: serializeModule(exit),
-    custom_days: customDays.map((c) => {
-      if (c.exclude) return { date: c.date, exclude: true };
-      const out = { date: c.date };
-      const e = serializePartialModule(c.entry);
-      const x = serializePartialModule(c.exit);
-      if (e) out.entry = e;
-      if (x) out.exit = x;
-      return out;
-    }),
-  }), [form, hedge, entry, exit, customDays]);
+  // Build the PINNED v2 request payload (DESIGN.md) from the live page state.
+  const buildPayload = useCallback(
+    () => buildRunPayload({ form, hedge, entry, exit, customDays }),
+    [form, hedge, entry, exit, customDays],
+  );
+
+  // Canonical snapshot of the LIVE config — the single value the save/dirty
+  // machinery compares against. Recomputed only when an input changes.
+  const currentConfig = useMemo(
+    () => serializeConfig({ form, entry, exit, hedge, customDays }),
+    [form, entry, exit, hedge, customDays],
+  );
+
+  // Dirty when a sim is loaded/saved AND the live config differs from the
+  // captured snapshot (by value — robust to key ordering / object identity).
+  const isDirty = loadedSnapshot !== null && !deepEqual(currentConfig, loadedSnapshot);
+
+  // Save (IMMEDIATE, confirmed localStorage write — never a debounce). On an
+  // existing name, confirm-overwrite. After the write, re-read the list so the
+  // UI reflects exactly what is persisted, and reset the dirty snapshot.
+  const onSaveSim = useCallback(() => {
+    const name = simName.trim();
+    if (!name) return;
+    const dup = savedSims.find((s) => s.name === name);
+    if (dup
+        && typeof window !== 'undefined'
+        && typeof window.confirm === 'function'
+        && !window.confirm(`Overwrite the saved simulation "${name}"?`)) {
+      return;
+    }
+    const saved = saveSim(name, { form, entry, exit, hedge, customDays });
+    setSavedSims(listSims());
+    setActiveSimId(saved.id);
+    setLoadedSnapshot(serializeConfig({ form, entry, exit, hedge, customDays }));
+  }, [simName, savedSims, form, entry, exit, hedge, customDays]);
+
+  // Load: restore all inputs EXACTLY from the saved config, then read-only
+  // cache-get the results for the SAME payload. HIT → render instantly; MISS or
+  // any error → leave results empty (the user can Run).
+  const onLoadSim = useCallback(async (id) => {
+    const sim = loadSim(id);
+    if (!sim) return;
+    const cfg = sim.config; // already sanitised by storage
+    // Cancel any in-flight run before swapping the inputs out from under it.
+    stopPolling();
+    setRunning(false);
+    setProgress(null);
+    setReconnecting(false);
+    setRunError(null);
+    setResult(null);
+
+    setForm(cfg.form);
+    setEntry(cfg.entry);
+    setExit(cfg.exit);
+    setHedge(cfg.hedge);
+    setCustomDays(cfg.customDays);
+    setSimName(sim.name);
+    setActiveSimId(sim.id);
+    setLoadedSnapshot(serializeConfig(cfg));
+
+    // Cache-get uses the payload built from the LOADED config directly (state
+    // has not flushed yet). A HIT carries the full result shape (aggregate +
+    // days); anything else (cached:false / missing) is a miss.
+    try {
+      const payload = buildRunPayload(cfg);
+      const resp = await getIntradayBacktestCachedResult(payload);
+      const hit = resp && resp.cached !== false
+        && resp.aggregate && Array.isArray(resp.days);
+      setResult(hit ? resp : null);
+    } catch {
+      // Cache-get is best-effort — a failure just leaves results empty.
+      setResult(null);
+    }
+  }, [stopPolling]);
+
+  const onDeleteSim = useCallback((id) => {
+    deleteSim(id);
+    setSavedSims(listSims());
+    setActiveSimId((cur) => {
+      if (cur === id) setLoadedSnapshot(null);
+      return cur === id ? null : cur;
+    });
+  }, []);
 
   const runDisabledReason = useMemo(() => {
     if (running) return 'Running…';
@@ -531,6 +643,78 @@ export default function IntradayBacktestPage() {
           All times are Eastern (ET).
         </p>
       </header>
+
+      <Card title="Saved simulations" bodyClassName={styles.cardBody}>
+        <div className={styles.saveRow}>
+          <input
+            type="text"
+            className={styles.simNameInput}
+            aria-label="Simulation name"
+            data-testid="sim-name-input"
+            placeholder="Name this simulation"
+            value={simName}
+            onChange={(e) => setSimName(e.target.value)}
+          />
+          <button
+            type="button"
+            className={styles.smallBtn}
+            data-testid="save-sim"
+            disabled={!simName.trim()}
+            onClick={onSaveSim}
+          >
+            Save
+          </button>
+          {loadedSnapshot !== null && (
+            <span
+              className={isDirty ? styles.dirtyIndicator : styles.cleanIndicator}
+              data-testid="dirty-indicator"
+              data-dirty={isDirty ? 'true' : 'false'}
+              title={isDirty
+                ? 'Unsaved changes since the loaded simulation'
+                : 'No changes since the loaded simulation'}
+            >
+              {isDirty ? '● Unsaved changes' : '✓ Saved'}
+            </span>
+          )}
+        </div>
+        {savedSims.length === 0 ? (
+          <p className={styles.conditionsEmpty} data-testid="saved-sims-empty">
+            No saved simulations yet — configure the parameters below, name it, and Save.
+          </p>
+        ) : (
+          <ul className={styles.savedSimsList} data-testid="saved-sims-list">
+            {savedSims.map((s) => (
+              <li
+                key={s.id}
+                className={`${styles.savedSimRow} ${s.id === activeSimId ? styles.savedSimActive : ''}`}
+                data-testid="saved-sim-row"
+                data-active={s.id === activeSimId ? 'true' : 'false'}
+              >
+                <span className={styles.savedSimName}>{s.name}</span>
+                {s.savedAt && (
+                  <span className={styles.savedSimStamp}>{formatSavedAt(s.savedAt)}</span>
+                )}
+                <button
+                  type="button"
+                  className={styles.smallBtn}
+                  aria-label={`Load ${s.name}`}
+                  onClick={() => onLoadSim(s.id)}
+                >
+                  Load
+                </button>
+                <button
+                  type="button"
+                  className={styles.chipRemove}
+                  aria-label={`Delete ${s.name}`}
+                  onClick={() => onDeleteSim(s.id)}
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
 
       <Card title="Parameters" bodyClassName={styles.cardBody}>
         <div className={styles.controlsGrid}>

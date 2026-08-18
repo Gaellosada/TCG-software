@@ -47,3 +47,24 @@ def _isolate_portfolio_result_cache(tmp_path, monkeypatch):
         DiskResultCache(tmp_path / "portfolio_results.sqlite"),
     )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_intraday_result_cache(tmp_path, monkeypatch):
+    """Point the on-disk intraday-backtest result cache at a per-test tmp file.
+
+    Same isolation guarantee as ``_isolate_portfolio_result_cache`` but for the
+    DISTINCT intraday cache file: the real user cache is NEVER touched by the
+    suite and no cached result leaks across tests. Keeps the async progress tests
+    deterministic (each gets a FRESH, EMPTY cache, so a default ``use_cache=True``
+    run misses and follows the normal compute-and-poll path).
+    """
+    from tcg.core.api import intraday_backtest
+    from tcg.core.cache import DiskResultCache
+
+    monkeypatch.setattr(
+        intraday_backtest,
+        "_intraday_result_cache",
+        DiskResultCache(tmp_path / "intraday_results.sqlite"),
+    )
+    yield
