@@ -491,6 +491,18 @@ def find_trigger_fire(
     sees the hedge MTM realized to each bar. ``sigma_bar`` shrinks intraday
     (``ES_entry * IV_entry * sqrt(T_bar)``). At a single bar the triggers are
     tested in list order; the first to fire wins.
+
+    GROSS vs NET (intentional): the ``pnl`` trigger below fires on
+    ``option_mtm_pts`` (mid-mark MTM) + ``cum_hedge_pnl`` — GROSS of
+    transaction cost, matching :func:`simulate_day`'s exit-trigger mirror
+    design so trigger timing (WHICH bar fires) is identical whether cost is
+    on or off. The REALIZED ``DayPnl.total_pnl_pts`` that a caller actually
+    books is NET (cost subtracted). This decoupling is deliberate and small
+    by default (bounded by the half-spread), but widens when a caller sets a
+    large ``fallback_cost_pts``: the trigger can fire at a gross level the net
+    P&L would not have reached on its own. Do not "fix" by netting cost into
+    this loop — that would make trigger timing cost-dependent and break the
+    cost-OFF regression guard's bar-for-bar equivalence.
     """
     if not triggers or es_entry <= 0.0:
         return None
@@ -526,6 +538,8 @@ def find_trigger_fire(
         # on_ts). cum_hedge_pnl excludes the forward segment, so it is exactly
         # the hedge MTM "so far" at this bar.
         if i > 0:
+            # GROSS mid-mark MTM (no cost) — see the docstring note above on
+            # why the pnl trigger intentionally fires on gross, not net.
             option_mtm_pts = side_sign * ((call_mark + put_mark) - p_entry)
             pnl_pts = option_mtm_pts + cum_hedge_pnl
             sigma_bar = (
@@ -601,6 +615,18 @@ def crossing_fill_price(mid: float, half_spread: float, *, is_buy: bool) -> floa
     ``mid - half_spread``. ``half_spread`` is ``(ask - bid)/2`` (>= 0), so the
     crossing is ALWAYS adverse and reduces P&L. With ``half_spread == 0`` the
     fill is the mid (no cost), either direction.
+
+    ILLUSTRATIVE reference, not wired into the compute path. The real per-fill
+    cost accumulation is ``half_spread`` added directly (never reconstructed
+    from a fill price): see ``_fill_half_spread`` + the four-fill cost loop in
+    :func:`simulate_day` (option legs) and the per-rehedge cost line in
+    :func:`_run_hedge` (ES hedge). That is deliberate, not an oversight:
+    ``abs((mid + half_spread) - mid) == half_spread`` is NOT float-exact in
+    general (empirically false for ~97% of representative float inputs), so
+    deriving cost from ``crossing_fill_price(...) - mid`` would risk silently
+    perturbing the bit-exact cost-ON / cost-OFF regression values. This helper
+    documents and unit-tests the fill-price convention on its own; keep it and
+    the summation path in sync by hand if either changes.
     """
     return mid + half_spread if is_buy else mid - half_spread
 

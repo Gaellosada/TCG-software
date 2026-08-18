@@ -23,6 +23,15 @@ Warehouse gotchas honoured:
     value drops the point rather than poisoning a downstream NumPy array.
   * Symbol-only filter on the durable ``dim_instrument.symbol`` (the Mongo
     ``_id``), so one call resolves any daily instrument without a collection.
+
+NON-OPTION CAVEAT: the symbol-only filter is safe because ``dim_instrument``
+carries a PARTIAL unique index, ``uq_dim_symbol_nonoption`` — ``symbol`` is
+unique only across NON-OPTION rows. This reader is for daily index / indicator
+/ spot series (``IND_*``, underlying closes), where that uniqueness holds and
+one symbol resolves exactly one ``instrument_id``. It must NOT be pointed at
+option symbols (monthly/weekly contracts can share a symbol across strikes /
+expiries / cycles), or the join can silently interleave rows from more than
+one instrument. Options have their own dedicated readers.
 """
 
 from __future__ import annotations
@@ -93,7 +102,9 @@ class DailySeriesReader:
         symbol : str
             The dwh ``dim_instrument.symbol`` (durable id), e.g. ``IND_VVIX``,
             ``IND_SP_500``, or ``IND_VIX1D`` once it lands. Filtered exactly (no
-            prefix parsing, no collection needed).
+            prefix parsing, no collection needed). NON-OPTION ONLY: ``symbol``
+            is unique per ``uq_dim_symbol_nonoption`` for non-option
+            instruments only — do not pass an option symbol here.
         start, end : date | None
             Inclusive date bounds. ``None`` opens that side to the dwh partition
             span. ``trade_date BETWEEN start AND end`` — a constant range the
