@@ -79,6 +79,14 @@ def _ts_to_iso(ts: datetime) -> str:
 #: ``1m`` exist in v2 today (761 039 and 244 324 series respectively).
 _DAILY_FREQS = frozenset({"daily"})
 
+#: The same set as a stable, ordered list for binding into ``freq = ANY(%s)``
+#: predicates (psycopg adapts a Python list to a Postgres array; a tuple would
+#: become a record). Sorting only makes the bound value deterministic. This is
+#: the single source the roller-feed queries share with :func:`grain_for_freq`,
+#: so a future daily synonym added to ``_DAILY_FREQS`` cannot silently diverge
+#: "what counts as daily" between the two.
+_DAILY_FREQ_LIST = sorted(_DAILY_FREQS)
+
 
 def grain_for_freq(freq: str | None) -> str:
     """Return ``"daily"`` (ts → YYYYMMDD int) or ``"intraday"`` (ts → ISO 8601).
@@ -464,7 +472,8 @@ class SqlInstrumentReaderV2:
         One :class:`ContractPriceData` per contract, sorted ascending by
         expiration (the ``ContinuousSeriesBuilder`` requires that ordering). Only
         ``bar``-type series are joined (a future's price lives in ``fact_bar``),
-        pinned to ``freq = 'daily'`` for the same reason as
+        pinned to the daily frequencies (``freq = ANY(_DAILY_FREQS)``) for the
+        same reason as
         :meth:`fetch_future_front_closes`: FUT_SP_500 also carries ``bar:1m``
         series, and ``PriceSeries.dates`` are ``YYYYMMDD`` ints, so minute rows
         would both blow the statement timeout (this is called with an unbounded
@@ -489,11 +498,11 @@ class SqlInstrumentReaderV2:
                               ON f.serie_id = s.serie_id
                             WHERE s.object_id = %s
                               AND s.type = 'bar'
-                              AND s.freq = 'daily'
+                              AND s.freq = ANY(%s)
                               AND c.expiration IS NOT NULL
                               AND f.ts >= %s AND f.ts < %s
                             ORDER BY c.expiration, c.contract_code, f.ts""",
-                        (object_id, lower, upper),
+                        (object_id, _DAILY_FREQ_LIST, lower, upper),
                     )
                     rows = await cur.fetchall()
         except Exception as exc:  # noqa: BLE001
@@ -662,7 +671,8 @@ class SqlInstrumentReaderV2:
 
         Feeds the options-continuous *moneyness* spot: the resolver picks, per
         date, the front future (nearest expiration >= that date) close. Pinned to
-        ``freq = 'daily'`` — FUT_SP_500 also carries ``bar:1m`` series, and
+        the daily frequencies (``freq = ANY(_DAILY_FREQS)``) — FUT_SP_500 also
+        carries ``bar:1m`` series, and
         without the pin this scans minute bars (timeout) and makes the per-date
         front close the 00:00 bar rather than the daily close. Only
         ``close > 0`` rows are returned (false-zero guard). ``ts``
@@ -681,12 +691,12 @@ class SqlInstrumentReaderV2:
                               ON f.serie_id = s.serie_id
                             WHERE s.object_id = %s
                               AND s.type = 'bar'
-                              AND s.freq = 'daily'
+                              AND s.freq = ANY(%s)
                               AND c.expiration IS NOT NULL
                               AND f.close > 0
                               AND f.ts >= %s AND f.ts < %s
                             ORDER BY f.ts, c.expiration""",
-                        (object_id, lower, upper),
+                        (object_id, _DAILY_FREQ_LIST, lower, upper),
                     )
                     rows = await cur.fetchall()
         except Exception as exc:  # noqa: BLE001
