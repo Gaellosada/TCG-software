@@ -257,6 +257,7 @@ def test_cache_key_off_equals_pre_feature_regime_absent_body() -> None:
     req = ib.RunRequest(**_body())  # regime default off
     payload = ib._strip_use_cache(req.model_dump(mode="json"))
     payload.pop("regime", None)  # pre-feature body has no regime key
+    payload.pop("allowlist", None)  # ...nor an allowlist key (F3.2, default off)
     pre_feature = canonical_hash(
         {"_cv": ib.INTRADAY_COMPUTE_VERSION, "body": payload}
     )

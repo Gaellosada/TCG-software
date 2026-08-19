@@ -4,12 +4,14 @@ import Chart from '../../components/Chart';
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/format';
 import {
   getIntradayBacktestMeta,
+  getIntradayEventCalendar,
   startIntradayBacktest,
   getIntradayBacktestProgress,
   getIntradayBacktestCachedResult,
 } from '../../api/intradayBacktest';
 import {
   DEFAULT_FORM,
+  ALLOWLIST_EVENT_TYPES,
   serializeConfig,
   deepEqual,
   listSims,
@@ -111,6 +113,16 @@ function buildRunPayload({ form, hedge, entry, exit, customDays }) {
             action: 'flat',
           }]
         : [],
+    };
+  }
+  // F3.2: only attach the allowlist block when the date-allowlist mode is on, so
+  // a default payload stays BYTE-IDENTICAL to the pre-feature body (the backend
+  // defaults allowlist to off; an absent block hashes identically).
+  if (form.allowlist_enabled) {
+    payload.allowlist = {
+      mode: 'allowlist',
+      dates: [...(form.allowlist_dates || [])],
+      event_types: [...(form.allowlist_event_types || [])],
     };
   }
   return payload;
@@ -411,6 +423,11 @@ export default function IntradayBacktestPage() {
   // Shape: { date, exclude, expanded, entry:{partial}, exit:{partial} }.
   const [customDays, setCustomDays] = useState([]);
   const [customDayDraft, setCustomDayDraft] = useState('');
+  // F3.1 curated event calendar (FOMC/NFP/CPI) for the date-allowlist control
+  // (and the A3 view). Fetched once on mount; the toggle + event-type checkboxes
+  // work even if this fails to load (the 3 types are a fixed enum).
+  const [eventCalendar, setEventCalendar] = useState(null);
+  const [allowlistDateDraft, setAllowlistDateDraft] = useState('');
 
   const [result, setResult] = useState(null);
   const [running, setRunning] = useState(false);
@@ -464,6 +481,17 @@ export default function IntradayBacktestPage() {
         if (controller.signal.aborted) return;
         setMetaError(err && err.message ? err.message : 'Failed to load backtest metadata.');
       });
+    return () => controller.abort();
+  }, []);
+
+  // Load the curated event calendar (F3.1) once on mount for the allowlist
+  // control. Best-effort: a failure leaves eventCalendar null (the control still
+  // works — the 3 event types are a fixed enum; only per-type counts are hidden).
+  useEffect(() => {
+    const controller = new AbortController();
+    getIntradayEventCalendar({ signal: controller.signal })
+      .then((c) => setEventCalendar(c))
+      .catch(() => { /* non-fatal — control degrades to no counts */ });
     return () => controller.abort();
   }, []);
 
@@ -975,6 +1003,111 @@ export default function IntradayBacktestPage() {
               showTriggers
             />
           </div>
+        </div>
+
+        {/* F3.2 date-allowlist entry mode — trade ONLY the resolved days (the
+            DISTINCT OPPOSITE of Custom days' exclude). Resolved = the union of
+            the selected event types (curated FOMC/NFP/CPI) and any explicit
+            dates. Default OFF => every eligible day trades. custom_days exclude
+            still removes from the allowlisted set; regime side still decides the
+            side on the days that remain. */}
+        <div className={styles.field} style={{ marginTop: '1rem' }}>
+          <span className={styles.fieldLabel}>Date allowlist (trade only these days)</span>
+          <label className={`${styles.field} ${styles.checkboxRow}`}>
+            <input
+              type="checkbox"
+              aria-label="Enable date allowlist"
+              data-testid="allowlist-enable"
+              checked={Boolean(form.allowlist_enabled)}
+              onChange={(e) => setField('allowlist_enabled', e.target.checked)}
+            />
+            <span>Restrict trading to an allowlist of days</span>
+          </label>
+          {form.allowlist_enabled && (
+            <div data-testid="allowlist-controls">
+              <span className={styles.fieldLabel}>Event days</span>
+              <div className={styles.inlineRow}>
+                {ALLOWLIST_EVENT_TYPES.map((t) => {
+                  const count = eventCalendar && eventCalendar.events
+                    && eventCalendar.events[t] ? eventCalendar.events[t].length : null;
+                  return (
+                    <label key={t} className={styles.checkboxRow}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Allowlist event type ${t}`}
+                        data-testid={`allowlist-type-${t}`}
+                        checked={form.allowlist_event_types.includes(t)}
+                        onChange={() => setForm((f) => {
+                          const has = f.allowlist_event_types.includes(t);
+                          return {
+                            ...f,
+                            allowlist_event_types: has
+                              ? f.allowlist_event_types.filter((x) => x !== t)
+                              : [...f.allowlist_event_types, t],
+                          };
+                        })}
+                      />
+                      <span>{t}{count != null ? ` (${count})` : ''}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <span className={styles.fieldLabel}>Explicit dates</span>
+              <div className={styles.inlineRow}>
+                <input
+                  type="date"
+                  aria-label="Allowlist date"
+                  data-testid="allowlist-date-input"
+                  min={win ? win.min_date : undefined}
+                  max={win ? win.max_date : undefined}
+                  value={allowlistDateDraft}
+                  onChange={(e) => setAllowlistDateDraft(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className={styles.smallBtn}
+                  data-testid="allowlist-add-date"
+                  onClick={() => {
+                    const d = allowlistDateDraft;
+                    if (!d) return;
+                    setForm((f) => (f.allowlist_dates.includes(d)
+                      ? f
+                      : { ...f, allowlist_dates: [...f.allowlist_dates, d].sort() }));
+                    setAllowlistDateDraft('');
+                  }}
+                >
+                  Add date
+                </button>
+              </div>
+              {form.allowlist_dates.length > 0 && (
+                <ul className={styles.customDaysList} data-testid="allowlist-dates-list">
+                  {form.allowlist_dates.map((d) => (
+                    <li key={d} className={styles.customDayRow}>
+                      <span className={styles.customDayDate}>{d}</span>
+                      <button
+                        type="button"
+                        className={styles.chipRemove}
+                        aria-label={`Remove allowlist date ${d}`}
+                        onClick={() => setForm((f) => ({
+                          ...f,
+                          allowlist_dates: f.allowlist_dates.filter((x) => x !== d),
+                        }))}
+                      >
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {eventCalendar && eventCalendar.tentative_dates
+                && eventCalendar.tentative_dates.length > 0 && (
+                <p className={styles.conditionsEmpty} data-testid="allowlist-tentative-note">
+                  Some curated event dates are provisional (tentative):{' '}
+                  {eventCalendar.tentative_dates.join(', ')}.
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Custom days — one unified control. Add a date, then per row either

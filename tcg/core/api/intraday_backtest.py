@@ -44,6 +44,13 @@ from tcg.engine.regime import (
     realized_vol_by_date,
     resolve_regime_decisions,
 )
+from tcg.types.event_calendar import (
+    EVENT_TYPES,
+    all_event_dates,
+    event_dates_for_types,
+    event_days,
+    tentative_days,
+)
 from tcg.types.intraday import (
     ES_MULTIPLIER,
     WINDOW_MAX_DATE,
@@ -465,6 +472,63 @@ class EntryExitOverride(BaseModel):
         return v
 
 
+class AllowlistConfig(BaseModel):
+    """Date-allowlist entry mode (F3.2). The DISTINCT OPPOSITE of ``custom_days``
+    (which EXCLUDES days): the allowlist restricts trading to ONLY a chosen set of
+    dates. DEFAULT ``mode='off'`` => every eligible weekday trades exactly as
+    before (baseline byte-identical; the block is stripped from the cache key).
+
+    When ``mode='allowlist'`` only the RESOLVED dates get a ``DayPlan`` — all other
+    weekdays are skipped and NOT emitted. The resolved set is the UNION of the
+    explicit ``dates`` and the curated dates of the selected ``event_types``
+    (F3.1: FOMC / NFP / CPI). Either half may be empty; if BOTH are empty while
+    active the resolved set is empty and no day trades (surfaced as a 400 "no
+    trading days" like any empty range).
+
+    Composition (documented order):
+    1. The allowlist FILTERS which days are eligible (only resolved dates).
+    2. ``custom_days`` exclude still removes from the allowlisted set (an excluded
+       day that IS in the allowlist is emitted as ``status='excluded'``; a day NOT
+       in the allowlist is simply never emitted — exclude on it is a harmless
+       no-op).
+    3. F2.2 regime side then decides the SIDE (long/short/flat) on the days that
+       remain. The allowlist filters WHICH days; regime decides the side.
+
+    The allowlist is a pure DATE FILTER (no look-ahead — it never inspects any
+    market signal). Explicit ``dates`` outside the run range or on a weekend/
+    holiday simply never match a plan (lenient filter semantics — distinct from
+    ``custom_days``, which ASSERTS its dates are in-range weekdays).
+    """
+
+    mode: Literal["off", "allowlist"] = "off"
+    dates: list[str] = Field(default_factory=list)
+    event_types: list[Literal["FOMC", "NFP", "CPI"]] = Field(default_factory=list)
+
+    @field_validator("dates")
+    @classmethod
+    def _valid_dates(cls, v: list[str]) -> list[str]:
+        for s in v:
+            try:
+                date.fromisoformat(s)
+            except ValueError as exc:
+                raise ValueError(f"allowlist.dates: invalid date {s!r}") from exc
+        return v
+
+    @property
+    def is_active(self) -> bool:
+        """True when the allowlist restricts the traded day set (mode on)."""
+        return self.mode == "allowlist"
+
+    def resolved_dates(self) -> frozenset[date]:
+        """The concrete allowed date set: explicit ``dates`` ∪ event-type dates.
+
+        Pure (no dwh). Event-type dates come from the curated F3.1 calendar via
+        the ``tcg.types.event_calendar`` seam. Called only when ``is_active``.
+        """
+        explicit = {date.fromisoformat(s) for s in self.dates}
+        return frozenset(explicit | event_dates_for_types(self.event_types))
+
+
 class CustomDay(BaseModel):
     """A single per-date control (unified exclude + full per-day override).
 
@@ -502,6 +566,10 @@ class RunRequest(BaseModel):
     # in the cache key; when OFF it is stripped so an off-request hashes
     # identically regardless of its (inert) sub-config (see _intraday_cache_key).
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
+    # Date-allowlist entry mode (F3.2). Default OFF => every eligible day trades
+    # (baseline byte-identical; stripped from the cache key when inert). When on,
+    # only the resolved dates (explicit ∪ event-type dates) get a DayPlan.
+    allowlist: AllowlistConfig = Field(default_factory=AllowlistConfig)
     # Unified per-date control (exclude + full per-day override).
     custom_days: list[CustomDay] = Field(default_factory=list)
     # Durable-cache opt-out (Settings parity with the portfolio path). It selects
@@ -604,11 +672,17 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
         if cd.entry is not None or cd.exit is not None:
             overrides[cd_date] = (cd.entry, cd.exit)
 
+    # F3.2 date-allowlist: when active, restrict the eligible day set to the
+    # resolved dates (explicit ∪ event-type dates). A pure DATE FILTER applied
+    # BEFORE exclude/override; a non-allowlisted weekday gets no DayPlan at all.
+    allow_active = req.allowlist.is_active
+    allowed_dates = req.allowlist.resolved_dates() if allow_active else frozenset()
+
     plans: list[DayPlan] = []
     d = start
     one = timedelta(days=1)
     while d <= end:
-        if d.weekday() < 5:  # Mon-Fri
+        if d.weekday() < 5 and (not allow_active or d in allowed_dates):  # Mon-Fri
             e_ov, x_ov = overrides.get(d, (None, None))
             e_time, e_tol, e_conds, _e_trigs = _resolve_module(req.entry, e_ov)
             x_time, x_tol, x_conds, x_trigs = _resolve_module(req.exit, x_ov)
@@ -635,7 +709,12 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
             )
         d += one
     if not plans:
-        raise HTTPException(status_code=400, detail="no trading days in range")
+        detail = (
+            "no trading days in range after applying the date allowlist"
+            if allow_active
+            else "no trading days in range"
+        )
+        raise HTTPException(status_code=400, detail=detail)
     return plans
 
 
@@ -1131,6 +1210,25 @@ async def _process_day(
     )
 
 
+def _echo_params(req: RunRequest) -> dict[str, Any]:
+    """The ``params_echo`` for the response, with INERT default-off feature blocks
+    dropped so an off-run echo is not cluttered by pydantic default-fill.
+
+    A ``regime`` block that is off (``is_active`` false) and an ``allowlist`` block
+    that is off are omitted — so a run with neither feature echoes exactly like a
+    pre-feature request (no ``regime`` / ``allowlist`` keys), while an ACTIVE block
+    is echoed in full. This mirrors the cache-key strip (same ``is_active``
+    predicate). The load-bearing ``days`` / ``pnl`` / ``aggregate`` output is
+    unaffected (its byte-identity is a separate, already-held invariant).
+    """
+    echo = req.model_dump()
+    if not req.regime.is_active:
+        echo.pop("regime", None)
+    if not req.allowlist.is_active:
+        echo.pop("allowlist", None)
+    return echo
+
+
 async def run_backtest(
     reader: IntradayV2Reader,
     req: RunRequest,
@@ -1257,7 +1355,7 @@ async def run_backtest(
 
     aggregate = aggregate_days(results)
     return {
-        "params_echo": req.model_dump(),
+        "params_echo": _echo_params(req),
         "window": {
             "min_date": WINDOW_MIN_DATE.isoformat(),
             "max_date": WINDOW_MAX_DATE.isoformat(),
@@ -1278,7 +1376,7 @@ async def run_backtest(
 # tick-size handling, expiry/DTE resolution) namespaces the cache: bumping this
 # guarantees stale entries can never be served with ``from_cache: true``. BUMP on
 # ANY change to the intraday backtest compute output AND on each release.
-INTRADAY_COMPUTE_VERSION = "0.5.0"
+INTRADAY_COMPUTE_VERSION = "0.6.0"
 
 # A DISTINCT sqlite filename from the portfolio cache so the two do not share the
 # 200-entry LRU domain (they would otherwise evict each other's entries).
@@ -1360,17 +1458,16 @@ def _intraday_cache_key(req: RunRequest) -> str:
     STRIPPED only when BOTH halves are off: an inert regime has ZERO effect on the
     output, so a default-off request must hash identically regardless of its
     (inert) ``rv_windows`` / thresholds / gates sub-config — and identically to a
-    pre-feature (regime-absent) body.
+    pre-feature (regime-absent) body. The ``allowlist`` block (F3.2) is stripped
+    the same way when ``mode='off'`` (inert => zero effect on which days trade).
+    ``is_active`` is the single predicate the strip and the fetch/branch agree on.
     """
     payload = _strip_use_cache(req.model_dump(mode="json"))
     if isinstance(payload, dict):
-        reg = payload.get("regime")
-        if isinstance(reg, dict):
-            active = reg.get("emit_signals", False) or (
-                reg.get("side_mode", "off") != "off"
-            )
-            if not active:
-                payload.pop("regime", None)
+        if not req.regime.is_active:
+            payload.pop("regime", None)
+        if not req.allowlist.is_active:
+            payload.pop("allowlist", None)
     return canonical_hash({"_cv": INTRADAY_COMPUTE_VERSION, "body": payload})
 
 
@@ -1479,6 +1576,29 @@ async def get_meta(request: Request) -> dict[str, Any]:
         "hedge_instrument": "FUT_SP_500",
         "multiplier": ES_MULTIPLIER,
         "timezone": _TZ,
+    }
+
+
+@router.get("/event-calendar")
+async def get_event_calendar() -> dict[str, Any]:
+    """Curated macro event dates (F3.1) for the allowlist / event-day controls.
+
+    STATIC — no dwh. Returns the dates grouped by type (each with its
+    ``tentative`` flag), a flat de-duplicated union, the list of valid event
+    types, and the tentative dates surfaced separately. Consumed by the frontend
+    allowlist control and the A3 event-attribution view (next task).
+    """
+    return {
+        "event_types": list(EVENT_TYPES),
+        "events": {
+            t: [
+                {"date": e.date.isoformat(), "tentative": e.tentative}
+                for e in event_days(t)
+            ]
+            for t in EVENT_TYPES
+        },
+        "all_dates": [d.isoformat() for d in all_event_dates()],
+        "tentative_dates": [e.date.isoformat() for e in tentative_days()],
     }
 
 

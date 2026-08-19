@@ -250,6 +250,7 @@ def test_cache_key_off_equals_regime_absent_even_with_decision_fields() -> None:
     absent = ib.RunRequest(**_body())
     payload = ib._strip_use_cache(absent.model_dump(mode="json"))
     payload.pop("regime", None)
+    payload.pop("allowlist", None)  # F3.2 default-off block also stripped
     pre_feature = canonical_hash(
         {"_cv": ib.INTRADAY_COMPUTE_VERSION, "body": payload}
     )

@@ -76,7 +76,17 @@ export const DEFAULT_FORM = Object.freeze({
   regime_extremely_low_h20: 0,
   regime_vvix_gate_enabled: false,
   regime_vvix_gate_level: 0,
+  // F3.2 date-allowlist entry mode: default OFF (every eligible day trades,
+  // byte-identical baseline). When on, ONLY the resolved dates trade — the union
+  // of the selected event types (FOMC/NFP/CPI, curated F3.1) and any explicit
+  // dates. The DISTINCT OPPOSITE of custom_days (which excludes).
+  allowlist_enabled: false,
+  allowlist_event_types: [],
+  allowlist_dates: [],
 });
+
+// The valid curated event types (mirrors tcg.types.event_calendar.EVENT_TYPES).
+export const ALLOWLIST_EVENT_TYPES = Object.freeze(['FOMC', 'NFP', 'CPI']);
 
 function isObj(x) {
   return x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -188,6 +198,17 @@ function sanitiseForm(raw) {
     regime_vvix_gate_level: (Number.isFinite(Number(f.regime_vvix_gate_level))
       && Number(f.regime_vvix_gate_level) >= 0)
       ? Number(f.regime_vvix_gate_level) : DEFAULT_FORM.regime_vvix_gate_level,
+    // F3.2 date-allowlist knobs. event_types filtered to the valid curated set;
+    // dates kept as a de-duplicated array of strings. A bad/missing value
+    // collapses to the (inert) default so a corrupt payload never rides the wire.
+    allowlist_enabled: Boolean(f.allowlist_enabled),
+    allowlist_event_types: Array.isArray(f.allowlist_event_types)
+      ? [...new Set(f.allowlist_event_types.filter(
+          (t) => ALLOWLIST_EVENT_TYPES.includes(t)))]
+      : [...DEFAULT_FORM.allowlist_event_types],
+    allowlist_dates: Array.isArray(f.allowlist_dates)
+      ? [...new Set(f.allowlist_dates.filter((d) => typeof d === 'string' && d))]
+      : [...DEFAULT_FORM.allowlist_dates],
   };
 }
 

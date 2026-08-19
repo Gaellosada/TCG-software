@@ -96,6 +96,14 @@ function installFetch(opts = {}) {
   const fn = vi.fn((url, options = {}) => {
     const u = String(url);
     if (u.endsWith('/intraday-backtest/meta')) return jsonResp(META);
+    if (u.endsWith('/intraday-backtest/event-calendar')) {
+      return jsonResp({
+        event_types: ['FOMC', 'NFP', 'CPI'],
+        events: { FOMC: [], NFP: [], CPI: [] },
+        all_dates: [],
+        tentative_dates: [],
+      });
+    }
     if (u.endsWith('/intraday-backtest/run-async')) {
       lastRunBody = JSON.parse(options.body);
       return jsonResp({ job_id: 'job-123' });
