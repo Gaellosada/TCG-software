@@ -34,6 +34,7 @@ import HedgeModule, {
 } from './HedgeModule';
 import WeekdayAttributionView from './WeekdayAttributionView';
 import RegimeSensitivityView from './RegimeSensitivityView';
+import EventAttributionView from './EventAttributionView';
 import styles from './IntradayBacktestPage.module.css';
 
 // Progress poll cadence (ms). Kept small so the "X / N days" readout tracks the
@@ -1339,6 +1340,8 @@ export default function IntradayBacktestPage() {
       {days.length > 0 && <WeekdayAttributionView days={days} />}
 
       {days.length > 0 && <RegimeSensitivityView days={days} />}
+
+      {days.length > 0 && <EventAttributionView days={days} eventCalendar={eventCalendar} />}
 
       {days.length > 0 && (
         <Card
