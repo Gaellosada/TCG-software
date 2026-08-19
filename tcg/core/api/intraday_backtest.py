@@ -529,6 +529,71 @@ class AllowlistConfig(BaseModel):
         return frozenset(explicit | event_dates_for_types(self.event_types))
 
 
+# --------------------------------------------------------------------------- #
+# Laddered multi-entry (F4.1). DEFAULT-OFF. When enabled, a day opens a straddle
+# at every rung of a fixed-interval ladder (first_entry, +interval, ... up to the
+# cutoff) and HOLDS EACH TO SETTLEMENT (the same exit as the single-entry path).
+# The rungs are independent single straddles summed at the day level (see the
+# per-entry loop in ``_process_day``), NOT a concurrency rewrite. A ladder is a
+# normal RunRequest block: ACTIVE => participates in the cache key + echo; OFF =>
+# stripped so a default-off body hashes/echoes byte-identically to pre-feature.
+# --------------------------------------------------------------------------- #
+class LadderSizingModel(BaseModel):
+    """Per-rung sizing. ``equal_contracts`` (default) gives every rung the same
+    ``contracts`` count. ``equal_notional`` sizes each rung to a common premium
+    NOTIONAL using THAT rung's own entry straddle price: ``weight_i =
+    target_notional / (straddle_price_i * multiplier)``. ``target_notional`` is
+    ``notional_per_entry_usd`` when > 0, else AUTO = ``contracts *`` the first
+    traded rung's notional (i.e. "deploy the same premium dollars each rung as the
+    first"), so the mode needs no mandatory dollar input. Weights may be
+    fractional (a linear, zero-market-impact model — documented)."""
+
+    mode: Literal["equal_contracts", "equal_notional"] = "equal_contracts"
+    contracts: float = Field(default=1.0, gt=0)
+    notional_per_entry_usd: float = Field(default=0.0, ge=0)
+
+
+class LadderConfig(BaseModel):
+    """Laddered multi-entry schedule + sizing (F4.1). Default OFF => exactly one
+    entry per day at the entry module's time (baseline byte-identical).
+
+    * ``interval_minutes`` (>= 1) — spacing between rungs.
+    * ``first_entry`` — "HH:MM" ET of the FIRST rung; ``null`` => the entry
+      module's time (per-day, so a ``custom_days`` entry override is honored).
+    * ``last_entry_cutoff`` — "HH:MM" ET of the LATEST allowed rung; ``null`` =>
+      the exit time. Rungs are generated at ``first, first+interval, ...`` while
+      ``<= cutoff`` AND strictly before the exit (every straddle must have a
+      settlement after its entry). "Last entry X min before close" = set this to
+      (exit - X).
+    * ``max_concurrent`` (>= 0, 0 = unlimited) — the cap on straddles open at
+      once. Because every rung is HELD TO SETTLEMENT, an open straddle never
+      closes intraday, so the count only grows: this effectively caps the number
+      of rungs that OPEN per day at ``max_concurrent`` (a rung that skips on a
+      data gap consumes NO slot). Enforced at open time in ``_process_day``.
+    * ``sizing`` — equal-contracts vs equal-notional (see LadderSizingModel).
+    """
+
+    enabled: bool = False
+    interval_minutes: float = Field(default=30.0, ge=1.0)
+    first_entry: str | None = None
+    last_entry_cutoff: str | None = None
+    max_concurrent: int = Field(default=0, ge=0)
+    sizing: LadderSizingModel = Field(default_factory=LadderSizingModel)
+
+    @field_validator("first_entry", "last_entry_cutoff")
+    @classmethod
+    def _valid_time(cls, v: str | None) -> str | None:
+        if v is not None:
+            parse_hhmm(v)  # raises ValueError -> 422 on bad "HH:MM"
+        return v
+
+    @property
+    def is_active(self) -> bool:
+        """True when the ladder changes output (enabled). The single predicate the
+        cache-key strip and the echo strip agree on."""
+        return self.enabled
+
+
 class CustomDay(BaseModel):
     """A single per-date control (unified exclude + full per-day override).
 
@@ -570,6 +635,10 @@ class RunRequest(BaseModel):
     # (baseline byte-identical; stripped from the cache key when inert). When on,
     # only the resolved dates (explicit ∪ event-type dates) get a DayPlan.
     allowlist: AllowlistConfig = Field(default_factory=AllowlistConfig)
+    # Laddered multi-entry (F4.1). Default OFF => one entry/day (baseline
+    # byte-identical; stripped from the cache key + echo when inert). When on,
+    # a day opens a straddle at each rung and holds each to settlement.
+    ladder: LadderConfig = Field(default_factory=LadderConfig)
     # Unified per-date control (exclude + full per-day override).
     custom_days: list[CustomDay] = Field(default_factory=list)
     # Durable-cache opt-out (Settings parity with the portfolio path). It selects
@@ -595,11 +664,18 @@ class RunRequest(BaseModel):
 
 @dataclass
 class DayPlan:
-    """Resolved per-day trading plan (pure; no DB)."""
+    """Resolved per-day trading plan (pure; no DB).
+
+    ``entry_ts`` is the day's FIRST (or only) entry — kept for the single-entry
+    path + the window/day-open anchor. ``entry_tss`` is the full laddered entry
+    schedule (F4.1): ``[entry_ts]`` when the ladder is off, else the rungs in
+    ascending time order (all sharing the one ``exit_ts`` settlement, ``entry_tol``
+    and entry conditions). The exit is the common settlement for every rung.
+    """
 
     day: date
     date_int: int
-    entry_ts: datetime  # UTC
+    entry_ts: datetime  # UTC (first/only entry)
     exit_ts: datetime  # UTC
     entry_tol: float
     exit_tol: float
@@ -607,6 +683,7 @@ class DayPlan:
     exit_conditions: list
     exit_triggers: list = field(default_factory=list)  # engine trigger dataclasses
     excluded: bool = False
+    entry_tss: list[datetime] = field(default_factory=list)  # laddered entries (UTC)
 
 
 # --------------------------------------------------------------------------- #
@@ -617,6 +694,64 @@ def _parse_date(value: str, field: str) -> date:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"{field}: invalid date {value!r}") from exc
+
+
+# Defensive cap on rungs/day: a 1-minute ladder over a full session is ~390
+# entries — legitimate but bounded. A schedule beyond this is a mis-config and is
+# rejected 400 (loud) rather than silently expanding the compute unboundedly.
+_MAX_LADDER_ENTRIES_PER_DAY = 500
+
+
+def _ladder_entry_times(
+    ladder: LadderConfig, day: date, e_time: str, x_time: str
+) -> list[datetime]:
+    """The laddered entry timestamps (UTC) for one day, ascending.
+
+    Ladder OFF => ``[entry-time]`` (the single-entry baseline). ON => rungs at
+    ``first, first+interval, ...`` while ``<= cutoff`` AND strictly before the
+    exit settlement. ``first`` defaults to the (per-day) entry time and ``cutoff``
+    to the exit time. The ET->UTC offset is constant across a trading session, so
+    interior rungs are the first UTC time plus integer multiples of the interval
+    (DST-safe; fractional-minute intervals supported). Raises ``HTTPException``
+    400 if an active ladder yields no rung before the exit, or exceeds the
+    per-day cap."""
+    first_str = ladder.first_entry or e_time
+    first_ts = resolve_et_to_utc(day, first_str, _TZ)
+    if not ladder.enabled:
+        return [first_ts]
+
+    cutoff_str = ladder.last_entry_cutoff or x_time
+    cutoff_ts = resolve_et_to_utc(day, cutoff_str, _TZ)
+    exit_ts = resolve_et_to_utc(day, x_time, _TZ)
+    step = timedelta(minutes=ladder.interval_minutes)
+
+    rungs: list[datetime] = []
+    k = 0
+    while True:
+        t = first_ts + step * k
+        if t > cutoff_ts or t >= exit_ts:
+            break
+        rungs.append(t)
+        k += 1
+        if len(rungs) > _MAX_LADDER_ENTRIES_PER_DAY:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{day.isoformat()}: laddered schedule exceeds "
+                    f"{_MAX_LADDER_ENTRIES_PER_DAY} entries "
+                    f"(interval_minutes={ladder.interval_minutes} too small)"
+                ),
+            )
+    if not rungs:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{day.isoformat()}: laddered schedule produced no entry before "
+                f"the exit (first_entry {first_str} / cutoff {cutoff_str} / "
+                f"exit {x_time})"
+            ),
+        )
+    return rungs
 
 
 def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
@@ -639,6 +774,14 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
                 f"[{WINDOW_MIN_DATE.isoformat()}..{WINDOW_MAX_DATE.isoformat()}]"
             ),
         )
+
+    # F3.2 date-allowlist: when active, restrict the eligible day set to the
+    # resolved dates (explicit ∪ event-type dates). A pure DATE FILTER applied
+    # BEFORE exclude/override; a non-allowlisted weekday gets no DayPlan at all.
+    # Resolved up front so the custom_days loop can validate the exclude/allowlist
+    # interaction (the W4 fold-in below).
+    allow_active = req.allowlist.is_active
+    allowed_dates = req.allowlist.resolved_dates() if allow_active else frozenset()
 
     # Fold custom_days into an excluded-set + a per-date override map.
     # exclude:true wins (override ignored); otherwise the present entry/exit
@@ -666,17 +809,27 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
                 status_code=400,
                 detail=f"custom_days: {cd.date} is not a weekday (no trading day)",
             )
+        # W4 fold-in (review finding 1): when an allowlist is ACTIVE, a
+        # custom_days EXCLUDE that names a NON-allowlisted day is contradictory —
+        # that day gets no DayPlan at all, so the "excluded days are always
+        # emitted" contract would be silently broken (the exclude is a no-op).
+        # Reject it 400 so the allowlist/exclude interaction is explicit rather
+        # than silently swallowed. (An exclude that IS in the allowlist still
+        # works: the day is emitted with status "excluded".)
+        if cd.exclude and allow_active and cd_date not in allowed_dates:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"custom_days: {cd.date} is excluded but is not in the active "
+                    f"allowlist (it would never be emitted); remove the exclude or "
+                    f"add the date to the allowlist"
+                ),
+            )
         if cd.exclude:
             excluded.add(cd_date)
             continue
         if cd.entry is not None or cd.exit is not None:
             overrides[cd_date] = (cd.entry, cd.exit)
-
-    # F3.2 date-allowlist: when active, restrict the eligible day set to the
-    # resolved dates (explicit ∪ event-type dates). A pure DATE FILTER applied
-    # BEFORE exclude/override; a non-allowlisted weekday gets no DayPlan at all.
-    allow_active = req.allowlist.is_active
-    allowed_dates = req.allowlist.resolved_dates() if allow_active else frozenset()
 
     plans: list[DayPlan] = []
     d = start
@@ -686,7 +839,12 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
             e_ov, x_ov = overrides.get(d, (None, None))
             e_time, e_tol, e_conds, _e_trigs = _resolve_module(req.entry, e_ov)
             x_time, x_tol, x_conds, x_trigs = _resolve_module(req.exit, x_ov)
-            entry_ts = resolve_et_to_utc(d, e_time, _TZ)
+            # F4.1: the laddered entry schedule (``[entry-time]`` when off). The
+            # FIRST rung is the day's ``entry_ts`` (window/day-open anchor); the
+            # exit must be after it (existing single-entry invariant, and every
+            # later rung is < exit by construction).
+            entry_tss = _ladder_entry_times(req.ladder, d, e_time, x_time)
+            entry_ts = entry_tss[0]
             exit_ts = resolve_et_to_utc(d, x_time, _TZ)
             if exit_ts <= entry_ts:
                 raise HTTPException(
@@ -705,6 +863,7 @@ def resolve_day_plans(req: RunRequest) -> list[DayPlan]:
                     exit_conditions=_to_engine_conditions(x_conds),
                     exit_triggers=_to_engine_triggers(x_trigs),
                     excluded=d in excluded,
+                    entry_tss=entry_tss,
                 )
             )
         d += one
@@ -1226,6 +1385,8 @@ def _echo_params(req: RunRequest) -> dict[str, Any]:
         echo.pop("regime", None)
     if not req.allowlist.is_active:
         echo.pop("allowlist", None)
+    if not req.ladder.is_active:
+        echo.pop("ladder", None)
     return echo
 
 
@@ -1376,7 +1537,7 @@ async def run_backtest(
 # tick-size handling, expiry/DTE resolution) namespaces the cache: bumping this
 # guarantees stale entries can never be served with ``from_cache: true``. BUMP on
 # ANY change to the intraday backtest compute output AND on each release.
-INTRADAY_COMPUTE_VERSION = "0.6.0"
+INTRADAY_COMPUTE_VERSION = "0.7.0"
 
 # A DISTINCT sqlite filename from the portfolio cache so the two do not share the
 # 200-entry LRU domain (they would otherwise evict each other's entries).
@@ -1468,6 +1629,11 @@ def _intraday_cache_key(req: RunRequest) -> str:
             payload.pop("regime", None)
         if not req.allowlist.is_active:
             payload.pop("allowlist", None)
+        # F4.1: an inert (default-off) ladder has ZERO effect on output, so a
+        # default-off body must hash identically regardless of its (inert) ladder
+        # sub-config AND identically to a pre-feature (ladder-absent) body.
+        if not req.ladder.is_active:
+            payload.pop("ladder", None)
     return canonical_hash({"_cv": INTRADAY_COMPUTE_VERSION, "body": payload})
 
 

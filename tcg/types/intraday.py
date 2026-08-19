@@ -417,6 +417,15 @@ class DayResult:
     ``straddle_on_ts``, ``straddle_price`` = call+put). ``legs`` carries the
     per-leg independent fills; ``straddle_on_ts`` / ``straddle_off_ts`` bound
     the BOTH-ON (hedged) window.
+
+    ``entries`` (F4.1 laddered multi-entry) is EMPTY for the single-entry path
+    (the day IS the straddle) — so a non-laddered DayResult is bit-identical to
+    before. When a day is laddered it carries N :class:`LadderEntry` children
+    (one per rung, each an independent straddle sim) and THIS DayResult is the
+    day-level AGGREGATE: its ``pnl`` is the sizing-WEIGHTED sum of the children
+    (see :func:`tcg.engine.intraday_backtest.aggregate_ladder_day`), while the
+    per-rung detail lives on the children. The one-row-per-day aggregate shape is
+    preserved so weekday/regime/event attribution keep working unchanged.
     """
 
     date: int  # YYYYMMDD
@@ -433,6 +442,28 @@ class DayResult:
     straddle_off_ts: datetime | None = None
     # v3: the early-exit trigger that fired (``None`` => time exit / no trigger).
     exit_trigger: ExitTrigger | None = None
+    # F4.1: per-rung children when this row is a laddered-day aggregate (else ()).
+    entries: tuple["LadderEntry", ...] = ()
+
+
+@dataclass(frozen=True)
+class LadderEntry:
+    """One rung of a laddered multi-entry day (F4.1).
+
+    A rung is a fully INDEPENDENT straddle: it opens at ``entry_ts`` and runs the
+    ordinary open -> hedge -> hold-to-settlement lifecycle, producing its own
+    :class:`DayResult` (``result``) whose ``pnl`` is per ONE contract. ``contracts``
+    is the sizing weight applied to this rung (the equal-contracts count, or the
+    equal-notional scale computed from this rung's own entry premium) — so the
+    rung's dollar contribution to the day is ``contracts * result.pnl.total_pnl_usd``
+    and the day aggregate is the sum of those contributions. Rungs never interact
+    (separate positions + hedge state; they share only the market bars), which is
+    exactly why a laddered day is N single-straddle sims summed, not a rewrite.
+    """
+
+    entry_ts: datetime  # UTC target for this rung's entry
+    contracts: float  # sizing weight (equal-contracts count | equal-notional scale)
+    result: "DayResult"
 
 
 @dataclass(frozen=True)

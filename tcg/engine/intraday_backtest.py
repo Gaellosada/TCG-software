@@ -46,6 +46,7 @@ from tcg.types.intraday import (
     HedgeTimingSpec,
     HedgeTrade,
     IntradayBar,
+    LadderEntry,
     LegResult,
     MarkSnapshot,
     MaxSpreadCond,
@@ -1286,6 +1287,81 @@ def simulate_day(
         straddle_on_ts=straddle_on_ts,
         straddle_off_ts=straddle_off_ts,
         exit_trigger=exit_trigger,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Laddered multi-entry aggregation (F4.1, pure)
+# --------------------------------------------------------------------------- #
+def aggregate_ladder_day(
+    date_int: int,
+    entries: list[LadderEntry],
+    *,
+    multiplier: float = ES_MULTIPLIER,
+    expiry: date | None = None,
+) -> DayResult:
+    """Fold a day's independent laddered rungs into ONE day-aggregate DayResult.
+
+    Each rung's ``result.pnl`` is per ONE contract; ``entry.contracts`` is the
+    rung's sizing weight. The day's dollar P&L is the WEIGHTED SUM of the rungs
+    that traded (``sum(contracts_i * pnl_i.total_pnl_usd)``) — unambiguous and
+    order-free. The component points/usd (option/hedge/cost) are summed the same
+    way and points are re-expressed via the multiplier so the DayPnl invariants
+    hold (``usd == pts * multiplier`` and ``total == option + hedge - cost``);
+    ``n_fallback_fills`` is a raw event COUNT so it is summed unweighted.
+
+    The aggregate row keeps the one-row-per-day shape the weekday/regime/event
+    views rely on (``date``/``status``/``pnl``/regime) and carries the rungs in
+    ``entries`` for the per-rung readout. Straddle-level fields (entry/exit/legs/
+    hedge_trades/strike) stay unset on the aggregate — that detail lives on each
+    child. ``status`` is ``ok`` if ANY rung traded, else ``skipped`` with the
+    first rung's skip reason (or ``no_ladder_fills`` when there are no rungs).
+    """
+    traded = [e for e in entries if e.result.pnl is not None]
+    if not traded:
+        reason = "no_ladder_fills"
+        for e in entries:
+            if e.result.skip_reason:
+                reason = e.result.skip_reason
+                break
+        return DayResult(
+            date=date_int,
+            status="skipped",
+            skip_reason=reason,
+            expiry=expiry,
+            entries=tuple(entries),
+        )
+
+    option_usd = 0.0
+    hedge_usd = 0.0
+    cost_usd = 0.0
+    n_fallback = 0
+    for e in traded:
+        w = e.contracts
+        p = e.result.pnl
+        option_usd += w * p.option_pnl_pts * multiplier
+        hedge_usd += w * p.hedge_pnl_pts * multiplier
+        cost_usd += w * p.cost_pts * multiplier
+        n_fallback += p.n_fallback_fills
+    total_usd = option_usd + hedge_usd - cost_usd
+
+    inv_m = 1.0 / multiplier if multiplier else 0.0
+    pnl = DayPnl(
+        option_pnl_pts=option_usd * inv_m,
+        hedge_pnl_pts=hedge_usd * inv_m,
+        total_pnl_pts=total_usd * inv_m,
+        total_pnl_usd=total_usd,
+        cost_pts=cost_usd * inv_m,
+        cost_usd=cost_usd,
+        n_fallback_fills=n_fallback,
+    )
+    return DayResult(
+        date=date_int,
+        status="ok",
+        skip_reason=None,
+        expiry=expiry,
+        pnl=pnl,
+        entries=tuple(entries),
     )
 
 

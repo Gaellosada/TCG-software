@@ -242,6 +242,7 @@ def test_cache_key_allowlist_off_equals_pre_feature_body() -> None:
     payload = ib._strip_use_cache(req.model_dump(mode="json"))
     payload.pop("regime", None)
     payload.pop("allowlist", None)  # a pre-F3.2 body had no allowlist key
+    payload.pop("ladder", None)  # a pre-F4.1 body had no ladder key
     pre_feature = canonical_hash({"_cv": ib.INTRADAY_COMPUTE_VERSION, "body": payload})
     assert ib._intraday_cache_key(req) == pre_feature
 
@@ -257,7 +258,7 @@ def test_cache_key_allowlist_on_participates() -> None:
 
 
 def test_compute_version_bumped() -> None:
-    assert ib.INTRADAY_COMPUTE_VERSION == "0.6.0"
+    assert ib.INTRADAY_COMPUTE_VERSION == "0.7.0"
 
 
 # --------------------------------------------------------------------------- #
