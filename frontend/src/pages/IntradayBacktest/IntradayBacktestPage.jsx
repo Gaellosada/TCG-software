@@ -35,6 +35,7 @@ import HedgeModule, {
 import WeekdayAttributionView from './WeekdayAttributionView';
 import RegimeSensitivityView from './RegimeSensitivityView';
 import EventAttributionView from './EventAttributionView';
+import LadderEntriesView from './LadderEntriesView';
 import styles from './IntradayBacktestPage.module.css';
 
 // Progress poll cadence (ms). Kept small so the "X / N days" readout tracks the
@@ -124,6 +125,25 @@ function buildRunPayload({ form, hedge, entry, exit, customDays }) {
       mode: 'allowlist',
       dates: [...(form.allowlist_dates || [])],
       event_types: [...(form.allowlist_event_types || [])],
+    };
+  }
+  // F4.1: only attach the ladder block when enabled, so a default payload stays
+  // BYTE-IDENTICAL to the pre-feature body (the backend defaults ladder to off;
+  // an absent block hashes identically). Blank time fields map to null (backend
+  // default = the entry / exit time).
+  if (form.ladder_enabled) {
+    payload.ladder = {
+      enabled: true,
+      interval_minutes: Number(form.ladder_interval_minutes) || 30,
+      first_entry: form.ladder_first_entry ? form.ladder_first_entry : null,
+      last_entry_cutoff: form.ladder_last_entry_cutoff
+        ? form.ladder_last_entry_cutoff : null,
+      max_concurrent: Number(form.ladder_max_concurrent) || 0,
+      sizing: {
+        mode: form.ladder_sizing_mode,
+        contracts: Number(form.ladder_contracts) || 1,
+        notional_per_entry_usd: Number(form.ladder_notional_per_entry_usd) || 0,
+      },
     };
   }
   return payload;
@@ -1111,6 +1131,113 @@ export default function IntradayBacktestPage() {
           )}
         </div>
 
+        {/* F4.1 laddered multi-entry — open a straddle at each rung of a
+            fixed-interval ladder and HOLD EACH TO SETTLEMENT. Default OFF => one
+            entry/day (baseline). max_concurrent caps rungs that open per day
+            (hold-to-settlement => an open straddle never closes intraday). */}
+        <div className={styles.field} style={{ marginTop: '1rem' }}>
+          <span className={styles.fieldLabel}>Laddered multi-entry (hold each to settlement)</span>
+          <label className={styles.checkboxRow}>
+            <input
+              type="checkbox"
+              aria-label="Enable laddered multi-entry"
+              data-testid="ladder-enable"
+              checked={Boolean(form.ladder_enabled)}
+              onChange={(e) => setField('ladder_enabled', e.target.checked)}
+            />
+            <span>Enter every N minutes; hold each straddle to settlement</span>
+          </label>
+          {form.ladder_enabled && (
+            <div data-testid="ladder-controls">
+              <label className={styles.field}>
+                <span>Interval (minutes, ≥ 1)</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  aria-label="Ladder interval minutes"
+                  data-testid="ladder-interval"
+                  value={form.ladder_interval_minutes}
+                  onChange={(e) => setField('ladder_interval_minutes', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>First entry (HH:MM ET, blank = entry time)</span>
+                <input
+                  type="text"
+                  placeholder="entry time"
+                  aria-label="Ladder first entry"
+                  data-testid="ladder-first-entry"
+                  value={form.ladder_first_entry}
+                  onChange={(e) => setField('ladder_first_entry', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>Last entry cutoff (HH:MM ET, blank = exit time)</span>
+                <input
+                  type="text"
+                  placeholder="exit time"
+                  aria-label="Ladder last entry cutoff"
+                  data-testid="ladder-cutoff"
+                  value={form.ladder_last_entry_cutoff}
+                  onChange={(e) => setField('ladder_last_entry_cutoff', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>Max concurrent (0 = unlimited)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  aria-label="Ladder max concurrent"
+                  data-testid="ladder-max-concurrent"
+                  value={form.ladder_max_concurrent}
+                  onChange={(e) => setField('ladder_max_concurrent', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>Sizing</span>
+                <select
+                  aria-label="Ladder sizing mode"
+                  data-testid="ladder-sizing-mode"
+                  value={form.ladder_sizing_mode}
+                  onChange={(e) => setField('ladder_sizing_mode', e.target.value)}
+                >
+                  <option value="equal_contracts">Equal contracts</option>
+                  <option value="equal_notional">Equal notional</option>
+                </select>
+              </label>
+              {form.ladder_sizing_mode === 'equal_contracts' ? (
+                <label className={styles.field}>
+                  <span>Contracts per rung</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    aria-label="Ladder contracts per rung"
+                    data-testid="ladder-contracts"
+                    value={form.ladder_contracts}
+                    onChange={(e) => setField('ladder_contracts', e.target.value)}
+                  />
+                </label>
+              ) : (
+                <label className={styles.field}>
+                  <span>Notional per rung (USD, 0 = auto)</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    aria-label="Ladder notional per entry"
+                    data-testid="ladder-notional"
+                    value={form.ladder_notional_per_entry_usd}
+                    onChange={(e) => setField('ladder_notional_per_entry_usd', e.target.value)}
+                  />
+                </label>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Custom days — one unified control. Add a date, then per row either
             exclude it (no trade) or expand to override entry/exit via the SAME
             EntryExitModule (partial). */}
@@ -1342,6 +1469,11 @@ export default function IntradayBacktestPage() {
       {days.length > 0 && <RegimeSensitivityView days={days} />}
 
       {days.length > 0 && <EventAttributionView days={days} eventCalendar={eventCalendar} />}
+
+      {/* F4.1: per-rung readout — renders only on laddered runs (days carrying
+          an ``entries[]``); inert (null) otherwise, so it never disturbs the
+          day-level calendar or the aggregate-keyed attribution views above. */}
+      {days.length > 0 && <LadderEntriesView days={days} />}
 
       {days.length > 0 && (
         <Card

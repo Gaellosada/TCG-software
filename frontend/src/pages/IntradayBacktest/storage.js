@@ -83,7 +83,25 @@ export const DEFAULT_FORM = Object.freeze({
   allowlist_enabled: false,
   allowlist_event_types: [],
   allowlist_dates: [],
+  // F4.1 laddered multi-entry: default OFF (exactly one entry/day, byte-identical
+  // baseline). When on, a day opens a straddle at every rung of a fixed-interval
+  // ladder and HOLDS EACH TO SETTLEMENT. ``first_entry`` / ``last_entry_cutoff``
+  // blank => the entry / exit time. ``max_concurrent`` 0 => unlimited (but with
+  // hold-to-settlement it caps the rungs that open per day). Sizing: equal
+  // contracts per rung, or equal premium notional (auto-referenced to the first
+  // traded rung when ``notional_per_entry_usd`` is 0).
+  ladder_enabled: false,
+  ladder_interval_minutes: 30,
+  ladder_first_entry: '',
+  ladder_last_entry_cutoff: '',
+  ladder_max_concurrent: 0,
+  ladder_sizing_mode: 'equal_contracts',
+  ladder_contracts: 1,
+  ladder_notional_per_entry_usd: 0,
 });
+
+// The valid ladder sizing modes (mirrors LadderSizingModel.mode).
+export const LADDER_SIZING_MODES = Object.freeze(['equal_contracts', 'equal_notional']);
 
 // The valid curated event types (mirrors tcg.types.event_calendar.EVENT_TYPES).
 export const ALLOWLIST_EVENT_TYPES = Object.freeze(['FOMC', 'NFP', 'CPI']);
@@ -209,6 +227,28 @@ function sanitiseForm(raw) {
     allowlist_dates: Array.isArray(f.allowlist_dates)
       ? [...new Set(f.allowlist_dates.filter((d) => typeof d === 'string' && d))]
       : [...DEFAULT_FORM.allowlist_dates],
+    // F4.1 ladder knobs. Numeric fields collapse to their (inert) defaults on a
+    // bad/missing value so a corrupt payload never rides the wire; the two time
+    // fields are kept as strings (blank => backend default).
+    ladder_enabled: Boolean(f.ladder_enabled),
+    ladder_interval_minutes: (Number.isFinite(Number(f.ladder_interval_minutes))
+      && Number(f.ladder_interval_minutes) >= 1)
+      ? Number(f.ladder_interval_minutes) : DEFAULT_FORM.ladder_interval_minutes,
+    ladder_first_entry: typeof f.ladder_first_entry === 'string'
+      ? f.ladder_first_entry : DEFAULT_FORM.ladder_first_entry,
+    ladder_last_entry_cutoff: typeof f.ladder_last_entry_cutoff === 'string'
+      ? f.ladder_last_entry_cutoff : DEFAULT_FORM.ladder_last_entry_cutoff,
+    ladder_max_concurrent: (Number.isInteger(Number(f.ladder_max_concurrent))
+      && Number(f.ladder_max_concurrent) >= 0)
+      ? Number(f.ladder_max_concurrent) : DEFAULT_FORM.ladder_max_concurrent,
+    ladder_sizing_mode: LADDER_SIZING_MODES.includes(f.ladder_sizing_mode)
+      ? f.ladder_sizing_mode : DEFAULT_FORM.ladder_sizing_mode,
+    ladder_contracts: (Number.isFinite(Number(f.ladder_contracts))
+      && Number(f.ladder_contracts) > 0)
+      ? Number(f.ladder_contracts) : DEFAULT_FORM.ladder_contracts,
+    ladder_notional_per_entry_usd: (Number.isFinite(Number(f.ladder_notional_per_entry_usd))
+      && Number(f.ladder_notional_per_entry_usd) >= 0)
+      ? Number(f.ladder_notional_per_entry_usd) : DEFAULT_FORM.ladder_notional_per_entry_usd,
   };
 }
 
