@@ -71,7 +71,7 @@ const MAX_CONSECUTIVE_POLL_ERRORS = 4;
 // to flush. Entry/exit are objects { time, snap_tolerance_minutes, conditions };
 // custom_days carry full per-day overrides.
 function buildRunPayload({ form, hedge, entry, exit, customDays }) {
-  return {
+  const payload = {
     start_date: form.start_date,
     end_date: form.end_date,
     expiry_mode: form.expiry_mode,
@@ -94,6 +94,25 @@ function buildRunPayload({ form, hedge, entry, exit, customDays }) {
       return out;
     }),
   };
+  // F2.2: only attach the regime block when regime-driven side is enabled, so a
+  // default (regime-off) payload stays BYTE-IDENTICAL to the pre-feature body
+  // (the backend defaults regime to off; an absent block hashes identically).
+  if (form.regime_side_enabled) {
+    payload.regime = {
+      side_mode: 'regime_driven',
+      hvol_tolerance: Number(form.regime_hvol_tolerance) || 0,
+      extremely_low_h20: Number(form.regime_extremely_low_h20) || 0,
+      gates: form.regime_vvix_gate_enabled
+        ? [{
+            enabled: true,
+            signal: 'vvix',
+            above: Number(form.regime_vvix_gate_level) || 0,
+            action: 'flat',
+          }]
+        : [],
+    };
+  }
+  return payload;
 }
 
 // Short, safe display of the ISO savedAt timestamp for a saved-sim row.
@@ -188,6 +207,9 @@ function dayOutcome(data) {
   if (data.status === 'entry_conditions_unmet' || data.skip_reason === 'entry_conditions_unmet') {
     return 'unmet';
   }
+  // Regime decided FLAT (F2.2): a deliberate no-trade (side=flat), distinct from
+  // a data-gap skip. Backend tags status="skipped", skip_reason="regime_flat".
+  if (data.skip_reason === 'regime_flat') return 'regime_flat';
   if (data.status === 'skipped') return 'skipped';
   const usd = data.pnl ? data.pnl.total_pnl_usd : null;
   if (typeof usd === 'number' && Number.isFinite(usd)) {
@@ -204,7 +226,28 @@ const OUTCOME_CLASS = {
   skipped: styles.cellSkipped,
   excluded: styles.cellExcluded,
   unmet: styles.cellUnmet,
+  // Regime flat reuses the neutral excluded styling (a deliberate no-trade).
+  regime_flat: styles.cellExcluded,
 };
+
+// A YYYYMMDD int (the regime ``asof`` date) rendered as an ISO date, or ''.
+function isoFromInt(dateInt) {
+  if (typeof dateInt !== 'number' || !Number.isFinite(dateInt)) return '';
+  const s = String(dateInt);
+  if (s.length !== 8) return '';
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
+
+// One-line regime-decision summary for a day (F2.2): the chosen side, why
+// (state), any firing gate, and the as-of signal date the decision used.
+// ``null`` when the day carries no regime decision (regime-driven side off).
+function regimeSummary(data) {
+  const r = data && data.regime;
+  if (!r || typeof r !== 'object' || !r.side) return null;
+  const gate = r.gate ? `, gate ${r.gate}` : '';
+  const asof = r.asof ? `, as-of ${isoFromInt(r.asof)}` : '';
+  return `regime: ${r.side} (${r.state}${gate}${asof})`;
+}
 
 // Short HH:MM (UTC) extracted from an ISO timestamp for the compact tooltip.
 function tsTime(ts) {
@@ -240,6 +283,10 @@ function cellTitle(iso, data) {
   if (data.status === 'entry_conditions_unmet' || data.skip_reason === 'entry_conditions_unmet') {
     return `${iso} — skipped: entry_conditions_unmet (no bar met the entry conditions in the snap window)`;
   }
+  if (data.skip_reason === 'regime_flat') {
+    const rs = regimeSummary(data);
+    return `${iso} — flat (regime)${rs ? `  •  ${rs}` : ''}`;
+  }
   if (data.status === 'skipped') {
     return `${iso} — skipped: ${data.skip_reason || 'skipped'}`;
   }
@@ -247,6 +294,7 @@ function cellTitle(iso, data) {
   const legs = data.legs || null;
   const parts = [
     `${iso} — ${data.status}`,
+    regimeSummary(data),
     data.strike != null ? `strike ${formatNumber(data.strike, 0)}` : null,
     p.option_pnl_pts != null ? `option ${formatNumber(p.option_pnl_pts)} pts` : null,
     p.hedge_pnl_pts != null ? `hedge ${formatNumber(p.hedge_pnl_pts)} pts` : null,
@@ -829,6 +877,69 @@ export default function IntradayBacktestPage() {
             </label>
           )}
 
+          {/* Regime-driven side (F2.2): resolve each day's side from the vol
+              regime (RV H20>H30>H100 backwardation ladder -> long, else short;
+              extremely-low H20 floor -> flat; VVIX gate veto) as-of the PRIOR
+              daily close. Default OFF => the static Straddle side above is used
+              every day. All thresholds configurable — none hardcoded. */}
+          <label className={`${styles.field} ${styles.checkboxRow}`}>
+            <input
+              type="checkbox"
+              aria-label="Enable regime-driven side"
+              checked={Boolean(form.regime_side_enabled)}
+              onChange={(e) => setField('regime_side_enabled', e.target.checked)}
+            />
+            <span>Regime-driven side</span>
+          </label>
+          {form.regime_side_enabled && (
+            <>
+              <label className={styles.field}>
+                <span>HVOL ladder tolerance (0 = strict)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  aria-label="HVOL ladder tolerance"
+                  value={form.regime_hvol_tolerance}
+                  onChange={(e) => setField('regime_hvol_tolerance', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>Extremely-low H20 floor (0 = off)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  aria-label="Extremely-low H20 floor"
+                  value={form.regime_extremely_low_h20}
+                  onChange={(e) => setField('regime_extremely_low_h20', e.target.value)}
+                />
+              </label>
+              <label className={`${styles.field} ${styles.checkboxRow}`}>
+                <input
+                  type="checkbox"
+                  aria-label="Enable VVIX gate"
+                  checked={Boolean(form.regime_vvix_gate_enabled)}
+                  onChange={(e) => setField('regime_vvix_gate_enabled', e.target.checked)}
+                />
+                <span>VVIX gate (veto to flat above level)</span>
+              </label>
+              {form.regime_vvix_gate_enabled && (
+                <label className={styles.field}>
+                  <span>VVIX gate level</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="1"
+                    aria-label="VVIX gate level"
+                    value={form.regime_vvix_gate_level}
+                    onChange={(e) => setField('regime_vvix_gate_level', e.target.value)}
+                  />
+                </label>
+              )}
+            </>
+          )}
+
         </div>
 
         {/* Hedge rule module (v4): enable + instrument + triggers (interval,
@@ -1130,9 +1241,16 @@ export default function IntradayBacktestPage() {
                     const outcome = dayOutcome(slot.data);
                     const excluded = outcome === 'excluded';
                     const unmet = outcome === 'unmet';
-                    const noTrade = outcome === 'skipped' || excluded || unmet;
-                    const tagText = excluded ? 'no trade' : unmet ? 'no entry' : 'skipped';
+                    const regimeFlat = outcome === 'regime_flat';
+                    const noTrade = outcome === 'skipped' || excluded || unmet || regimeFlat;
+                    const tagText = excluded ? 'no trade'
+                      : unmet ? 'no entry'
+                      : regimeFlat ? 'flat'
+                      : 'skipped';
                     const pnl = slot.data.pnl || null;
+                    // F2.2: the resolved regime side (long/short) on a traded day,
+                    // as a compact L/S badge so the WHY is visible at a glance.
+                    const regimeSide = slot.data.regime && slot.data.regime.side;
                     // Early-exit trigger (v3): a traded day that closed on a
                     // trigger carries a small marker + a data attribute.
                     const trig = slot.data.exit_trigger || null;
@@ -1145,9 +1263,20 @@ export default function IntradayBacktestPage() {
                         data-status={slot.data.status}
                         data-outcome={outcome}
                         data-exit-trigger={trig ? trig.type : undefined}
+                        data-regime-side={regimeSide || undefined}
                         title={cellTitle(slot.iso, slot.data)}
                       >
                         <span className={styles.domRow}>
+                          {regimeSide && !noTrade && (
+                            <span
+                              className={styles.regimeBadge}
+                              data-testid="regime-side-badge"
+                              aria-label={`regime side: ${regimeSide}`}
+                              title={`regime side: ${regimeSide}`}
+                            >
+                              {regimeSide === 'long' ? 'L' : regimeSide === 'short' ? 'S' : ''}
+                            </span>
+                          )}
                           {trig && !noTrade && (
                             <span
                               className={styles.triggerBadge}

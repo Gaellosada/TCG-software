@@ -38,7 +38,12 @@ from tcg.engine.intraday_backtest import (
     simulate_day,
     snap_nearest,
 )
-from tcg.engine.regime import realized_vol_by_date
+from tcg.engine.regime import (
+    Decision,
+    LevelGateSpec,
+    realized_vol_by_date,
+    resolve_regime_decisions,
+)
 from tcg.types.intraday import (
     ES_MULTIPLIER,
     WINDOW_MAX_DATE,
@@ -336,18 +341,54 @@ def _to_engine_cost(c: CostModelConfig) -> CostModel:
 # the separate F2.2 task). Generic so VIX1D (F2.3) is a pure drop-in: add one
 # symbol field + one fetch; the per-date assembly loop never changes.
 # --------------------------------------------------------------------------- #
+class LevelGateModel(BaseModel):
+    """A generic single-signal LEVEL gate (F2.2), VIX1D-ready (F2.3).
+
+    ``enabled=False`` (default) makes the gate inert. When on, if the named
+    ``signal`` (e.g. ``vvix``, ``vix1d``) is present in the as-of bundle and
+    strictly ABOVE ``above``, the gate applies ``action`` (veto to ``flat`` OR
+    force ``long``/``short``). Gates evaluate in list order, later overrides
+    earlier — so adding a VIX1D bucket is a new list entry, no schema change.
+    """
+
+    enabled: bool = False
+    signal: str = "vvix"
+    above: float = Field(default=0.0, ge=0.0)
+    action: Literal["long", "short", "flat"] = "flat"
+
+
 class RegimeConfig(BaseModel):
-    """Regime-signal emission knob. ``emit_signals=False`` (default) => no extra
-    dwh fetch and NO ``regime`` key on any day (response byte-identical to the
-    pre-feature baseline). ``rv_windows`` are the realized-vol lookbacks (trading
-    days, each >= 2); ``sp500_symbol`` is the daily close series RV is computed
-    from and ``vvix_symbol`` the passthrough VVIX series — both dwh
-    ``dim_instrument`` symbols read through the P0.3 generic seam."""
+    """Regime signal + side-decision knob. Two independent, DEFAULT-OFF halves:
+
+    * ``emit_signals`` (F2.1): when on, each day carries the raw RV/VVIX signals.
+    * ``side_mode`` (F2.2): ``"off"`` (default) trades the run-level
+      ``straddle_side`` every day exactly as before; ``"regime_driven"`` resolves
+      each day's side from the regime cascade (backwardation ladder + low-vol
+      floor + level gates), a ``flat`` decision SKIPS the day.
+
+    With BOTH halves off there is no extra dwh fetch and NO ``regime`` key on any
+    day (response days byte-identical to the pre-feature baseline; the block is
+    also stripped from the cache key). ``rv_windows`` are the realized-vol
+    lookbacks (trading days, each >= 2); ``sp500_symbol`` is the daily close
+    series RV is computed from and ``vvix_symbol`` the passthrough VVIX series —
+    both dwh ``dim_instrument`` symbols read through the P0.3 generic seam.
+
+    Decision knobs (only consulted when ``side_mode='regime_driven'``):
+    ``hvol_tolerance`` (>=0) multiplicatively relaxes the strict RV ladder;
+    ``extremely_low_h20`` (>=0, 0 disables) is the absolute short-window RV floor
+    that forces ``flat``; ``gates`` is the ordered level-gate list (VVIX now,
+    VIX1D later).
+    """
 
     emit_signals: bool = False
     rv_windows: list[int] = Field(default_factory=lambda: [20, 30, 100])
     sp500_symbol: str = "IND_SP_500"
     vvix_symbol: str = "IND_VVIX"
+    # --- F2.2 side-decision fields (all inert unless side_mode is regime_driven) #
+    side_mode: Literal["off", "regime_driven"] = "off"
+    hvol_tolerance: float = Field(default=0.0, ge=0.0)
+    extremely_low_h20: float = Field(default=0.0, ge=0.0)
+    gates: list[LevelGateModel] = Field(default_factory=list)
 
     @field_validator("rv_windows")
     @classmethod
@@ -358,6 +399,33 @@ class RegimeConfig(BaseModel):
             if w < 2:
                 raise ValueError(f"each rv_window must be >= 2 (got {w})")
         return v
+
+    @model_validator(mode="after")
+    def _ladder_needs_three_windows(self) -> "RegimeConfig":
+        """The backwardation ladder is a 3-rung short/mid/long comparison, so a
+        regime-DRIVEN side requires exactly three RV windows (reject otherwise so
+        a mis-sized ladder surfaces as 422, never a 500 from the pure engine)."""
+        if self.side_mode == "regime_driven" and len(self.rv_windows) != 3:
+            raise ValueError(
+                "side_mode 'regime_driven' requires exactly 3 rv_windows "
+                f"(short/mid/long ladder); got {self.rv_windows}"
+            )
+        return self
+
+    @property
+    def is_active(self) -> bool:
+        """True when the block affects output (a fetch/emit/decision is due).
+
+        The single predicate the fetch trigger AND the cache-key strip agree on:
+        the ``regime`` block is inert (stripped, no fetch, no ``regime`` key) iff
+        BOTH halves are off. Any active half makes it participate.
+        """
+        return self.emit_signals or self.side_mode != "off"
+
+    @property
+    def rv_keys(self) -> tuple[str, ...]:
+        """The RV ladder keys ``("h<w0>", ...)`` in ``rv_windows`` order."""
+        return tuple(f"h{w}" for w in self.rv_windows)
 
 
 class EntryExitModule(BaseModel):
@@ -671,37 +739,131 @@ def _null_regime_signals(
     return {int(d): {k: None for k in keys} for d in day_dates}
 
 
-async def _fetch_regime_signals(
+async def _fetch_regime_series(
     daily_reader: DailySeriesReader,
     req: RunRequest,
     day_dates: list[int],
-) -> dict[int, dict[str, float | None]]:
-    """Fetch daily series through the P0.3 seam, compute RV, join with VVIX.
+) -> tuple[dict[int, dict[str, float | None]], dict[str, dict[int, float]], list[int]]:
+    """Fetch the raw daily series once; return ``(rv_by_date, passthrough, windows)``.
 
-    Fetches IND_SP_500 with a lookback long enough to warm up the largest RV
-    window (so RV is available from the FIRST backtest day), computes RV in the
-    pure engine, and joins VVIX passthrough. VIX1D DROP-IN (F2.3) is exactly:
+    Fetches IND_SP_500 AND VVIX with a lookback long enough to (a) warm up the
+    largest RV window and (b) cover the daily close of the day BEFORE the first
+    backtest day, so the no-look-ahead as-of resolver always has a prior signal
+    for day one. Computes RV in the pure engine. VIX1D DROP-IN (F2.3) is exactly:
     add a ``vix1d_symbol`` to :class:`RegimeConfig`, one more ``read_series``
-    call, and one ``passthrough["vix1d"] = ...`` line — the assembly is unchanged.
+    call, and one ``passthrough["vix1d"] = ...`` line — nothing else changes.
     """
     reg = req.regime
     windows = reg.rv_windows
-    lo = min(day_dates)
-    hi = max(day_dates)
-    start = date.fromisoformat(_int_to_iso(lo))
-    end = date.fromisoformat(_int_to_iso(hi))
+    start = date.fromisoformat(_int_to_iso(min(day_dates)))
+    end = date.fromisoformat(_int_to_iso(max(day_dates)))
     # Calendar lookback covering the largest window in trading days plus slack
-    # for weekends/holidays, so the first backtest day already has full history.
+    # for weekends/holidays, so the first backtest day already has full history
+    # AND a prior daily close exists for the as-of decision.
     lookback = timedelta(days=max(windows) * 2 + 30)
 
     sp = await daily_reader.read_series(reg.sp500_symbol, start=start - lookback, end=end)
     rv_by_date = realized_vol_by_date(sp.dates, sp.values, windows)
 
-    vvix = await daily_reader.read_series(reg.vvix_symbol, start=start, end=end)
+    vvix = await daily_reader.read_series(
+        reg.vvix_symbol, start=start - lookback, end=end
+    )
     passthrough: dict[str, dict[int, float]] = {
         "vvix": dict(zip(vvix.dates, vvix.values))
     }
+    return rv_by_date, passthrough, windows
+
+
+def _full_daily_signal_map(
+    rv_by_date: dict[int, dict[str, float | None]],
+    passthrough_by_name: dict[str, dict[int, float]],
+    windows: list[int],
+) -> dict[int, dict[str, float | None]]:
+    """A per-DAILY-DATE signal map over the UNION of all fetched dates.
+
+    Unlike :func:`build_regime_signal_map` (which restricts to the backtest days
+    for DISPLAY), this covers every daily date the series carry — the domain the
+    no-look-ahead as-of resolver must pick from so day D's ``asof`` is the true
+    latest prior daily close, not merely the previous backtest day.
+    """
+    rv_keys = [f"h{w}" for w in windows]
+    all_dates: set[int] = set(rv_by_date)
+    for series in passthrough_by_name.values():
+        all_dates |= set(series)
+    out: dict[int, dict[str, float | None]] = {}
+    for di in all_dates:
+        rv = rv_by_date.get(di) or {}
+        sig: dict[str, float | None] = {k: rv.get(k) for k in rv_keys}
+        for name, series in passthrough_by_name.items():
+            sig[name] = series.get(di)
+        out[di] = sig
+    return out
+
+
+def _to_engine_gates(gates: list[LevelGateModel]) -> tuple[LevelGateSpec, ...]:
+    """Mirror the validated Pydantic level gates into engine dataclasses."""
+    return tuple(
+        LevelGateSpec(enabled=g.enabled, signal=g.signal, above=g.above, action=g.action)
+        for g in gates
+    )
+
+
+async def _fetch_regime_signals(
+    daily_reader: DailySeriesReader,
+    req: RunRequest,
+    day_dates: list[int],
+) -> dict[int, dict[str, float | None]]:
+    """F2.1 DISPLAY map: per-backtest-day raw RV/VVIX signals (side_mode off)."""
+    rv_by_date, passthrough, windows = await _fetch_regime_series(
+        daily_reader, req, day_dates
+    )
     return build_regime_signal_map(day_dates, rv_by_date, passthrough, windows)
+
+
+async def _resolve_regime_side_decisions(
+    daily_reader: DailySeriesReader | None,
+    req: RunRequest,
+    trading_dates: list[int],
+) -> dict[int, Decision]:
+    """Per-day regime SIDE decisions for the (non-excluded) trading days (F2.2).
+
+    Fetches the daily signals through the P0.3 seam, builds the FULL daily signal
+    map, and runs the NO-LOOK-AHEAD as-of resolver so each day's side is decided
+    as-of the latest daily close STRICTLY BEFORE it. A fetch glitch (or no reader
+    wired) DEGRADES to an all-fallback resolution — every day trades the static
+    ``straddle_side`` (state ``fallback``), NEVER a silent skip and never a crash
+    of a good options backtest (blocked > broken).
+    """
+    reg = req.regime
+    rv_keys = list(reg.rv_keys)
+    gates = _to_engine_gates(reg.gates)
+
+    signals_by_date: dict[int, dict[str, float | None]] = {}
+    passthrough_names: tuple[str, ...] = ("vvix",)
+    if daily_reader is not None and trading_dates:
+        try:
+            rv_by_date, passthrough, windows = await _fetch_regime_series(
+                daily_reader, req, trading_dates
+            )
+            signals_by_date = _full_daily_signal_map(rv_by_date, passthrough, windows)
+            passthrough_names = tuple(passthrough)
+        except Exception:  # noqa: BLE001 — a signal-fetch glitch must not fail a good backtest
+            logger.exception(
+                "regime side-decision fetch failed; falling back to the static side"
+            )
+            signals_by_date = {}
+
+    signal_names = tuple(rv_keys) + passthrough_names
+    return resolve_regime_decisions(
+        trading_dates,
+        signals_by_date,
+        static_side=req.straddle_side,
+        rv_keys=rv_keys,
+        extremely_low_h20=reg.extremely_low_h20,
+        hvol_tolerance=reg.hvol_tolerance,
+        gates=gates,
+        signal_names=signal_names,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -722,9 +884,28 @@ def _serialize_leg(leg: Any) -> dict[str, Any]:
     }
 
 
+def _serialize_decision(dec: Decision) -> dict[str, Any]:
+    """Wire form of a per-day regime DECISION (F2.2 readout — the WHY).
+
+    Surfaces the resolved ``state`` (hvol_on/hvol_off/extremely_low/fallback),
+    the chosen ``side`` (long/short/flat), the ``asof`` signal date the decision
+    was taken as-of (``null`` => no prior close, static fallback), the ``gate``
+    that vetoed/adjusted (``null`` if none), and the exact AS-OF ``signals`` the
+    decision consumed — so the user and A2 can see why each day is long/short/flat.
+    """
+    return {
+        "state": dec.state,
+        "side": dec.side,
+        "asof": dec.asof,
+        "gate": dec.gate,
+        "signals": dict(dec.signals),
+    }
+
+
 def _serialize_day(
     r: DayResult,
     regime_by_date: dict[int, dict[str, float | None]] | None = None,
+    decision_by_date: dict[int, Decision] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "date": _int_to_iso(r.date),
@@ -789,10 +970,15 @@ def _serialize_day(
             "cost_usd": r.pnl.cost_usd,
             "n_fallback_fills": r.pnl.n_fallback_fills,
         }
-    # F2.1: attach per-day regime signals ONLY when emission is on. When off,
-    # ``regime_by_date`` is None and NO key is added -> the day dict is
-    # byte-identical to the pre-feature baseline (regression guard).
-    if regime_by_date is not None:
+    # Regime block. When side_mode is regime_driven the day carries the DECISION
+    # readout (state/side/asof/gate/as-of signals — the WHY). Else, when only
+    # F2.1 emit_signals is on, the raw per-day signals. When BOTH are off,
+    # ``decision_by_date`` and ``regime_by_date`` are None and NO key is added ->
+    # the day dict is byte-identical to the pre-feature baseline (regression guard).
+    if decision_by_date is not None:
+        dec = decision_by_date.get(r.date)
+        out["regime"] = _serialize_decision(dec) if dec is not None else None
+    elif regime_by_date is not None:
         out["regime"] = regime_by_date.get(r.date)
     return out
 
@@ -824,7 +1010,10 @@ def _int_to_iso(date_int: int) -> str:
 def _warnings(results: list[DayResult]) -> list[str]:
     reasons: dict[str, int] = {}
     for r in results:
-        if r.status == "skipped" and r.skip_reason:
+        # ``regime_flat`` is an INTENTIONAL regime decision (side=flat), not a
+        # data-quality skip — surfaced via the per-day regime readout, never as a
+        # warning (same spirit as an exclude).
+        if r.status == "skipped" and r.skip_reason and r.skip_reason != "regime_flat":
             reasons[r.skip_reason] = reasons.get(r.skip_reason, 0) + 1
     # NB: excluded days carry status "excluded" (not "skipped") and are
     # intentional — they never generate a warning here.
@@ -861,8 +1050,14 @@ async def _process_day(
     exp_to_objs: dict[date, list[int]],
     tick_size: float,
     es_tick: float,
+    side: str,
 ) -> DayResult:
-    """Fetch marks + simulate a single (non-excluded) trading day (async I/O)."""
+    """Fetch marks + simulate a single (non-excluded) trading day (async I/O).
+
+    ``side`` is the resolved straddle side for THIS day: the run-level
+    ``straddle_side`` when regime side-mode is off, else the per-day regime
+    decision (never ``flat`` here — a flat day is skipped by the caller).
+    """
     expiry = _pick_expiry(all_exps, plan.day, req.expiry_mode, req.dte)
     if expiry is None:
         return DayResult(date=plan.date_int, status="skipped", skip_reason="no_expiry")
@@ -914,7 +1109,7 @@ async def _process_day(
 
     return simulate_day(
         date_int=plan.date_int,
-        side=req.straddle_side,
+        side=side,
         strike=strike,
         expiry=expiry,
         es_bars=es_bars,
@@ -950,14 +1145,39 @@ async def run_backtest(
     tick progress: ``total_days`` is the exceptions-removed weekday count, the
     authoritative denominator shared with :func:`count_trading_days`.
 
-    ``daily_reader`` (the P0.3 generic daily-series seam) is used ONLY when
-    ``req.regime.emit_signals`` is on, to fetch IND_SP_500 / VVIX and attach
-    per-day regime signals. When emission is off it is never touched — no extra
-    dwh fetch — and the response is byte-identical to the pre-feature baseline.
+    ``daily_reader`` (the P0.3 generic daily-series seam) is used ONLY when the
+    ``regime`` block is active — ``emit_signals`` on (F2.1 per-day signals) OR
+    ``side_mode='regime_driven'`` (F2.2 per-day side). When both are off it is
+    never touched — no extra dwh fetch — and the response days are byte-identical
+    to the pre-feature baseline.
+
+    Per-day side (F2.2): with ``side_mode='regime_driven'`` each trading day's
+    straddle side is resolved from the regime cascade as-of the PRIOR daily close
+    (no look-ahead); a ``flat`` decision SKIPS the day (status ``skipped``, reason
+    ``regime_flat``) exactly like an exclude — no fetch, no progress tick, not in
+    ``total_days``. With ``side_mode='off'`` every day uses the run-level
+    ``straddle_side`` exactly as before.
     """
+    reg = req.regime
     plans = resolve_day_plans(req)
     start = plans[0].day
-    total_days = sum(1 for p in plans if not p.excluded)
+
+    # F2.2: resolve per-day sides BEFORE the loop (needs the as-of daily signals),
+    # so ``flat`` days can be excluded from ``total_days`` and never fetched.
+    decision_by_date: dict[int, Decision] | None = None
+    if reg.side_mode == "regime_driven":
+        trading_dates = [p.date_int for p in plans if not p.excluded]
+        decision_by_date = await _resolve_regime_side_decisions(
+            daily_reader, req, trading_dates
+        )
+
+    def _is_flat(plan: DayPlan) -> bool:
+        if decision_by_date is None:
+            return False
+        dec = decision_by_date.get(plan.date_int)
+        return dec is not None and dec.side == "flat"
+
+    total_days = sum(1 for p in plans if not p.excluded and not _is_flat(p))
 
     roots = await reader.list_option_roots()
     option_object_ids = [int(r["object_id"]) for r in roots]
@@ -984,19 +1204,39 @@ async def run_backtest(
             )
             continue
 
+        if _is_flat(plan):
+            # Regime decided FLAT: skip the day like an exclude — no dwh fetch,
+            # not in total_days, no progress tick. The per-day ``regime`` readout
+            # (side=flat + state) explains WHY; not a data-quality warning.
+            results.append(
+                DayResult(
+                    date=plan.date_int, status="skipped", skip_reason="regime_flat"
+                )
+            )
+            continue
+
+        # Per-day side: the regime decision when driven, else the static side.
+        side = req.straddle_side
+        if decision_by_date is not None:
+            dec = decision_by_date.get(plan.date_int)
+            if dec is not None:
+                side = dec.side  # long/short here (flat handled above)
+
         results.append(
             await _process_day(
-                reader, req, plan, all_exps, exp_to_objs, tick_size, es_tick
+                reader, req, plan, all_exps, exp_to_objs, tick_size, es_tick, side
             )
         )
         days_done += 1
         if progress_cb is not None:
             progress_cb(days_done, total_days)
 
-    # F2.1 regime signals: computed ONLY when emission is on. Off => no fetch,
-    # regime_by_date stays None, and no ``regime`` key is added downstream.
+    # Regime EMISSION. When side_mode is regime_driven the per-day DECISION
+    # readout is emitted (decision_by_date, already resolved above). Else, when
+    # only F2.1 emit_signals is on, the raw per-day signals are fetched & emitted.
+    # Both off => no fetch, both maps None, no ``regime`` key downstream.
     regime_by_date: dict[int, dict[str, float | None]] | None = None
-    if req.regime.emit_signals:
+    if decision_by_date is None and reg.emit_signals:
         day_dates = [r.date for r in results]
         if daily_reader is not None and day_dates:
             try:
@@ -1008,14 +1248,12 @@ async def run_backtest(
                     "regime signal fetch failed; emitting null regime signals"
                 )
                 regime_by_date = _null_regime_signals(
-                    day_dates, req.regime.rv_windows, ("vvix",)
+                    day_dates, reg.rv_windows, ("vvix",)
                 )
         else:
             # emit on but no reader wired / no days: emit null-valued signals so
             # the response shape is still complete (never a silent omission).
-            regime_by_date = _null_regime_signals(
-                day_dates, req.regime.rv_windows, ("vvix",)
-            )
+            regime_by_date = _null_regime_signals(day_dates, reg.rv_windows, ("vvix",))
 
     aggregate = aggregate_days(results)
     return {
@@ -1024,7 +1262,9 @@ async def run_backtest(
             "min_date": WINDOW_MIN_DATE.isoformat(),
             "max_date": WINDOW_MAX_DATE.isoformat(),
         },
-        "days": [_serialize_day(r, regime_by_date) for r in results],
+        "days": [
+            _serialize_day(r, regime_by_date, decision_by_date) for r in results
+        ],
         "aggregate": _serialize_aggregate(aggregate),
         "warnings": _warnings(results),
     }
@@ -1038,7 +1278,7 @@ async def run_backtest(
 # tick-size handling, expiry/DTE resolution) namespaces the cache: bumping this
 # guarantees stale entries can never be served with ``from_cache: true``. BUMP on
 # ANY change to the intraday backtest compute output AND on each release.
-INTRADAY_COMPUTE_VERSION = "0.4.0"
+INTRADAY_COMPUTE_VERSION = "0.5.0"
 
 # A DISTINCT sqlite filename from the portfolio cache so the two do not share the
 # 200-entry LRU domain (they would otherwise evict each other's entries).
@@ -1114,17 +1354,23 @@ def _intraday_cache_key(req: RunRequest) -> str:
     invalidates every stale entry. Used by BOTH the run path and the read-only
     cache endpoints so their keys always coincide.
 
-    The ``regime`` block AUTO-participates in the key when emission is ON (its
-    windows/symbols then change the result), but is STRIPPED when
-    ``emit_signals`` is off: an off-regime has ZERO effect on the output, so a
-    default-off request must hash identically regardless of its (inert)
-    ``rv_windows`` / symbol sub-config — and identically to a pre-feature body.
+    The ``regime`` block AUTO-participates in the key when it is ACTIVE — either
+    ``emit_signals`` on (F2.1 signals change the response) OR
+    ``side_mode='regime_driven'`` (F2.2 per-day side changes the P&L). It is
+    STRIPPED only when BOTH halves are off: an inert regime has ZERO effect on the
+    output, so a default-off request must hash identically regardless of its
+    (inert) ``rv_windows`` / thresholds / gates sub-config — and identically to a
+    pre-feature (regime-absent) body.
     """
     payload = _strip_use_cache(req.model_dump(mode="json"))
     if isinstance(payload, dict):
         reg = payload.get("regime")
-        if isinstance(reg, dict) and not reg.get("emit_signals", False):
-            payload.pop("regime", None)
+        if isinstance(reg, dict):
+            active = reg.get("emit_signals", False) or (
+                reg.get("side_mode", "off") != "off"
+            )
+            if not active:
+                payload.pop("regime", None)
     return canonical_hash({"_cv": INTRADAY_COMPUTE_VERSION, "body": payload})
 
 

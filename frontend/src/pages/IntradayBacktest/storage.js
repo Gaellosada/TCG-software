@@ -66,6 +66,16 @@ export const DEFAULT_FORM = Object.freeze({
   // two-sided quote.
   cost_enabled: false,
   cost_fallback_pts: 0,
+  // F2.2 regime-driven side: default OFF (every day trades the static
+  // straddle_side, byte-identical to the pre-feature baseline). When on, each
+  // day's side is resolved from the vol-regime cascade (backwardation ladder +
+  // low-vol floor + VVIX gate) as-of the prior daily close; a flat decision
+  // skips the day. All thresholds are configurable, none hardcoded.
+  regime_side_enabled: false,
+  regime_hvol_tolerance: 0,
+  regime_extremely_low_h20: 0,
+  regime_vvix_gate_enabled: false,
+  regime_vvix_gate_level: 0,
 });
 
 function isObj(x) {
@@ -165,6 +175,19 @@ function sanitiseForm(raw) {
     cost_fallback_pts: (Number.isFinite(Number(f.cost_fallback_pts))
       && Number(f.cost_fallback_pts) >= 0)
       ? Number(f.cost_fallback_pts) : DEFAULT_FORM.cost_fallback_pts,
+    // F2.2 regime-driven side knobs. Non-negative floats; a bad/missing value
+    // collapses to the (inert) default so a corrupt payload never rides the wire.
+    regime_side_enabled: Boolean(f.regime_side_enabled),
+    regime_hvol_tolerance: (Number.isFinite(Number(f.regime_hvol_tolerance))
+      && Number(f.regime_hvol_tolerance) >= 0)
+      ? Number(f.regime_hvol_tolerance) : DEFAULT_FORM.regime_hvol_tolerance,
+    regime_extremely_low_h20: (Number.isFinite(Number(f.regime_extremely_low_h20))
+      && Number(f.regime_extremely_low_h20) >= 0)
+      ? Number(f.regime_extremely_low_h20) : DEFAULT_FORM.regime_extremely_low_h20,
+    regime_vvix_gate_enabled: Boolean(f.regime_vvix_gate_enabled),
+    regime_vvix_gate_level: (Number.isFinite(Number(f.regime_vvix_gate_level))
+      && Number(f.regime_vvix_gate_level) >= 0)
+      ? Number(f.regime_vvix_gate_level) : DEFAULT_FORM.regime_vvix_gate_level,
   };
 }
 

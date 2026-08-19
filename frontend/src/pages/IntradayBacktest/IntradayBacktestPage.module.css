@@ -687,6 +687,19 @@
   color: var(--accent);
 }
 
+/* F2.2: the resolved regime side (L/S) on a traded day — a compact, muted
+ * marker so the regime-driven direction is legible without competing with the
+ * P&L figure. */
+.regimeBadge {
+  font-size: 0.55rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0 0.15rem;
+  border-radius: 2px;
+  color: var(--text-muted, #888);
+  border: 1px solid color-mix(in srgb, currentColor 40%, transparent);
+}
+
 /* A traded day that exited on a trigger — subtle accent outline so triggered
  * days stand out at a glance without overriding the profit/loss fill. */
 .cellTriggered {

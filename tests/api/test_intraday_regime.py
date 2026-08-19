@@ -148,13 +148,17 @@ async def test_fetch_regime_signals_computes_rv_and_joins_vvix() -> None:
         assert set(out[d]) == {"h2", "h3", "vvix"}
         assert out[d]["h2"] is not None
     assert out[20250203]["vvix"] == 95.0
-    # Two reads: IND_SP_500 with a lookback START before the range, VVIX over
-    # the range only.
+    # Two reads: IND_SP_500 AND VVIX both with a lookback START before the range.
+    # (F2.2 change: VVIX now also reads with lookback so the no-look-ahead as-of
+    # side decision has a PRIOR daily close available for the first backtest day.
+    # Extra VVIX history is harmless for the F2.1 display path, which only reads
+    # the backtest-day entries.)
     symbols = [c["symbol"] for c in reader.calls]
     assert symbols == ["IND_SP_500", "IND_VVIX"]
     sp_call = reader.calls[0]
     assert sp_call["start"] < date(2025, 2, 3)  # lookback applied
-    assert reader.calls[1]["start"] == date(2025, 2, 3)  # VVIX no lookback
+    assert reader.calls[1]["start"] < date(2025, 2, 3)  # VVIX lookback too (F2.2)
+    assert reader.calls[1]["end"] == date(2025, 2, 5)  # end still the range end
 
 
 # --------------------------------------------------------------------------- #
