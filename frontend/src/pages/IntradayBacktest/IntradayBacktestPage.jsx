@@ -36,6 +36,7 @@ import WeekdayAttributionView from './WeekdayAttributionView';
 import RegimeSensitivityView from './RegimeSensitivityView';
 import EventAttributionView from './EventAttributionView';
 import LadderEntriesView from './LadderEntriesView';
+import LadderAnalysisView from './LadderAnalysisView';
 import styles from './IntradayBacktestPage.module.css';
 
 // Progress poll cadence (ms). Kept small so the "X / N days" readout tracks the
@@ -1474,6 +1475,11 @@ export default function IntradayBacktestPage() {
           an ``entries[]``); inert (null) otherwise, so it never disturbs the
           day-level calendar or the aggregate-keyed attribution views above. */}
       {days.length > 0 && <LadderEntriesView days={days} />}
+
+      {/* A4: cross-day ladder analysis (which rung/entry-time performs best) —
+          pure post-processing over the same ``entries[]``; shows a hint
+          instead of a chart when the run isn't (meaningfully) laddered. */}
+      {days.length > 0 && <LadderAnalysisView days={days} />}
 
       {days.length > 0 && (
         <Card
