@@ -32,6 +32,7 @@ from tcg.data._sql.daily_series import DailySeriesReader
 from tcg.data._sql.intraday_v2 import IntradayV2Reader
 from tcg.engine.intraday_backtest import (
     aggregate_days,
+    aggregate_ladder_day,
     parse_hhmm,
     resolve_et_to_utc,
     select_atm_strike,
@@ -62,6 +63,7 @@ from tcg.types.intraday import (
     HedgeTargetSpec,
     HedgeTimingSpec,
     HedgeTriggers,
+    LadderEntry,
     MaxSpreadCond,
     MaxUnderlyingMoveCond,
     MinPremiumCond,
@@ -1218,7 +1220,35 @@ def _serialize_day(
         out["regime"] = _serialize_decision(dec) if dec is not None else None
     elif regime_by_date is not None:
         out["regime"] = regime_by_date.get(r.date)
+    # F4.1: laddered days carry the per-rung children here. The KEY is added ONLY
+    # when the day is laddered (``entries`` non-empty), so a single-entry (or
+    # ladder-off) day dict is byte-identical to the pre-F4.1 baseline. The
+    # day-level fields above ARE the retained one-row-per-day AGGREGATE the
+    # weekday/regime/event views key on — unchanged in shape.
+    if r.entries:
+        out["entries"] = [_serialize_ladder_entry(le) for le in r.entries]
     return out
+
+
+def _serialize_ladder_entry(le: LadderEntry) -> dict[str, Any]:
+    """Wire form of one laddered rung (F4.1): the full per-entry straddle detail
+    (via :func:`_serialize_day` on the child) PLUS the rung's ``entry_ts``, its
+    sizing ``contracts`` weight, and ``weighted_pnl_usd`` = the rung's dollar
+    CONTRIBUTION to the day (``contracts * total_pnl_usd``). By construction the
+    day aggregate's ``total_pnl_usd`` == the sum of the rungs' ``weighted_pnl_usd``
+    (unambiguous PnL aggregation)."""
+    child = _serialize_day(le.result)
+    wpnl = (
+        le.contracts * le.result.pnl.total_pnl_usd
+        if le.result.pnl is not None
+        else 0.0
+    )
+    return {
+        **child,
+        "entry_ts": _iso(le.entry_ts),
+        "contracts": le.contracts,
+        "weighted_pnl_usd": wpnl,
+    }
 
 
 def _serialize_aggregate(a: AggregateResult) -> dict[str, Any]:
@@ -1280,36 +1310,32 @@ def count_trading_days(req: RunRequest) -> int:
     return sum(1 for p in resolve_day_plans(req) if not p.excluded)
 
 
-async def _process_day(
+async def _simulate_entry(
     reader: IntradayV2Reader,
     req: RunRequest,
     plan: DayPlan,
-    all_exps: list[date],
+    *,
+    entry_ts: datetime,
+    expiry: date,
     exp_to_objs: dict[date, list[int]],
+    es_bars: list,
+    session_open: datetime,
+    win_start: datetime,
+    win_end: datetime,
     tick_size: float,
     es_tick: float,
     side: str,
 ) -> DayResult:
-    """Fetch marks + simulate a single (non-excluded) trading day (async I/O).
+    """Run ONE straddle's full open->hedge->settlement lifecycle at ``entry_ts``.
 
-    ``side`` is the resolved straddle side for THIS day: the run-level
-    ``straddle_side`` when regime side-mode is off, else the per-day regime
-    decision (never ``flat`` here — a flat day is skipped by the caller).
-    """
-    expiry = _pick_expiry(all_exps, plan.day, req.expiry_mode, req.dte)
-    if expiry is None:
-        return DayResult(date=plan.date_int, status="skipped", skip_reason="no_expiry")
-
-    # Window: from the session open (09:30 ET, the max_underlying_move day-open
-    # reference) or entry, whichever is earlier, out to the exit-scan horizon
-    # (exit target + its snap tolerance) — plus a small buffer both sides.
-    buf = timedelta(minutes=2.0)
-    session_open = resolve_et_to_utc(plan.day, _SESSION_OPEN_ET, _TZ)
-    win_start = min(plan.entry_ts, session_open) - buf
-    win_end = plan.exit_ts + timedelta(minutes=plan.exit_tol) + buf
-    es_bars = await reader.fetch_es_future_1m(win_start, win_end, on_or_after=plan.day)
-    # ATM reference: ES nearest the entry target within the entry tolerance.
-    es1 = snap_nearest(es_bars, plan.entry_ts, plan.entry_tol)
+    The per-entry unit reused by BOTH the single-entry path and each laddered
+    rung (F4.1). The ES bars + expiry + window are the DAY's shared context; the
+    ATM strike + option contracts + marks are picked PER ENTRY at this rung's own
+    ES level (so a 10:00 rung and a 14:00 rung can be different strikes). Cost
+    (P0.2) and hedge timing (F1.1/F1.2) apply per entry via ``req``. Returns the
+    per-entry DayResult (``skipped`` on no-quote / no-contract, else the sim)."""
+    # ATM reference: ES nearest THIS entry target within the entry tolerance.
+    es1 = snap_nearest(es_bars, entry_ts, plan.entry_tol)
     if es1 is None:
         return DayResult(
             date=plan.date_int,
@@ -1319,7 +1345,7 @@ async def _process_day(
         )
 
     chosen: tuple[int, float, int, int] | None = None
-    for oid in exp_to_objs[expiry]:
+    for oid in exp_to_objs.get(expiry, []):
         strikes = await reader.list_strikes(oid, expiry)
         if not strikes:
             continue
@@ -1343,7 +1369,7 @@ async def _process_day(
     # Anchor the day-open reference to the 09:30 session open, not es_bars[0]
     # (~09:28, the buffered window start), and clamp to min(entry, open) so a
     # pre-open entry can never reference a future 09:30 price (no look-ahead).
-    es_day_open = _resolve_es_day_open(es_bars, plan.entry_ts, session_open)
+    es_day_open = _resolve_es_day_open(es_bars, entry_ts, session_open)
 
     return simulate_day(
         date_int=plan.date_int,
@@ -1353,7 +1379,7 @@ async def _process_day(
         es_bars=es_bars,
         call_marks=call_marks,
         put_marks=put_marks,
-        entry_ts=plan.entry_ts,
+        entry_ts=entry_ts,
         exit_ts=plan.exit_ts,
         entry_tol=plan.entry_tol,
         exit_tol=plan.exit_tol,
@@ -1366,6 +1392,134 @@ async def _process_day(
         es_day_open=es_day_open,
         multiplier=ES_MULTIPLIER,
         cost=_to_engine_cost(req.cost),
+    )
+
+
+def _ladder_weight_fn(sizing: "LadderSizingModel", rung_results: list):
+    """Build the per-rung sizing-weight function (F4.1, pure).
+
+    ``equal_contracts`` => a constant ``contracts`` weight. ``equal_notional`` =>
+    ``target_notional / (straddle_price_i * multiplier)`` so each rung deploys the
+    same premium dollars; ``target_notional`` is ``notional_per_entry_usd`` when
+    > 0, else AUTO = ``contracts *`` the FIRST traded rung's notional. A rung that
+    did not trade (no ``entry``/``pnl``) keeps a nominal ``contracts`` weight (it
+    contributes nothing to the sum anyway); a degenerate zero-price notional maps
+    to weight 0 (never inf)."""
+    contracts = sizing.contracts
+    if sizing.mode != "equal_notional":
+        return lambda res: contracts
+
+    mult = ES_MULTIPLIER
+    first_notional: float | None = None
+    for res in rung_results:
+        if res.pnl is not None and res.entry is not None and res.entry.straddle_price > 0:
+            first_notional = res.entry.straddle_price * mult
+            break
+    if sizing.notional_per_entry_usd > 0:
+        target = sizing.notional_per_entry_usd
+    elif first_notional is not None:
+        target = contracts * first_notional
+    else:
+        target = 0.0
+
+    def _w(res) -> float:
+        if res.pnl is None or res.entry is None:
+            return contracts
+        notional_i = res.entry.straddle_price * mult
+        return target / notional_i if notional_i > 0 else 0.0
+
+    return _w
+
+
+async def _process_day(
+    reader: IntradayV2Reader,
+    req: RunRequest,
+    plan: DayPlan,
+    all_exps: list[date],
+    exp_to_objs: dict[date, list[int]],
+    tick_size: float,
+    es_tick: float,
+    side: str,
+) -> DayResult:
+    """Fetch marks + simulate a single (non-excluded) trading day (async I/O).
+
+    ``side`` is the resolved straddle side for THIS day: the run-level
+    ``straddle_side`` when regime side-mode is off, else the per-day regime
+    decision (never ``flat`` here — a flat day is skipped by the caller). The
+    same side applies to EVERY laddered rung (F4.1: the per-day regime decision
+    is made once for the day and shared).
+
+    Ladder OFF => exactly one straddle (byte-identical to the pre-F4.1 path).
+    Ladder ON => open a straddle at each rung in ``plan.entry_tss`` and hold each
+    to settlement; the returned DayResult is the day AGGREGATE (weighted sum of
+    the rungs) carrying the per-rung children on ``entries``.
+    """
+    expiry = _pick_expiry(all_exps, plan.day, req.expiry_mode, req.dte)
+    if expiry is None:
+        return DayResult(date=plan.date_int, status="skipped", skip_reason="no_expiry")
+
+    # Window: from the session open (09:30 ET, the max_underlying_move day-open
+    # reference) or the FIRST entry, whichever is earlier, out to the exit-scan
+    # horizon (exit target + its snap tolerance) — plus a small buffer both sides.
+    # The ES bars are fetched ONCE and shared by every rung (rungs share only the
+    # market bars, never position/hedge state — the key F4.1 reuse insight).
+    buf = timedelta(minutes=2.0)
+    session_open = resolve_et_to_utc(plan.day, _SESSION_OPEN_ET, _TZ)
+    win_start = min(plan.entry_ts, session_open) - buf
+    win_end = plan.exit_ts + timedelta(minutes=plan.exit_tol) + buf
+    es_bars = await reader.fetch_es_future_1m(win_start, win_end, on_or_after=plan.day)
+
+    entry_tss = plan.entry_tss or [plan.entry_ts]
+
+    # Ladder OFF (or a degenerate single rung with the ladder disabled): the day
+    # IS one straddle — return it directly so the result is bit-identical to the
+    # pre-F4.1 single-entry path (no aggregate wrapper, no ``entries`` key).
+    if not req.ladder.enabled:
+        return await _simulate_entry(
+            reader, req, plan,
+            entry_ts=entry_tss[0], expiry=expiry, exp_to_objs=exp_to_objs,
+            es_bars=es_bars, session_open=session_open,
+            win_start=win_start, win_end=win_end,
+            tick_size=tick_size, es_tick=es_tick, side=side,
+        )
+
+    # Ladder ON: run each rung independently, in time order, enforcing the
+    # max-concurrent cap. Because every rung is HELD TO SETTLEMENT, an open
+    # straddle never closes intraday, so ``currently_open`` only grows — the cap
+    # therefore limits the number of rungs that OPEN per day (a rung that skips on
+    # a data gap consumes no slot).
+    max_concurrent = req.ladder.max_concurrent
+    currently_open = 0
+    rung_results: list[DayResult] = []
+    for ts in entry_tss:
+        if max_concurrent > 0 and currently_open >= max_concurrent:
+            rung_results.append(
+                DayResult(
+                    date=plan.date_int,
+                    status="skipped",
+                    skip_reason="max_concurrent",
+                    expiry=expiry,
+                )
+            )
+            continue
+        res = await _simulate_entry(
+            reader, req, plan,
+            entry_ts=ts, expiry=expiry, exp_to_objs=exp_to_objs,
+            es_bars=es_bars, session_open=session_open,
+            win_start=win_start, win_end=win_end,
+            tick_size=tick_size, es_tick=es_tick, side=side,
+        )
+        rung_results.append(res)
+        if res.status == "ok":
+            currently_open += 1
+
+    weight = _ladder_weight_fn(req.ladder.sizing, rung_results)
+    entries = [
+        LadderEntry(entry_ts=ts, contracts=weight(res), result=res)
+        for ts, res in zip(entry_tss, rung_results)
+    ]
+    return aggregate_ladder_day(
+        plan.date_int, entries, multiplier=ES_MULTIPLIER, expiry=expiry
     )
 
 
