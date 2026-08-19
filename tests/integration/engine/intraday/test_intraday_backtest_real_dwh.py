@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from tcg.core.api.intraday_backtest import RunRequest, run_backtest
+from tcg.core.api.intraday_backtest import CostModelConfig, RunRequest, run_backtest
 from tcg.data._sql.connection import DwhConnectionPool, load_dwh_config
 from tcg.data._sql.intraday_v2 import IntradayV2Reader
 from tcg.engine.intraday_backtest import resolve_et_to_utc
@@ -142,8 +142,12 @@ async def test_run_backtest_end_to_end(reader):
 
     # P0.2: the SAME request with the half-spread cost model ON must charge a
     # non-negative cost on the REAL bbba spreads and reduce net P&L accordingly.
+    # NOTE: Pydantic v2 `model_copy(update=...)` does NOT re-validate, so the
+    # update value must already be a `CostModelConfig` (a raw dict would leave
+    # `req.cost` a dict and break `_to_engine_cost`). Production builds RunRequest
+    # via JSON-body validation, which coerces the nested dict correctly.
     req_cost = req.model_copy(
-        update={"cost": {"enabled": True, "fallback_cost_pts": 0.0}}
+        update={"cost": CostModelConfig(enabled=True, fallback_cost_pts=0.0)}
     )
     result_cost = await run_backtest(reader, req_cost)
     dc = [d for d in result_cost["days"] if d["status"] == "ok"][0]
