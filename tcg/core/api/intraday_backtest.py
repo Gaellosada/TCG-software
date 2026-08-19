@@ -1776,6 +1776,14 @@ def _intraday_cache_key(req: RunRequest) -> str:
     pre-feature (regime-absent) body. The ``allowlist`` block (F3.2) is stripped
     the same way when ``mode='off'`` (inert => zero effect on which days trade).
     ``is_active`` is the single predicate the strip and the fetch/branch agree on.
+
+    NOTE: ``cost`` and ``hedge.timing`` (also default-off/neutral) are NEVER
+    stripped here even when inert — they always participate in the payload
+    hash. Their default-off identity is preserved by a DIFFERENT mechanism:
+    an ``INTRADAY_COMPUTE_VERSION`` bump at the time each was introduced, so a
+    stale pre-feature cache entry is invalidated by the version salt rather
+    than by hashing identically to the new (larger) payload. Two mechanisms,
+    same goal (no wrong cache hit across a feature's introduction).
     """
     payload = _strip_use_cache(req.model_dump(mode="json"))
     if isinstance(payload, dict):

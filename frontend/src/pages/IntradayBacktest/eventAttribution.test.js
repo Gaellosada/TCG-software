@@ -195,3 +195,34 @@ describe('computeEventAttribution — non-traded / malformed days', () => {
     expect(result.reason).toBe('no_overlap');
   });
 });
+
+describe('computeEventAttribution — laddered run (drift lock)', () => {
+  // A laddered day (F4.1) retains the day-level AGGREGATE's `date`/`pnl` at
+  // the top level AND carries an `entries[]` array of per-rung children
+  // (each its own `{ entry_ts, status, weighted_pnl_usd, ... }`). This module
+  // must attribute off the day-level aggregate `date`/`pnl.total_pnl_usd`
+  // only, and must not be confused, double-count, or crash because `entries`
+  // is present — mirrors ladderAnalysis.js's consumption of the same
+  // `days[]`.
+  it('attributes a laddered FOMC day by its day-level aggregate pnl, ignoring entries[]', () => {
+    const laddered = {
+      ...tradedDay('2025-01-29', 100),
+      entries: [
+        { entry_ts: '2025-01-29T14:00:00Z', status: 'ok', weighted_pnl_usd: 260 },
+        { entry_ts: '2025-01-29T14:30:00Z', status: 'ok', weighted_pnl_usd: -160 },
+      ],
+    };
+    const days = [laddered, tradedDay('2025-02-13', 10)]; // non-event
+    const cal = calendar({ FOMC: [{ date: '2025-01-29', tentative: false }] });
+    const result = computeEventAttribution(days, cal);
+    expect(result.available).toBe(true);
+    const byKey = Object.fromEntries(result.typeBuckets.map((b) => [b.key, b]));
+    // N=1 per laddered DAY, not per rung — the 2 entries do not inflate N.
+    expect(byKey.FOMC.n).toBe(1);
+    expect(byKey.FOMC.sumUsd).toBeCloseTo(100); // the day's own aggregate pnl, not 260 + -160.
+    const comparisonByKey = Object.fromEntries(result.comparison.map((b) => [b.key, b]));
+    expect(comparisonByKey.event.n).toBe(1);
+    expect(comparisonByKey.event.sumUsd).toBeCloseTo(100);
+    expect(comparisonByKey.non_event.n).toBe(1);
+  });
+});

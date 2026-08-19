@@ -194,3 +194,32 @@ describe('computeRegimeSensitivity — scatter data', () => {
     expect(result.scatter.vvix).toHaveLength(1);
   });
 });
+
+describe('computeRegimeSensitivity — laddered run (drift lock)', () => {
+  // A laddered day (F4.1) retains the day-level AGGREGATE's `pnl`/`regime` at
+  // the top level AND carries an `entries[]` array of per-rung children
+  // (each its own `{ entry_ts, status, weighted_pnl_usd, ... }`, no `regime`
+  // key of its own). This module must read the day-level aggregate only and
+  // must not be confused, double-count, or crash because `entries` is
+  // present — mirrors ladderAnalysis.js's consumption of the same `days[]`.
+  it('reads the day-level aggregate regime/pnl on a laddered day and ignores entries[]', () => {
+    const laddered = decisionDay('2025-02-03', 100, 'hvol_on', { vvix: 95.3, h20: 0.2, h100: 0.15 }, {
+      entries: [
+        { entry_ts: '2025-02-03T14:00:00Z', status: 'ok', weighted_pnl_usd: 260 },
+        { entry_ts: '2025-02-03T14:30:00Z', status: 'ok', weighted_pnl_usd: -160 },
+      ],
+    });
+    const days = [laddered, decisionDay('2025-02-04', -50, 'hvol_off')];
+    const result = computeRegimeSensitivity(days);
+    expect(result.available).toBe(true);
+    const byState = Object.fromEntries(result.buckets.map((b) => [b.state, b]));
+    // N=1 per laddered DAY, not per rung — the 2 entries do not inflate N.
+    expect(byState.hvol_on.n).toBe(1);
+    expect(byState.hvol_on.sumUsd).toBeCloseTo(100); // the day's own aggregate pnl, not 260 + -160.
+    expect(byState.hvol_off.n).toBe(1);
+    // Scatter also joins off the day-level regime signals, once per day.
+    expect(result.scatter.vvix).toEqual([{ x: 95.3, y: 100, date: '2025-02-03' }]);
+    expect(result.scatter.rvSpread).toHaveLength(1);
+    expect(result.scatter.rvSpread[0].y).toBe(100);
+  });
+});
