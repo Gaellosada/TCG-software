@@ -69,7 +69,9 @@ def fake_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     recorded: dict[str, Any] = {"seq": None, "called": 0}
 
-    async def _fake(reader: Any, req: Any, progress_cb: Any = None) -> dict[str, Any]:
+    async def _fake(
+        reader: Any, req: Any, progress_cb: Any = None, daily_reader: Any = None
+    ) -> dict[str, Any]:
         recorded["called"] += 1
         total = ib.count_trading_days(req)  # same denominator the endpoint pins
         seq: list[int] = []
@@ -210,6 +212,10 @@ class _FakeReader:
 
     async def get_es_future_tick_size(self) -> float:
         return 0.25
+
+    async def fetch_future_settlement(self, *a: Any, **k: Any) -> dict[Any, float]:
+        # Gap 1: default exit_mode="auto" fetches the settlement grid pre-loop.
+        return {}
 
     async def fetch_es_future_1m(self, *a: Any, **k: Any) -> list[Any]:
         return []

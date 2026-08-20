@@ -72,7 +72,9 @@ def fake_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     can never alias the fake's constant)."""
     recorded: dict[str, Any] = {"called": 0}
 
-    async def _fake(reader: Any, req: Any, progress_cb: Any = None) -> dict[str, Any]:
+    async def _fake(
+        reader: Any, req: Any, progress_cb: Any = None, daily_reader: Any = None
+    ) -> dict[str, Any]:
         recorded["called"] += 1
         total = ib.count_trading_days(req)
         if progress_cb is not None:
@@ -125,6 +127,83 @@ def test_different_body_changes_key() -> None:
     a = ib.RunRequest(**_body(straddle_side="long"))
     b = ib.RunRequest(**_body(straddle_side="short"))
     assert ib._intraday_cache_key(a) != ib._intraday_cache_key(b)
+
+
+# --------------------------------------------------------------------------- #
+# P0.2 cost-model field — round-trip, default OFF, cache-key participation
+# --------------------------------------------------------------------------- #
+def test_cost_model_defaults_off_and_round_trips() -> None:
+    req = ib.RunRequest(**_body())
+    assert req.cost.enabled is False
+    assert req.cost.fallback_cost_pts == 0.0
+    # Round-trips through JSON serialization (cache-key canonicalization path).
+    dumped = req.model_dump(mode="json")
+    assert dumped["cost"] == {"enabled": False, "fallback_cost_pts": 0.0}
+    back = ib.RunRequest(**{**_body(), "cost": dumped["cost"]})
+    assert back.cost == req.cost
+
+
+def test_cost_model_participates_in_cache_key() -> None:
+    off = ib.RunRequest(**_body())  # default OFF
+    on = ib.RunRequest(**_body(cost={"enabled": True, "fallback_cost_pts": 0.25}))
+    on2 = ib.RunRequest(**_body(cost={"enabled": True, "fallback_cost_pts": 0.25}))
+    # A changed cost model changes the content key (cost changes the result);
+    # two equal cost bodies hash equal (deterministic canonicalization).
+    assert ib._intraday_cache_key(off) != ib._intraday_cache_key(on)
+    assert ib._intraday_cache_key(on) == ib._intraday_cache_key(on2)
+    # A default-OFF explicit cost hashes identically to the implicit default.
+    explicit_off = ib.RunRequest(
+        **_body(cost={"enabled": False, "fallback_cost_pts": 0.0})
+    )
+    assert ib._intraday_cache_key(off) == ib._intraday_cache_key(explicit_off)
+
+
+def test_cost_model_rejects_negative_fallback() -> None:
+    import pytest as _pytest
+
+    with _pytest.raises(Exception):
+        ib.RunRequest(**_body(cost={"enabled": True, "fallback_cost_pts": -1.0}))
+
+
+# --------------------------------------------------------------------------- #
+# W2/P1 hedge-timing fields — round-trip, default neutral, cache-key participation
+# --------------------------------------------------------------------------- #
+def test_hedge_timing_defaults_round_trip() -> None:
+    req = ib.RunRequest(**_body())
+    assert req.hedge.timing.only_within_minutes_before_close is None
+    assert req.hedge.timing.skip_near_extremum.enabled is False
+    dumped = req.model_dump(mode="json")
+    assert dumped["hedge"]["timing"] == {
+        "only_within_minutes_before_close": None,
+        "skip_near_extremum": {
+            "enabled": False, "window_minutes": 30.0,
+            "tolerance": 2.0, "tolerance_unit": "points",
+        },
+    }
+    back = ib.RunRequest(**{**_body(), "hedge": dumped["hedge"]})
+    assert back.hedge.timing == req.hedge.timing
+
+
+def test_hedge_timing_participates_in_cache_key() -> None:
+    off = ib.RunRequest(**_body())  # timing neutral
+    f11 = ib.RunRequest(**_body(hedge={"timing": {
+        "only_within_minutes_before_close": 60.0}}))
+    f12 = ib.RunRequest(**_body(hedge={"timing": {"skip_near_extremum": {
+        "enabled": True, "window_minutes": 30.0, "tolerance": 2.0}}}))
+    f12b = ib.RunRequest(**_body(hedge={"timing": {"skip_near_extremum": {
+        "enabled": True, "window_minutes": 30.0, "tolerance": 2.0}}}))
+    # Each enabled gate changes the content key (it changes the result); two equal
+    # bodies hash equal (deterministic canonicalization).
+    assert ib._intraday_cache_key(off) != ib._intraday_cache_key(f11)
+    assert ib._intraday_cache_key(off) != ib._intraday_cache_key(f12)
+    assert ib._intraday_cache_key(f11) != ib._intraday_cache_key(f12)
+    assert ib._intraday_cache_key(f12) == ib._intraday_cache_key(f12b)
+    # An explicit all-neutral timing hashes identically to the implicit default.
+    explicit_off = ib.RunRequest(**_body(hedge={"timing": {
+        "only_within_minutes_before_close": None,
+        "skip_near_extremum": {"enabled": False, "window_minutes": 30.0,
+                               "tolerance": 2.0, "tolerance_unit": "points"}}}))
+    assert ib._intraday_cache_key(off) == ib._intraday_cache_key(explicit_off)
 
 
 def test_intraday_and_portfolio_caches_are_distinct_files() -> None:

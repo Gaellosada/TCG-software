@@ -17,6 +17,12 @@ vi.mock('../../components/Chart', () => ({
 // assert it is called with the loaded config's payload.
 vi.mock('../../api/intradayBacktest', () => ({
   getIntradayBacktestMeta: vi.fn(),
+  getIntradayEventCalendar: vi.fn(() => Promise.resolve({
+    event_types: ['FOMC', 'NFP', 'CPI'],
+    events: { FOMC: [], NFP: [], CPI: [] },
+    all_dates: [],
+    tentative_dates: [],
+  })),
   startIntradayBacktest: vi.fn(),
   getIntradayBacktestProgress: vi.fn(),
   getIntradayBacktestCachedResult: vi.fn(),

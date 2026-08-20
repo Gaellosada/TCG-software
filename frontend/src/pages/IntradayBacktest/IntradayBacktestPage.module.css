@@ -254,6 +254,15 @@
   color: var(--text-secondary);
 }
 
+/* Small muted caption under a section header — e.g. clarifying a term used by
+   the controls below it (see the Timing block's "close" caption). */
+.sectionCaption {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin: 0.15rem 0 0.5rem;
+}
+
 .addCondition {
   padding: 0.3rem 0.5rem;
   border: 1px solid var(--border-primary);
@@ -676,6 +685,19 @@
   font-size: 0.6rem;
   line-height: 1;
   color: var(--accent);
+}
+
+/* F2.2: the resolved regime side (L/S) on a traded day — a compact, muted
+ * marker so the regime-driven direction is legible without competing with the
+ * P&L figure. */
+.regimeBadge {
+  font-size: 0.55rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0 0.15rem;
+  border-radius: 2px;
+  color: var(--text-muted, #888);
+  border: 1px solid color-mix(in srgb, currentColor 40%, transparent);
 }
 
 /* A traded day that exited on a trigger — subtle accent outline so triggered

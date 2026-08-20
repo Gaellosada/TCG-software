@@ -238,6 +238,57 @@ class HedgeTargetSpec:
 
 
 @dataclass(frozen=True)
+class SkipNearExtremumSpec:
+    """F1.2 — skip a hedge near the RUNNING session extremum in the late session.
+
+    In the final ``window_minutes`` before the hedge-window close, SUPPRESS a
+    hedge that would BUY the ES future while ES is within ``tolerance`` of the
+    RUNNING session HIGH, and symmetrically SUPPRESS one that would SELL while
+    within ``tolerance`` of the RUNNING session LOW. This is the general symmetric
+    "don't buy the high / sell the low into the close" rule — agnostic to the
+    straddle side, keyed on the hedge TRADE's buy/sell direction.
+
+    ``enabled=False`` (the DEFAULT) => the gate is inert (baseline preserved).
+    The "session high/low" is the running extremum from session open up to and
+    INCLUDING the current bar only — never the full-day high (no look-ahead).
+
+    * ``window_minutes`` — how many minutes before the hedge-window close the gate
+      is active (default 30).
+    * ``tolerance`` — proximity to the running extremum that triggers the skip,
+      in ES index points (``tolerance_unit="points"``) or as a percent of the
+      current ES price (``tolerance_unit="percent"``). ``0`` => only exactly at
+      the extremum.
+    """
+
+    enabled: bool = False
+    window_minutes: float = 30.0
+    tolerance: float = 2.0
+    tolerance_unit: str = "points"  # "points" | "percent"
+
+
+@dataclass(frozen=True)
+class HedgeTimingSpec:
+    """Session-relative hedge-timing gates (F1.1 + F1.2). All neutral by DEFAULT
+    => a default HedgeSpec hedges exactly as before (regression-preserving).
+
+    * ``only_within_minutes_before_close`` (F1.1) — when set, a (re)hedge is only
+      CONSIDERED in the final N minutes before the hedge-window close; earlier
+      bars (including the entry hedge) are suppressed. ``None`` (default) => no
+      time restriction (today's behavior).
+    * ``skip_near_extremum`` (F1.2) — the late-session buy-high / sell-low skip.
+
+    "Hedge-window close" is the endpoint of the delta-hedge window for the day
+    (``straddle_off_ts`` in the realized hedge) — derived from the existing
+    session/bar range, needing no extra input and never peeking past it.
+    """
+
+    only_within_minutes_before_close: float | None = None
+    skip_near_extremum: SkipNearExtremumSpec = field(
+        default_factory=SkipNearExtremumSpec
+    )
+
+
+@dataclass(frozen=True)
 class HedgeSpec:
     """The full hedge module (v4). ``enabled=False`` => no hedge (hedge_pnl=0).
 
@@ -245,13 +296,48 @@ class HedgeSpec:
     later; the API rejects unknown instruments 422). ``conditions`` is a tuple of
     ``MaxSpreadCond`` / ``MinQuoteSizeCond`` / ``MinRehedgeDeltaCond`` — a
     considered rehedge EXECUTES only if ALL pass on the ES-future bar; else it is
-    DEFERRED (reconsidered next bar, last-hedge state unchanged)."""
+    DEFERRED (reconsidered next bar, last-hedge state unchanged). ``timing`` adds
+    the session-relative hedge-timing gates (F1.1/F1.2); its default is fully
+    neutral so an existing HedgeSpec behaves identically."""
 
     enabled: bool = False
     instrument: str = "es_future"
     triggers: HedgeTriggers = field(default_factory=HedgeTriggers)
     conditions: tuple = ()
     target: HedgeTargetSpec = field(default_factory=HedgeTargetSpec)
+    timing: HedgeTimingSpec = field(default_factory=HedgeTimingSpec)
+
+
+@dataclass(frozen=True)
+class CostModel:
+    """Transaction-cost model for the option legs AND the ES delta-hedge.
+
+    ``enabled=False`` (the DEFAULT) => ZERO cost: every fill is taken at the bbba
+    two-sided MID exactly as before, so a cost-off run reproduces the prior
+    mid-fill P&L bit-for-bit (regression-preserving).
+
+    When ``enabled=True`` an ADVERSE half-spread crossing is charged on every
+    fill: a BUY fills at ``mid + half_spread`` and a SELL at ``mid - half_spread``
+    where ``half_spread = (ask - bid)/2`` from the SAME bbba bar used for the
+    mark. The magnitude of the charge is ``half_spread`` per unit crossed and it
+    ALWAYS reduces P&L, independent of side (a long entry buys / a short entry
+    sells — both cross the spread adversely).
+
+    One-sided / last-trade bars have no two-sided quote (``bid`` or ``ask``
+    ``None``), so the half-spread is UNDEFINED. A fixed ``fallback_cost_pts`` per
+    fill side (index points, default ``0.0``) is charged instead, and every such
+    fill is COUNTED (``n_fallback_fills``) so the fallback's coverage is
+    measurable rather than silently mid-filled. For the ES hedge the per-unit
+    cost (spread or fallback) scales by the size of the ES trade the rehedge
+    makes; ``n_fallback_fills`` counts fallback TRADE events (size-independent).
+    """
+
+    enabled: bool = False
+    fallback_cost_pts: float = 0.0
+
+
+# A disabled cost model: the ``simulate_day`` default (mid fills, zero cost).
+COST_DISABLED = CostModel(enabled=False)
 
 
 @dataclass(frozen=True)
@@ -304,12 +390,23 @@ class HedgeTrade:
 
 @dataclass(frozen=True)
 class DayPnl:
-    """Per-day P&L, in index points and dollars (points x multiplier)."""
+    """Per-day P&L, in index points and dollars (points x multiplier).
+
+    ``option_pnl_pts`` and ``hedge_pnl_pts`` are GROSS (mid-fill) P&L. When a
+    :class:`CostModel` is enabled, ``cost_pts`` (>= 0) is the total transaction
+    cost charged across the option + hedge fills and ``total_pnl_pts`` is NET of
+    it (``option + hedge - cost``); cost-off runs carry ``cost_pts == 0.0`` and
+    ``total == option + hedge`` exactly as before. ``n_fallback_fills`` counts
+    fills that hit the fixed fallback (a one-sided / last-trade bar).
+    """
 
     option_pnl_pts: float
     hedge_pnl_pts: float
     total_pnl_pts: float
     total_pnl_usd: float
+    cost_pts: float = 0.0
+    cost_usd: float = 0.0
+    n_fallback_fills: int = 0
 
 
 @dataclass(frozen=True)
@@ -320,6 +417,15 @@ class DayResult:
     ``straddle_on_ts``, ``straddle_price`` = call+put). ``legs`` carries the
     per-leg independent fills; ``straddle_on_ts`` / ``straddle_off_ts`` bound
     the BOTH-ON (hedged) window.
+
+    ``entries`` (F4.1 laddered multi-entry) is EMPTY for the single-entry path
+    (the day IS the straddle) — so a non-laddered DayResult is bit-identical to
+    before. When a day is laddered it carries N :class:`LadderEntry` children
+    (one per rung, each an independent straddle sim) and THIS DayResult is the
+    day-level AGGREGATE: its ``pnl`` is the sizing-WEIGHTED sum of the children
+    (see :func:`tcg.engine.intraday_backtest.aggregate_ladder_day`), while the
+    per-rung detail lives on the children. The one-row-per-day aggregate shape is
+    preserved so weekday/regime/event attribution keep working unchanged.
     """
 
     date: int  # YYYYMMDD
@@ -336,6 +442,28 @@ class DayResult:
     straddle_off_ts: datetime | None = None
     # v3: the early-exit trigger that fired (``None`` => time exit / no trigger).
     exit_trigger: ExitTrigger | None = None
+    # F4.1: per-rung children when this row is a laddered-day aggregate (else ()).
+    entries: tuple["LadderEntry", ...] = ()
+
+
+@dataclass(frozen=True)
+class LadderEntry:
+    """One rung of a laddered multi-entry day (F4.1).
+
+    A rung is a fully INDEPENDENT straddle: it opens at ``entry_ts`` and runs the
+    ordinary open -> hedge -> hold-to-settlement lifecycle, producing its own
+    :class:`DayResult` (``result``) whose ``pnl`` is per ONE contract. ``contracts``
+    is the sizing weight applied to this rung (the equal-contracts count, or the
+    equal-notional scale computed from this rung's own entry premium) — so the
+    rung's dollar contribution to the day is ``contracts * result.pnl.total_pnl_usd``
+    and the day aggregate is the sum of those contributions. Rungs never interact
+    (separate positions + hedge state; they share only the market bars), which is
+    exactly why a laddered day is N single-straddle sims summed, not a rewrite.
+    """
+
+    entry_ts: datetime  # UTC target for this rung's entry
+    contracts: float  # sizing weight (equal-contracts count | equal-notional scale)
+    result: "DayResult"
 
 
 @dataclass(frozen=True)
@@ -357,3 +485,23 @@ class AggregateResult:
     sharpe: float
     max_drawdown_usd: float
     equity_curve: tuple[EquityPoint, ...] = ()
+    # Transaction-cost coverage (0 when the cost model is off): total cost
+    # charged across all traded days and the count of fills that fell back to the
+    # fixed per-side cost because their bar had no two-sided quote.
+    total_cost_usd: float = 0.0
+    n_fallback_fills: int = 0
+    # Native %-NAV metrics (Gap 3) on the daily-return series
+    # ``return_day = total_pnl_pts / entry.underlying`` (Yann basis). Computed on
+    # the traded days that carry an ``entry`` (ladder-aggregate days, entry=None,
+    # are excluded — Q3). All defaults keep pre-Gap-3 constructors valid and are
+    # the neutral values for an empty return series. Formulas mirror
+    # ``w3_core.py`` / ``w3_yann_basis.py``.
+    n_return_days: int = 0
+    mean_daily_return: float = 0.0
+    pct_return_year: float = 0.0     # compounded: nav_final**(252/n) - 1 (fraction)
+    nav_final: float = 1.0           # prod(1 + r)
+    ann_vol: float = 0.0             # std(r, ddof=1) * sqrt(252)
+    return_sharpe: float = 0.0       # mean(r)/std(r, ddof=1) * sqrt(252), no rf
+    max_drawdown_pct: float = 0.0    # min(nav/cummax(nav) - 1)  (<= 0)
+    median_daily_return: float = 0.0
+    return_skew: float = 0.0         # bias-corrected G1 (== scipy skew, bias=False)

@@ -168,6 +168,26 @@ describe('IntradayBacktest storage', () => {
     expect(list[0].config.customDays).toEqual([]);
   });
 
+  it('sanitises the F3.2 allowlist fields (valid kept; junk types/dates dropped + deduped)', () => {
+    window.localStorage.setItem(INTRADAY_SIMS_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      sims: [{
+        id: 'a', name: 'al', config: {
+          form: {
+            ...DEFAULT_FORM,
+            allowlist_enabled: true,
+            allowlist_event_types: ['FOMC', 'PPI', 'FOMC', 'CPI'], // junk + dup
+            allowlist_dates: ['2025-02-14', '2025-02-14', 7, ''], // dup + junk
+          },
+        },
+      }],
+    }));
+    const form = listSims()[0].config.form;
+    expect(form.allowlist_enabled).toBe(true);
+    expect(form.allowlist_event_types).toEqual(['FOMC', 'CPI']);
+    expect(form.allowlist_dates).toEqual(['2025-02-14']);
+  });
+
   it('serializeConfig / deserializeConfig are a stable, idempotent boundary', () => {
     const cfg = serializeConfig(sampleState());
     // Idempotent: re-serializing the canonical form is a fixed point.

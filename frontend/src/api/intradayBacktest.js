@@ -48,6 +48,24 @@ export async function getIntradayBacktestMeta({ signal } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/intraday-backtest/event-calendar
+//   → { event_types:[...], events:{FOMC:[{date,tentative}],NFP,CPI},
+//       all_dates:[...], tentative_dates:[...] }
+// The curated static macro event dates (F3.1) backing the date-allowlist /
+// event-day controls (and the A3 attribution view). No dwh — always available.
+// ---------------------------------------------------------------------------
+export async function getIntradayEventCalendar({ signal } = {}) {
+  try {
+    return await fetchApi(
+      '/intraday-backtest/event-calendar',
+      signal ? { signal } : {},
+    );
+  } catch (err) {
+    rethrowClassified(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/intraday-backtest/run
 //   body: the PINNED request schema (see DESIGN.md).
 //   → per-day + aggregate + warnings response.

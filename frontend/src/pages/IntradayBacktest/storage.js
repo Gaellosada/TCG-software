@@ -61,7 +61,50 @@ export const DEFAULT_FORM = Object.freeze({
   expiry_mode: '0DTE',
   dte: 0,
   straddle_side: 'long',
+  // P0.2 transaction-cost model: default OFF (mid fills). ``cost_fallback_pts``
+  // is the fixed per-side cost (index points) charged when a fill bar has no
+  // two-sided quote.
+  cost_enabled: false,
+  cost_fallback_pts: 0,
+  // F2.2 regime-driven side: default OFF (every day trades the static
+  // straddle_side, byte-identical to the pre-feature baseline). When on, each
+  // day's side is resolved from the vol-regime cascade (backwardation ladder +
+  // low-vol floor + VVIX gate) as-of the prior daily close; a flat decision
+  // skips the day. All thresholds are configurable, none hardcoded.
+  regime_side_enabled: false,
+  regime_hvol_tolerance: 0,
+  regime_extremely_low_h20: 0,
+  regime_vvix_gate_enabled: false,
+  regime_vvix_gate_level: 0,
+  // F3.2 date-allowlist entry mode: default OFF (every eligible day trades,
+  // byte-identical baseline). When on, ONLY the resolved dates trade — the union
+  // of the selected event types (FOMC/NFP/CPI, curated F3.1) and any explicit
+  // dates. The DISTINCT OPPOSITE of custom_days (which excludes).
+  allowlist_enabled: false,
+  allowlist_event_types: [],
+  allowlist_dates: [],
+  // F4.1 laddered multi-entry: default OFF (exactly one entry/day, byte-identical
+  // baseline). When on, a day opens a straddle at every rung of a fixed-interval
+  // ladder and HOLDS EACH TO SETTLEMENT. ``first_entry`` / ``last_entry_cutoff``
+  // blank => the entry / exit time. ``max_concurrent`` 0 => unlimited (but with
+  // hold-to-settlement it caps the rungs that open per day). Sizing: equal
+  // contracts per rung, or equal premium notional (auto-referenced to the first
+  // traded rung when ``notional_per_entry_usd`` is 0).
+  ladder_enabled: false,
+  ladder_interval_minutes: 30,
+  ladder_first_entry: '',
+  ladder_last_entry_cutoff: '',
+  ladder_max_concurrent: 0,
+  ladder_sizing_mode: 'equal_contracts',
+  ladder_contracts: 1,
+  ladder_notional_per_entry_usd: 0,
 });
+
+// The valid ladder sizing modes (mirrors LadderSizingModel.mode).
+export const LADDER_SIZING_MODES = Object.freeze(['equal_contracts', 'equal_notional']);
+
+// The valid curated event types (mirrors tcg.types.event_calendar.EVENT_TYPES).
+export const ALLOWLIST_EVENT_TYPES = Object.freeze(['FOMC', 'NFP', 'CPI']);
 
 function isObj(x) {
   return x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -156,6 +199,56 @@ function sanitiseForm(raw) {
     dte: Number.isFinite(dteNum) ? dteNum : DEFAULT_FORM.dte,
     straddle_side: (f.straddle_side === 'long' || f.straddle_side === 'short')
       ? f.straddle_side : DEFAULT_FORM.straddle_side,
+    cost_enabled: Boolean(f.cost_enabled),
+    cost_fallback_pts: (Number.isFinite(Number(f.cost_fallback_pts))
+      && Number(f.cost_fallback_pts) >= 0)
+      ? Number(f.cost_fallback_pts) : DEFAULT_FORM.cost_fallback_pts,
+    // F2.2 regime-driven side knobs. Non-negative floats; a bad/missing value
+    // collapses to the (inert) default so a corrupt payload never rides the wire.
+    regime_side_enabled: Boolean(f.regime_side_enabled),
+    regime_hvol_tolerance: (Number.isFinite(Number(f.regime_hvol_tolerance))
+      && Number(f.regime_hvol_tolerance) >= 0)
+      ? Number(f.regime_hvol_tolerance) : DEFAULT_FORM.regime_hvol_tolerance,
+    regime_extremely_low_h20: (Number.isFinite(Number(f.regime_extremely_low_h20))
+      && Number(f.regime_extremely_low_h20) >= 0)
+      ? Number(f.regime_extremely_low_h20) : DEFAULT_FORM.regime_extremely_low_h20,
+    regime_vvix_gate_enabled: Boolean(f.regime_vvix_gate_enabled),
+    regime_vvix_gate_level: (Number.isFinite(Number(f.regime_vvix_gate_level))
+      && Number(f.regime_vvix_gate_level) >= 0)
+      ? Number(f.regime_vvix_gate_level) : DEFAULT_FORM.regime_vvix_gate_level,
+    // F3.2 date-allowlist knobs. event_types filtered to the valid curated set;
+    // dates kept as a de-duplicated array of strings. A bad/missing value
+    // collapses to the (inert) default so a corrupt payload never rides the wire.
+    allowlist_enabled: Boolean(f.allowlist_enabled),
+    allowlist_event_types: Array.isArray(f.allowlist_event_types)
+      ? [...new Set(f.allowlist_event_types.filter(
+          (t) => ALLOWLIST_EVENT_TYPES.includes(t)))]
+      : [...DEFAULT_FORM.allowlist_event_types],
+    allowlist_dates: Array.isArray(f.allowlist_dates)
+      ? [...new Set(f.allowlist_dates.filter((d) => typeof d === 'string' && d))]
+      : [...DEFAULT_FORM.allowlist_dates],
+    // F4.1 ladder knobs. Numeric fields collapse to their (inert) defaults on a
+    // bad/missing value so a corrupt payload never rides the wire; the two time
+    // fields are kept as strings (blank => backend default).
+    ladder_enabled: Boolean(f.ladder_enabled),
+    ladder_interval_minutes: (Number.isFinite(Number(f.ladder_interval_minutes))
+      && Number(f.ladder_interval_minutes) >= 1)
+      ? Number(f.ladder_interval_minutes) : DEFAULT_FORM.ladder_interval_minutes,
+    ladder_first_entry: typeof f.ladder_first_entry === 'string'
+      ? f.ladder_first_entry : DEFAULT_FORM.ladder_first_entry,
+    ladder_last_entry_cutoff: typeof f.ladder_last_entry_cutoff === 'string'
+      ? f.ladder_last_entry_cutoff : DEFAULT_FORM.ladder_last_entry_cutoff,
+    ladder_max_concurrent: (Number.isInteger(Number(f.ladder_max_concurrent))
+      && Number(f.ladder_max_concurrent) >= 0)
+      ? Number(f.ladder_max_concurrent) : DEFAULT_FORM.ladder_max_concurrent,
+    ladder_sizing_mode: LADDER_SIZING_MODES.includes(f.ladder_sizing_mode)
+      ? f.ladder_sizing_mode : DEFAULT_FORM.ladder_sizing_mode,
+    ladder_contracts: (Number.isFinite(Number(f.ladder_contracts))
+      && Number(f.ladder_contracts) > 0)
+      ? Number(f.ladder_contracts) : DEFAULT_FORM.ladder_contracts,
+    ladder_notional_per_entry_usd: (Number.isFinite(Number(f.ladder_notional_per_entry_usd))
+      && Number(f.ladder_notional_per_entry_usd) >= 0)
+      ? Number(f.ladder_notional_per_entry_usd) : DEFAULT_FORM.ladder_notional_per_entry_usd,
   };
 }
 

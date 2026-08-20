@@ -4,12 +4,14 @@ import Chart from '../../components/Chart';
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/format';
 import {
   getIntradayBacktestMeta,
+  getIntradayEventCalendar,
   startIntradayBacktest,
   getIntradayBacktestProgress,
   getIntradayBacktestCachedResult,
 } from '../../api/intradayBacktest';
 import {
   DEFAULT_FORM,
+  ALLOWLIST_EVENT_TYPES,
   serializeConfig,
   deepEqual,
   listSims,
@@ -30,6 +32,11 @@ import HedgeModule, {
   hedgeTriggersAllOff,
   isBlank,
 } from './HedgeModule';
+import WeekdayAttributionView from './WeekdayAttributionView';
+import RegimeSensitivityView from './RegimeSensitivityView';
+import EventAttributionView from './EventAttributionView';
+import LadderEntriesView from './LadderEntriesView';
+import LadderAnalysisView from './LadderAnalysisView';
 import styles from './IntradayBacktestPage.module.css';
 
 // Progress poll cadence (ms). Kept small so the "X / N days" readout tracks the
@@ -70,12 +77,16 @@ const MAX_CONSECUTIVE_POLL_ERRORS = 4;
 // to flush. Entry/exit are objects { time, snap_tolerance_minutes, conditions };
 // custom_days carry full per-day overrides.
 function buildRunPayload({ form, hedge, entry, exit, customDays }) {
-  return {
+  const payload = {
     start_date: form.start_date,
     end_date: form.end_date,
     expiry_mode: form.expiry_mode,
     dte: Number(form.dte) || 0,
     straddle_side: form.straddle_side,
+    cost: {
+      enabled: Boolean(form.cost_enabled),
+      fallback_cost_pts: Number(form.cost_fallback_pts) || 0,
+    },
     hedge: serializeHedge(hedge),
     entry: serializeModule(entry),
     exit: serializeModule(exit),
@@ -89,6 +100,54 @@ function buildRunPayload({ form, hedge, entry, exit, customDays }) {
       return out;
     }),
   };
+  // F2.2: only attach the regime block when regime-driven side is enabled, so a
+  // default (regime-off) payload stays BYTE-IDENTICAL to the pre-feature body
+  // (the backend defaults regime to off; an absent block hashes identically).
+  if (form.regime_side_enabled) {
+    payload.regime = {
+      side_mode: 'regime_driven',
+      hvol_tolerance: Number(form.regime_hvol_tolerance) || 0,
+      extremely_low_h20: Number(form.regime_extremely_low_h20) || 0,
+      gates: form.regime_vvix_gate_enabled
+        ? [{
+            enabled: true,
+            signal: 'vvix',
+            above: Number(form.regime_vvix_gate_level) || 0,
+            action: 'flat',
+          }]
+        : [],
+    };
+  }
+  // F3.2: only attach the allowlist block when the date-allowlist mode is on, so
+  // a default payload stays BYTE-IDENTICAL to the pre-feature body (the backend
+  // defaults allowlist to off; an absent block hashes identically).
+  if (form.allowlist_enabled) {
+    payload.allowlist = {
+      mode: 'allowlist',
+      dates: [...(form.allowlist_dates || [])],
+      event_types: [...(form.allowlist_event_types || [])],
+    };
+  }
+  // F4.1: only attach the ladder block when enabled, so a default payload stays
+  // BYTE-IDENTICAL to the pre-feature body (the backend defaults ladder to off;
+  // an absent block hashes identically). Blank time fields map to null (backend
+  // default = the entry / exit time).
+  if (form.ladder_enabled) {
+    payload.ladder = {
+      enabled: true,
+      interval_minutes: Number(form.ladder_interval_minutes) || 30,
+      first_entry: form.ladder_first_entry ? form.ladder_first_entry : null,
+      last_entry_cutoff: form.ladder_last_entry_cutoff
+        ? form.ladder_last_entry_cutoff : null,
+      max_concurrent: Number(form.ladder_max_concurrent) || 0,
+      sizing: {
+        mode: form.ladder_sizing_mode,
+        contracts: Number(form.ladder_contracts) || 1,
+        notional_per_entry_usd: Number(form.ladder_notional_per_entry_usd) || 0,
+      },
+    };
+  }
+  return payload;
 }
 
 // Short, safe display of the ISO savedAt timestamp for a saved-sim row.
@@ -183,6 +242,9 @@ function dayOutcome(data) {
   if (data.status === 'entry_conditions_unmet' || data.skip_reason === 'entry_conditions_unmet') {
     return 'unmet';
   }
+  // Regime decided FLAT (F2.2): a deliberate no-trade (side=flat), distinct from
+  // a data-gap skip. Backend tags status="skipped", skip_reason="regime_flat".
+  if (data.skip_reason === 'regime_flat') return 'regime_flat';
   if (data.status === 'skipped') return 'skipped';
   const usd = data.pnl ? data.pnl.total_pnl_usd : null;
   if (typeof usd === 'number' && Number.isFinite(usd)) {
@@ -199,7 +261,28 @@ const OUTCOME_CLASS = {
   skipped: styles.cellSkipped,
   excluded: styles.cellExcluded,
   unmet: styles.cellUnmet,
+  // Regime flat reuses the neutral excluded styling (a deliberate no-trade).
+  regime_flat: styles.cellExcluded,
 };
+
+// A YYYYMMDD int (the regime ``asof`` date) rendered as an ISO date, or ''.
+function isoFromInt(dateInt) {
+  if (typeof dateInt !== 'number' || !Number.isFinite(dateInt)) return '';
+  const s = String(dateInt);
+  if (s.length !== 8) return '';
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
+
+// One-line regime-decision summary for a day (F2.2): the chosen side, why
+// (state), any firing gate, and the as-of signal date the decision used.
+// ``null`` when the day carries no regime decision (regime-driven side off).
+function regimeSummary(data) {
+  const r = data && data.regime;
+  if (!r || typeof r !== 'object' || !r.side) return null;
+  const gate = r.gate ? `, gate ${r.gate}` : '';
+  const asof = r.asof ? `, as-of ${isoFromInt(r.asof)}` : '';
+  return `regime: ${r.side} (${r.state}${gate}${asof})`;
+}
 
 // Short HH:MM (UTC) extracted from an ISO timestamp for the compact tooltip.
 function tsTime(ts) {
@@ -235,6 +318,10 @@ function cellTitle(iso, data) {
   if (data.status === 'entry_conditions_unmet' || data.skip_reason === 'entry_conditions_unmet') {
     return `${iso} — skipped: entry_conditions_unmet (no bar met the entry conditions in the snap window)`;
   }
+  if (data.skip_reason === 'regime_flat') {
+    const rs = regimeSummary(data);
+    return `${iso} — flat (regime)${rs ? `  •  ${rs}` : ''}`;
+  }
   if (data.status === 'skipped') {
     return `${iso} — skipped: ${data.skip_reason || 'skipped'}`;
   }
@@ -242,6 +329,7 @@ function cellTitle(iso, data) {
   const legs = data.legs || null;
   const parts = [
     `${iso} — ${data.status}`,
+    regimeSummary(data),
     data.strike != null ? `strike ${formatNumber(data.strike, 0)}` : null,
     p.option_pnl_pts != null ? `option ${formatNumber(p.option_pnl_pts)} pts` : null,
     p.hedge_pnl_pts != null ? `hedge ${formatNumber(p.hedge_pnl_pts)} pts` : null,
@@ -311,6 +399,23 @@ function firstBadNumericParam(entry, exit, hedge, customDays) {
     if (tgt.mode === 'ratio' && (!isPositive(tgt.ratio) || Number(tgt.ratio) > 1)) {
       return 'Hedge ratio must be in (0, 1]';
     }
+    // Timing gates (F1.1/F1.2) — mirror the backend Field constraints so Run is
+    // blocked with a named reason rather than a raw 422. Blank F1.1 = OFF (fine).
+    const tim = hedge.timing || {};
+    if (!isBlank(tim.only_within_minutes_before_close)
+        && !isPositive(tim.only_within_minutes_before_close)) {
+      return 'Hedge "only within minutes before close" must be greater than 0';
+    }
+    const ext = tim.skip_near_extremum || {};
+    if (ext.enabled) {
+      if (!isPositive(ext.window_minutes)) {
+        return 'Hedge skip-extremum window must be greater than 0';
+      }
+      const tol = Number(ext.tolerance);
+      if (isBlank(ext.tolerance) || Number.isNaN(tol) || tol < 0) {
+        return 'Hedge skip-extremum tolerance must be 0 or greater';
+      }
+    }
   }
 
   for (const c of customDays || []) {
@@ -340,6 +445,11 @@ export default function IntradayBacktestPage() {
   // Shape: { date, exclude, expanded, entry:{partial}, exit:{partial} }.
   const [customDays, setCustomDays] = useState([]);
   const [customDayDraft, setCustomDayDraft] = useState('');
+  // F3.1 curated event calendar (FOMC/NFP/CPI) for the date-allowlist control
+  // (and the A3 view). Fetched once on mount; the toggle + event-type checkboxes
+  // work even if this fails to load (the 3 types are a fixed enum).
+  const [eventCalendar, setEventCalendar] = useState(null);
+  const [allowlistDateDraft, setAllowlistDateDraft] = useState('');
 
   const [result, setResult] = useState(null);
   const [running, setRunning] = useState(false);
@@ -393,6 +503,17 @@ export default function IntradayBacktestPage() {
         if (controller.signal.aborted) return;
         setMetaError(err && err.message ? err.message : 'Failed to load backtest metadata.');
       });
+    return () => controller.abort();
+  }, []);
+
+  // Load the curated event calendar (F3.1) once on mount for the allowlist
+  // control. Best-effort: a failure leaves eventCalendar null (the control still
+  // works — the 3 event types are a fixed enum; only per-type counts are hidden).
+  useEffect(() => {
+    const controller = new AbortController();
+    getIntradayEventCalendar({ signal: controller.signal })
+      .then((c) => setEventCalendar(c))
+      .catch(() => { /* non-fatal — control degrades to no counts */ });
     return () => controller.abort();
   }, []);
 
@@ -781,6 +902,95 @@ export default function IntradayBacktestPage() {
             </select>
           </label>
 
+          {/* Transaction cost (P0.2): adverse half-spread crossing on the option
+              legs + ES hedge, default OFF (mid fills). When on, a fixed per-side
+              fallback (points) covers fills with no two-sided quote. */}
+          <label className={`${styles.field} ${styles.checkboxRow}`}>
+            <input
+              type="checkbox"
+              aria-label="Enable transaction cost"
+              checked={Boolean(form.cost_enabled)}
+              onChange={(e) => setField('cost_enabled', e.target.checked)}
+            />
+            <span>Half-spread transaction cost</span>
+          </label>
+          {form.cost_enabled && (
+            <label className={styles.field}>
+              <span>One-sided fallback cost (pts/side)</span>
+              <input
+                type="number"
+                min={0}
+                step="0.05"
+                aria-label="One-sided fallback cost points"
+                value={form.cost_fallback_pts}
+                onChange={(e) => setField('cost_fallback_pts', e.target.value)}
+              />
+            </label>
+          )}
+
+          {/* Regime-driven side (F2.2): resolve each day's side from the vol
+              regime (RV H20>H30>H100 backwardation ladder -> long, else short;
+              extremely-low H20 floor -> flat; VVIX gate veto) as-of the PRIOR
+              daily close. Default OFF => the static Straddle side above is used
+              every day. All thresholds configurable — none hardcoded. */}
+          <label className={`${styles.field} ${styles.checkboxRow}`}>
+            <input
+              type="checkbox"
+              aria-label="Enable regime-driven side"
+              checked={Boolean(form.regime_side_enabled)}
+              onChange={(e) => setField('regime_side_enabled', e.target.checked)}
+            />
+            <span>Regime-driven side</span>
+          </label>
+          {form.regime_side_enabled && (
+            <>
+              <label className={styles.field}>
+                <span>HVOL ladder tolerance (0 = strict)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  aria-label="HVOL ladder tolerance"
+                  value={form.regime_hvol_tolerance}
+                  onChange={(e) => setField('regime_hvol_tolerance', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>Extremely-low H20 floor (0 = off)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  aria-label="Extremely-low H20 floor"
+                  value={form.regime_extremely_low_h20}
+                  onChange={(e) => setField('regime_extremely_low_h20', e.target.value)}
+                />
+              </label>
+              <label className={`${styles.field} ${styles.checkboxRow}`}>
+                <input
+                  type="checkbox"
+                  aria-label="Enable VVIX gate"
+                  checked={Boolean(form.regime_vvix_gate_enabled)}
+                  onChange={(e) => setField('regime_vvix_gate_enabled', e.target.checked)}
+                />
+                <span>VVIX gate (veto to flat above level)</span>
+              </label>
+              {form.regime_vvix_gate_enabled && (
+                <label className={styles.field}>
+                  <span>VVIX gate level</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="1"
+                    aria-label="VVIX gate level"
+                    value={form.regime_vvix_gate_level}
+                    onChange={(e) => setField('regime_vvix_gate_level', e.target.value)}
+                  />
+                </label>
+              )}
+            </>
+          )}
+
         </div>
 
         {/* Hedge rule module (v4): enable + instrument + triggers (interval,
@@ -815,6 +1025,218 @@ export default function IntradayBacktestPage() {
               showTriggers
             />
           </div>
+        </div>
+
+        {/* F3.2 date-allowlist entry mode — trade ONLY the resolved days (the
+            DISTINCT OPPOSITE of Custom days' exclude). Resolved = the union of
+            the selected event types (curated FOMC/NFP/CPI) and any explicit
+            dates. Default OFF => every eligible day trades. custom_days exclude
+            still removes from the allowlisted set; regime side still decides the
+            side on the days that remain. */}
+        <div className={styles.field} style={{ marginTop: '1rem' }}>
+          <span className={styles.fieldLabel}>Date allowlist (trade only these days)</span>
+          <label className={`${styles.field} ${styles.checkboxRow}`}>
+            <input
+              type="checkbox"
+              aria-label="Enable date allowlist"
+              data-testid="allowlist-enable"
+              checked={Boolean(form.allowlist_enabled)}
+              onChange={(e) => setField('allowlist_enabled', e.target.checked)}
+            />
+            <span>Restrict trading to an allowlist of days</span>
+          </label>
+          {form.allowlist_enabled && (
+            <div data-testid="allowlist-controls">
+              <span className={styles.fieldLabel}>Event days</span>
+              <div className={styles.inlineRow}>
+                {ALLOWLIST_EVENT_TYPES.map((t) => {
+                  const count = eventCalendar && eventCalendar.events
+                    && eventCalendar.events[t] ? eventCalendar.events[t].length : null;
+                  return (
+                    <label key={t} className={styles.checkboxRow}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Allowlist event type ${t}`}
+                        data-testid={`allowlist-type-${t}`}
+                        checked={form.allowlist_event_types.includes(t)}
+                        onChange={() => setForm((f) => {
+                          const has = f.allowlist_event_types.includes(t);
+                          return {
+                            ...f,
+                            allowlist_event_types: has
+                              ? f.allowlist_event_types.filter((x) => x !== t)
+                              : [...f.allowlist_event_types, t],
+                          };
+                        })}
+                      />
+                      <span>{t}{count != null ? ` (${count})` : ''}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <span className={styles.fieldLabel}>Explicit dates</span>
+              <div className={styles.inlineRow}>
+                <input
+                  type="date"
+                  aria-label="Allowlist date"
+                  data-testid="allowlist-date-input"
+                  min={win ? win.min_date : undefined}
+                  max={win ? win.max_date : undefined}
+                  value={allowlistDateDraft}
+                  onChange={(e) => setAllowlistDateDraft(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className={styles.smallBtn}
+                  data-testid="allowlist-add-date"
+                  onClick={() => {
+                    const d = allowlistDateDraft;
+                    if (!d) return;
+                    setForm((f) => (f.allowlist_dates.includes(d)
+                      ? f
+                      : { ...f, allowlist_dates: [...f.allowlist_dates, d].sort() }));
+                    setAllowlistDateDraft('');
+                  }}
+                >
+                  Add date
+                </button>
+              </div>
+              {form.allowlist_dates.length > 0 && (
+                <ul className={styles.customDaysList} data-testid="allowlist-dates-list">
+                  {form.allowlist_dates.map((d) => (
+                    <li key={d} className={styles.customDayRow}>
+                      <span className={styles.customDayDate}>{d}</span>
+                      <button
+                        type="button"
+                        className={styles.chipRemove}
+                        aria-label={`Remove allowlist date ${d}`}
+                        onClick={() => setForm((f) => ({
+                          ...f,
+                          allowlist_dates: f.allowlist_dates.filter((x) => x !== d),
+                        }))}
+                      >
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {eventCalendar && eventCalendar.tentative_dates
+                && eventCalendar.tentative_dates.length > 0 && (
+                <p className={styles.conditionsEmpty} data-testid="allowlist-tentative-note">
+                  Some curated event dates are provisional (tentative):{' '}
+                  {eventCalendar.tentative_dates.join(', ')}.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* F4.1 laddered multi-entry — open a straddle at each rung of a
+            fixed-interval ladder and HOLD EACH TO SETTLEMENT. Default OFF => one
+            entry/day (baseline). max_concurrent caps rungs that open per day
+            (hold-to-settlement => an open straddle never closes intraday). */}
+        <div className={styles.field} style={{ marginTop: '1rem' }}>
+          <span className={styles.fieldLabel}>Laddered multi-entry (hold each to settlement)</span>
+          <label className={styles.checkboxRow}>
+            <input
+              type="checkbox"
+              aria-label="Enable laddered multi-entry"
+              data-testid="ladder-enable"
+              checked={Boolean(form.ladder_enabled)}
+              onChange={(e) => setField('ladder_enabled', e.target.checked)}
+            />
+            <span>Enter every N minutes; hold each straddle to settlement</span>
+          </label>
+          {form.ladder_enabled && (
+            <div data-testid="ladder-controls">
+              <label className={styles.field}>
+                <span>Interval (minutes, ≥ 1)</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  aria-label="Ladder interval minutes"
+                  data-testid="ladder-interval"
+                  value={form.ladder_interval_minutes}
+                  onChange={(e) => setField('ladder_interval_minutes', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>First entry (HH:MM ET, blank = entry time)</span>
+                <input
+                  type="text"
+                  placeholder="entry time"
+                  aria-label="Ladder first entry"
+                  data-testid="ladder-first-entry"
+                  value={form.ladder_first_entry}
+                  onChange={(e) => setField('ladder_first_entry', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>Last entry cutoff (HH:MM ET, blank = exit time)</span>
+                <input
+                  type="text"
+                  placeholder="exit time"
+                  aria-label="Ladder last entry cutoff"
+                  data-testid="ladder-cutoff"
+                  value={form.ladder_last_entry_cutoff}
+                  onChange={(e) => setField('ladder_last_entry_cutoff', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>Max concurrent (0 = unlimited)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  aria-label="Ladder max concurrent"
+                  data-testid="ladder-max-concurrent"
+                  value={form.ladder_max_concurrent}
+                  onChange={(e) => setField('ladder_max_concurrent', e.target.value)}
+                />
+              </label>
+              <label className={styles.field}>
+                <span>Sizing</span>
+                <select
+                  aria-label="Ladder sizing mode"
+                  data-testid="ladder-sizing-mode"
+                  value={form.ladder_sizing_mode}
+                  onChange={(e) => setField('ladder_sizing_mode', e.target.value)}
+                >
+                  <option value="equal_contracts">Equal contracts</option>
+                  <option value="equal_notional">Equal notional</option>
+                </select>
+              </label>
+              {form.ladder_sizing_mode === 'equal_contracts' ? (
+                <label className={styles.field}>
+                  <span>Contracts per rung</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    aria-label="Ladder contracts per rung"
+                    data-testid="ladder-contracts"
+                    value={form.ladder_contracts}
+                    onChange={(e) => setField('ladder_contracts', e.target.value)}
+                  />
+                </label>
+              ) : (
+                <label className={styles.field}>
+                  <span>Notional per rung (USD, 0 = auto)</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    aria-label="Ladder notional per entry"
+                    data-testid="ladder-notional"
+                    value={form.ladder_notional_per_entry_usd}
+                    onChange={(e) => setField('ladder_notional_per_entry_usd', e.target.value)}
+                  />
+                </label>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Custom days — one unified control. Add a date, then per row either
@@ -1043,6 +1465,22 @@ export default function IntradayBacktestPage() {
         </Card>
       )}
 
+      {days.length > 0 && <WeekdayAttributionView days={days} />}
+
+      {days.length > 0 && <RegimeSensitivityView days={days} />}
+
+      {days.length > 0 && <EventAttributionView days={days} eventCalendar={eventCalendar} />}
+
+      {/* F4.1: per-rung readout — renders only on laddered runs (days carrying
+          an ``entries[]``); inert (null) otherwise, so it never disturbs the
+          day-level calendar or the aggregate-keyed attribution views above. */}
+      {days.length > 0 && <LadderEntriesView days={days} />}
+
+      {/* A4: cross-day ladder analysis (which rung/entry-time performs best) —
+          pure post-processing over the same ``entries[]``; shows a hint
+          instead of a chart when the run isn't (meaningfully) laddered. */}
+      {days.length > 0 && <LadderAnalysisView days={days} />}
+
       {days.length > 0 && (
         <Card
           title="Backtest days"
@@ -1080,9 +1518,16 @@ export default function IntradayBacktestPage() {
                     const outcome = dayOutcome(slot.data);
                     const excluded = outcome === 'excluded';
                     const unmet = outcome === 'unmet';
-                    const noTrade = outcome === 'skipped' || excluded || unmet;
-                    const tagText = excluded ? 'no trade' : unmet ? 'no entry' : 'skipped';
+                    const regimeFlat = outcome === 'regime_flat';
+                    const noTrade = outcome === 'skipped' || excluded || unmet || regimeFlat;
+                    const tagText = excluded ? 'no trade'
+                      : unmet ? 'no entry'
+                      : regimeFlat ? 'flat'
+                      : 'skipped';
                     const pnl = slot.data.pnl || null;
+                    // F2.2: the resolved regime side (long/short) on a traded day,
+                    // as a compact L/S badge so the WHY is visible at a glance.
+                    const regimeSide = slot.data.regime && slot.data.regime.side;
                     // Early-exit trigger (v3): a traded day that closed on a
                     // trigger carries a small marker + a data attribute.
                     const trig = slot.data.exit_trigger || null;
@@ -1095,9 +1540,20 @@ export default function IntradayBacktestPage() {
                         data-status={slot.data.status}
                         data-outcome={outcome}
                         data-exit-trigger={trig ? trig.type : undefined}
+                        data-regime-side={regimeSide || undefined}
                         title={cellTitle(slot.iso, slot.data)}
                       >
                         <span className={styles.domRow}>
+                          {regimeSide && !noTrade && (
+                            <span
+                              className={styles.regimeBadge}
+                              data-testid="regime-side-badge"
+                              aria-label={`regime side: ${regimeSide}`}
+                              title={`regime side: ${regimeSide}`}
+                            >
+                              {regimeSide === 'long' ? 'L' : regimeSide === 'short' ? 'S' : ''}
+                            </span>
+                          )}
                           {trig && !noTrade && (
                             <span
                               className={styles.triggerBadge}

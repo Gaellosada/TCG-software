@@ -30,6 +30,7 @@ from tcg.engine.intraday_backtest import resolve_et_to_utc
 from tcg.types.intraday import (
     IntradayBar,
     HedgeSpec,
+    HedgeTimingSpec,
     MaxSpreadCond,
     MinPremiumCond,
     MinQuoteSizeCond,
@@ -37,6 +38,7 @@ from tcg.types.intraday import (
     NetDeltaTrigger,
     PnlTrigger,
     SigmaMoveTrigger,
+    SkipNearExtremumSpec,
     UnderlyingMoveTrigger,
 )
 
@@ -65,6 +67,17 @@ def test_default_entry_exit_modules():
     assert r.hedge.conditions == []
     assert r.hedge.target.mode == "zero"
     assert r.custom_days == []
+
+
+def test_exit_mode_default_is_auto_and_rejects_unknown():
+    # Gap 1 toggle: default is "auto" (settlement on 0DTE-held, quote otherwise).
+    assert _req().exit_mode == "auto"
+    # The three valid modes construct.
+    for m in ("quote", "settlement", "auto"):
+        assert _req(exit_mode=m).exit_mode == m
+    # An unknown mode is rejected at validation (FastAPI maps this to a 422).
+    with pytest.raises(ValidationError):
+        _req(exit_mode="bogus")
 
 
 # --------------------------------------------------------------------------- #
@@ -498,3 +511,63 @@ def test_to_engine_hedge_mirrors_module():
         MinRehedgeDeltaCond(threshold=0.07),
     )
     assert spec.target.mode == "ratio" and spec.target.ratio == 0.75
+
+
+# --------------------------------------------------------------------------- #
+# W2/P1 — Hedge-timing gates F1.1 / F1.2 (schema + engine mirror)
+# --------------------------------------------------------------------------- #
+def test_hedge_timing_defaults_neutral():
+    h = HedgeConfig()
+    assert h.timing.only_within_minutes_before_close is None
+    ext = h.timing.skip_near_extremum
+    assert ext.enabled is False
+    assert ext.window_minutes == 30.0
+    assert ext.tolerance == 2.0
+    assert ext.tolerance_unit == "points"
+
+
+def test_hedge_timing_full_shape_accepted():
+    h = HedgeConfig(timing={
+        "only_within_minutes_before_close": 60.0,
+        "skip_near_extremum": {
+            "enabled": True, "window_minutes": 30.0,
+            "tolerance": 0.25, "tolerance_unit": "percent",
+        },
+    })
+    assert h.timing.only_within_minutes_before_close == 60.0
+    assert h.timing.skip_near_extremum.enabled is True
+    assert h.timing.skip_near_extremum.tolerance_unit == "percent"
+
+
+def test_hedge_timing_bad_params_rejected():
+    with pytest.raises(ValidationError):
+        HedgeConfig(timing={"only_within_minutes_before_close": 0})   # must be > 0
+    with pytest.raises(ValidationError):
+        HedgeConfig(timing={"only_within_minutes_before_close": -5})
+    with pytest.raises(ValidationError):
+        HedgeConfig(timing={"skip_near_extremum": {"window_minutes": 0}})  # > 0
+    with pytest.raises(ValidationError):
+        HedgeConfig(timing={"skip_near_extremum": {"tolerance": -1}})      # >= 0
+    with pytest.raises(ValidationError):
+        HedgeConfig(timing={"skip_near_extremum": {"tolerance_unit": "ticks"}})
+
+
+def test_to_engine_hedge_mirrors_timing():
+    h = HedgeConfig(timing={
+        "only_within_minutes_before_close": 45.0,
+        "skip_near_extremum": {
+            "enabled": True, "window_minutes": 20.0,
+            "tolerance": 3.0, "tolerance_unit": "points",
+        },
+    })
+    spec = _to_engine_hedge(h)
+    assert spec.timing == HedgeTimingSpec(
+        only_within_minutes_before_close=45.0,
+        skip_near_extremum=SkipNearExtremumSpec(
+            enabled=True, window_minutes=20.0, tolerance=3.0, tolerance_unit="points"),
+    )
+
+
+def test_to_engine_hedge_default_timing_is_neutral():
+    spec = _to_engine_hedge(HedgeConfig())
+    assert spec.timing == HedgeTimingSpec()  # fully default -> no behavioral change

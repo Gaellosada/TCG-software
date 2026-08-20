@@ -16,7 +16,10 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from tcg.engine.intraday_backtest import (
+    _hedge_time_gate_ok,
     _leg_delta,
+    _running_extremum,
+    _skip_near_extremum,
     aggregate_days,
     last_known_at_or_before,
     leg_bar_qualifies,
@@ -32,9 +35,14 @@ from tcg.engine.intraday_backtest import (
 from tcg.engine.options.pricing import BS76Kernel
 from tcg.types.intraday import (
     ES_OPTION_TICK_SIZE,
+    CostModel,
+    DayPnl,
+    DayResult,
+    MarkSnapshot,
     es_option_tick,
     HedgeSpec,
     HedgeTargetSpec,
+    HedgeTimingSpec,
     HedgeTriggers,
     IntradayBar,
     MaxSpreadCond,
@@ -46,6 +54,7 @@ from tcg.types.intraday import (
     PnlTrigger,
     SigmaMoveHedgeTrigger,
     SigmaMoveTrigger,
+    SkipNearExtremumSpec,
     UnderlyingMoveTrigger,
 )
 
@@ -63,6 +72,7 @@ def _hspec(
     mode: str = "zero",
     ratio: float = 1.0,
     instrument: str = "es_future",
+    timing: HedgeTimingSpec | None = None,
 ) -> HedgeSpec:
     """Build a v4 engine HedgeSpec from flat kwargs (test convenience)."""
     return HedgeSpec(
@@ -75,6 +85,7 @@ def _hspec(
         ),
         conditions=tuple(conditions),
         target=HedgeTargetSpec(mode=mode, ratio=ratio),
+        timing=timing or HedgeTimingSpec(),
     )
 
 
@@ -302,6 +313,183 @@ def test_independent_legs_fill_at_different_timestamps():
     assert res.legs.put.entry_ts == entry + timedelta(minutes=3)
     # straddle_on = max(call, put) = the later put fill.
     assert res.straddle_on_ts == entry + timedelta(minutes=3)
+
+
+# --------------------------------------------------------------------------- #
+# Common-instant leg sync (Rule 7, Gap 2, ALWAYS-ON): both legs re-valued at
+# T=max(t_call,t_put), each at its LAST clean quote <= T.
+# --------------------------------------------------------------------------- #
+def test_leg_sync_remarks_earlier_leg_to_last_clean_before_T():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:30")
+    es = _bars(entry, [5000.0] * 40)
+    cond = [MaxSpreadCond(pct=5.0, min_ticks=1.0)]
+    # CALL has TWO clean quotes before T: @t0 (mid 30) and @t0+2 (mid 32). Its
+    # scan-entry is the FIRST (@t0, 30); leg-sync must re-mark it to the LAST
+    # clean quote <= T (@t0+2, 32) — the common-instant value.
+    calls = [
+        _q(entry, 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+        _q(entry + timedelta(minutes=2), 32.0, bid=31.9, ask=32.1, bs=50, as_=50),
+        _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+    ]
+    # PUT's first clean quote is @t0+3 => T = t0+3 (the later leg defines T).
+    puts = [
+        _q(entry, 30.0),  # last-trade-only -> fails max_spread
+        _q(entry + timedelta(minutes=3), 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+        _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+    ]
+    res = simulate_day(**_day(call_marks=calls, put_marks=puts, es_bars=es,
+                              exit_ts=exit_, entry_conditions=cond, exit_conditions=cond))
+    assert res.status == "ok"
+    # Load-bearing rule-7 assertion: call re-marked to its last clean quote <= T.
+    assert res.legs.call.entry_price == pytest.approx(32.0)
+    assert res.legs.call.entry_ts == entry + timedelta(minutes=2)
+    assert res.legs.put.entry_price == pytest.approx(30.0)
+    assert res.legs.put.entry_ts == entry + timedelta(minutes=3)
+    # T (both-on start) is the later of the two entries.
+    assert res.straddle_on_ts == entry + timedelta(minutes=3)
+
+
+def test_leg_sync_noop_when_single_clean_quote():
+    # Exactly one clean entry quote per leg (the shape of the existing
+    # independent-legs test): re-sync is a no-op — each leg keeps its own fill.
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:20")
+    es = _bars(entry, [5000.0] * 25)
+    cond = [MaxSpreadCond(pct=5.0, min_ticks=1.0)]
+    calls = [_q(entry, 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+             _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50)]
+    puts = [_q(entry, 30.0),
+            _q(entry + timedelta(minutes=3), 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+            _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50)]
+    res = simulate_day(**_day(call_marks=calls, put_marks=puts, es_bars=es,
+                              exit_ts=exit_, entry_conditions=cond, exit_conditions=cond))
+    assert res.status == "ok"
+    assert res.legs.call.entry_price == pytest.approx(30.0)
+    assert res.legs.call.entry_ts == entry
+    assert res.legs.put.entry_ts == entry + timedelta(minutes=3)
+    assert res.straddle_on_ts == entry + timedelta(minutes=3)
+
+
+# --------------------------------------------------------------------------- #
+# Settlement-intrinsic exit |F_settle - K| behind the exit_mode toggle (Gap 1).
+# --------------------------------------------------------------------------- #
+def _settle_day(**over):
+    """0DTE day (expiry == trade date), flat ES 5000, flat premiums 8/8."""
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "15:45")
+    n = int((exit_ - entry).total_seconds() // 60) + 1
+    es = _bars(entry, [5000.0] * n)
+    calls = _bars(entry, [8.0] * n)
+    puts = _bars(entry, [8.0] * n)
+    kwargs = dict(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 3),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+    )
+    kwargs.update(over)
+    return kwargs
+
+
+def test_exit_mode_quote_is_identical_to_baseline():
+    # Regression guard (exit path): quote mode + a settlement price that MUST be
+    # ignored reproduces the baseline exit exactly — even on a 0DTE day.
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:05")
+    es = _bars(entry, [5000.0] * 6)
+    calls = [IntradayBar(entry, 30.0), IntradayBar(exit_, 50.0)]
+    puts = [IntradayBar(entry, 30.0), IntradayBar(exit_, 5.0)]
+    common = dict(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 3),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+    )
+    base = simulate_day(**common)
+    q = simulate_day(**common, exit_mode="quote", settlement_price=5013.0)
+    assert q.legs.call.exit_price == base.legs.call.exit_price == 50.0
+    assert q.legs.put.exit_price == base.legs.put.exit_price == 5.0
+    assert q.pnl.option_pnl_pts == base.pnl.option_pnl_pts
+    assert q.pnl.total_pnl_pts == base.pnl.total_pnl_pts
+
+
+def test_settlement_payoff_equals_abs_F_minus_K():
+    up = simulate_day(**_settle_day(settlement_price=5013.0, exit_mode="settlement"))
+    assert up.legs.call.exit_price == pytest.approx(13.0)  # max(F-K, 0)
+    assert up.legs.put.exit_price == pytest.approx(0.0)     # max(K-F, 0)
+    # option_pnl = side_sign * (|F-K| - premium_entry) = 13 - (8+8).
+    assert up.pnl.option_pnl_pts == pytest.approx(13.0 - 16.0)
+
+    dn = simulate_day(**_settle_day(settlement_price=4990.0, exit_mode="settlement"))
+    assert dn.legs.call.exit_price == pytest.approx(0.0)
+    assert dn.legs.put.exit_price == pytest.approx(10.0)
+    assert dn.pnl.option_pnl_pts == pytest.approx(10.0 - 16.0)
+
+    sh = simulate_day(
+        **_settle_day(settlement_price=5013.0, exit_mode="settlement", side="short")
+    )
+    assert sh.pnl.option_pnl_pts == pytest.approx(-(13.0 - 16.0))  # seller mirror
+
+
+def test_auto_uses_settlement_only_on_0dte_held():
+    # 0DTE (expiry == trade date) + auto -> settlement intrinsic.
+    r0 = simulate_day(**_settle_day(settlement_price=5013.0, exit_mode="auto"))
+    assert r0.legs.call.exit_price == pytest.approx(13.0)
+    assert r0.legs.put.exit_price == pytest.approx(0.0)
+    # NON-0DTE (expiry != trade date) + auto -> quote exit (settlement ignored).
+    r1 = simulate_day(
+        **_settle_day(settlement_price=5013.0, exit_mode="auto", expiry=date(2025, 3, 4))
+    )
+    assert r1.legs.call.exit_price == pytest.approx(8.0)  # flat quote, not intrinsic
+    assert r1.legs.put.exit_price == pytest.approx(8.0)
+
+
+def test_auto_early_trigger_forces_quote():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "15:45")
+    # ES jumps +100 at t+1 -> underlying_move trigger (>=50 pts) fires early.
+    es = [IntradayBar(entry, 5000.0),
+          IntradayBar(entry + timedelta(minutes=1), 5100.0),
+          IntradayBar(entry + timedelta(minutes=2), 5100.0)]
+    calls = _bars(entry, [8.0, 8.0, 8.0])
+    puts = _bars(entry, [8.0, 8.0, 8.0])
+    res = simulate_day(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 3),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        exit_triggers=[UnderlyingMoveTrigger(amount=50.0, unit="points")],
+        exit_mode="auto", settlement_price=5013.0,
+    )
+    assert res.exit_trigger is not None  # early trigger fired
+    # Exit is the QUOTE at the trigger bar (8.0), NOT the settlement intrinsic.
+    assert res.legs.call.exit_price == pytest.approx(8.0)
+    assert res.legs.put.exit_price == pytest.approx(8.0)
+
+
+def test_settlement_none_degrades_to_quote():
+    base = simulate_day(**_settle_day())  # no exit_mode/settlement => quote baseline
+    degraded = simulate_day(**_settle_day(exit_mode="auto", settlement_price=None))
+    assert degraded.legs.call.exit_price == base.legs.call.exit_price == 8.0
+    assert degraded.pnl.option_pnl_pts == base.pnl.option_pnl_pts
+
+
+def test_settlement_no_exit_cost():
+    # Last-trade-only bars (no bid/ask) => each COUNTED fill hits the fixed
+    # fallback. Settlement charges ONLY the 2 entry fills (settlement exit is not
+    # a fill); quote charges all 4.
+    cost = CostModel(enabled=True, fallback_cost_pts=1.0)
+    settle = simulate_day(
+        **_settle_day(settlement_price=5013.0, exit_mode="settlement", cost=cost)
+    )
+    assert settle.pnl.n_fallback_fills == 2
+    assert settle.pnl.cost_pts == pytest.approx(2.0)
+    quote = simulate_day(**_settle_day(exit_mode="quote", cost=cost))
+    assert quote.pnl.n_fallback_fills == 4
+    assert quote.pnl.cost_pts == pytest.approx(4.0)
 
 
 def test_snap_tolerance_bounds_leg_gap_skips_day():
@@ -597,6 +785,89 @@ def test_aggregate_counts_and_winrate():
     assert agg.n_days == 3 and agg.n_traded == 2 and agg.n_skipped == 1
     assert 0.0 <= agg.win_rate <= 1.0
     assert len(agg.equity_curve) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Native %NAV metrics on AggregateResult (Gap 3) — Yann basis, numpy-only.
+# --------------------------------------------------------------------------- #
+def _mk_day(date_int, pnl_pts, underlying):
+    """Minimal 'ok' DayResult carrying total_pnl_pts + entry underlying."""
+    ts = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    return DayResult(
+        date=date_int, status="ok",
+        entry=MarkSnapshot(ts, underlying, 8.0, 8.0, 16.0),
+        pnl=DayPnl(
+            option_pnl_pts=pnl_pts, hedge_pnl_pts=0.0,
+            total_pnl_pts=pnl_pts, total_pnl_usd=pnl_pts * 50.0,
+        ),
+    )
+
+
+def test_native_metrics_match_w3_formulas():
+    import numpy as np
+    from scipy import stats
+
+    pnls = [5.0, -3.0, 8.0, -10.0, 2.0, 6.0]
+    unders = [5000.0, 5010.0, 4990.0, 5020.0, 5005.0, 4995.0]
+    results = [_mk_day(20250301 + i, p, u) for i, (p, u) in enumerate(zip(pnls, unders))]
+    agg = aggregate_days(results)
+
+    r = np.array([p / u for p, u in zip(pnls, unders)])
+    n = r.size
+    nav = np.cumprod(1.0 + r)
+    assert agg.n_return_days == n
+    assert agg.mean_daily_return == pytest.approx(float(r.mean()))
+    assert agg.nav_final == pytest.approx(float(nav[-1]))
+    assert agg.pct_return_year == pytest.approx(float(nav[-1]) ** (252.0 / n) - 1.0)
+    assert agg.ann_vol == pytest.approx(float(np.std(r, ddof=1)) * np.sqrt(252.0))
+    assert agg.return_sharpe == pytest.approx(
+        float(r.mean() / np.std(r, ddof=1)) * np.sqrt(252.0)
+    )
+    assert agg.max_drawdown_pct == pytest.approx(
+        float((nav / np.maximum.accumulate(nav) - 1.0).min())
+    )
+    assert agg.median_daily_return == pytest.approx(float(np.median(r)))
+    # skew is bias-corrected (G1) — cross-check vs scipy.stats.skew(bias=False).
+    assert agg.return_skew == pytest.approx(float(stats.skew(r, bias=False)))
+
+
+def test_native_metrics_backcompat_usd_fields_unchanged():
+    import numpy as np
+
+    pnls = [5.0, -3.0, 8.0]
+    results = [_mk_day(20250301 + i, p, 5000.0) for i, p in enumerate(pnls)]
+    agg = aggregate_days(results)
+
+    usd = np.array([p * 50.0 for p in pnls])
+    assert agg.total_pnl_usd == pytest.approx(float(usd.sum()))
+    assert agg.mean_daily_pnl_usd == pytest.approx(float(usd.mean()))
+    assert agg.sharpe == pytest.approx(
+        float(usd.mean() / np.std(usd, ddof=1)) * np.sqrt(252.0)
+    )
+    cum = 0.0
+    peak = 0.0
+    mdd = 0.0
+    for p in pnls:
+        cum += p * 50.0
+        peak = max(peak, cum)
+        mdd = min(mdd, cum - peak)
+    assert agg.max_drawdown_usd == pytest.approx(mdd)
+    assert agg.win_rate == pytest.approx(float((usd > 0).mean()))
+
+
+def test_native_metrics_exclude_ladder_aggregate_days():
+    # A ladder-aggregate DayResult has pnl but NO entry (entry is None). It must
+    # be EXCLUDED from the %NAV return series (Q3) while still counting in USD.
+    with_entry = _mk_day(20250301, 5.0, 5000.0)
+    ladder_agg = DayResult(
+        date=20250302, status="ok", entry=None,
+        pnl=DayPnl(option_pnl_pts=4.0, hedge_pnl_pts=0.0,
+                   total_pnl_pts=4.0, total_pnl_usd=200.0),
+    )
+    agg = aggregate_days([with_entry, ladder_agg])
+    assert agg.n_traded == 2                 # both count in USD aggregation
+    assert agg.n_return_days == 1            # only the entry-bearing day in returns
+    assert agg.nav_final == pytest.approx(1.0 + 5.0 / 5000.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -976,3 +1247,472 @@ def test_hedge_default_none_is_disabled():
     res = simulate_day(**kw)
     assert res.hedge_trades == () and res.pnl.hedge_pnl_pts == 0.0
     assert res.status == "ok"
+
+
+# --------------------------------------------------------------------------- #
+# P0.2 — half-spread transaction-cost model (adverse crossing from bbba)
+# --------------------------------------------------------------------------- #
+from tcg.engine.intraday_backtest import crossing_fill_price  # noqa: E402
+from tcg.types.intraday import COST_DISABLED, CostModel  # noqa: E402
+
+
+def test_crossing_fill_price_buy_pays_half_sell_receives_half():
+    # A BUY crosses UP (mid + half); a SELL crosses DOWN (mid - half).
+    assert crossing_fill_price(30.0, 0.4, is_buy=True) == pytest.approx(30.4)
+    assert crossing_fill_price(30.0, 0.4, is_buy=False) == pytest.approx(29.6)
+    # Zero half-spread => the mid, either direction (no cost).
+    assert crossing_fill_price(30.0, 0.0, is_buy=True) == 30.0
+    assert crossing_fill_price(30.0, 0.0, is_buy=False) == 30.0
+
+
+def _cost_option_day(*, side="long", cost=None):
+    """A no-hedge day with EXPLICIT two-sided entry/exit option quotes so the
+    half-spread per fill is known: call 30->50, put 30->5."""
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:05")
+    es = _bars(entry, [5000.0] * 6)
+    # call: entry mid 30 (half 0.5), exit mid 50 (half 0.4)
+    calls = [_q(entry, 30.0, bid=29.5, ask=30.5, bs=10, as_=10),
+             _q(exit_, 50.0, bid=49.6, ask=50.4, bs=10, as_=10)]
+    # put: entry mid 30 (half 0.2), exit mid 5 (half 0.1)
+    puts = [_q(entry, 30.0, bid=29.8, ask=30.2, bs=10, as_=10),
+            _q(exit_, 5.0, bid=4.9, ask=5.1, bs=10, as_=10)]
+    kw = dict(
+        date_int=20250303, side=side, strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=_hspec(enabled=False),
+    )
+    if cost is not None:
+        kw["cost"] = cost
+    return kw
+
+
+def test_cost_off_reproduces_mid_fill_pnl():
+    # Cost OFF (default AND explicit disabled) must reproduce the mid-fill P&L
+    # bit-for-bit — the regression guard for the 113 baseline.
+    base = simulate_day(**_cost_option_day())  # no cost kwarg
+    off = simulate_day(**_cost_option_day(cost=COST_DISABLED))
+    assert off.pnl.option_pnl_pts == base.pnl.option_pnl_pts == pytest.approx(-5.0)
+    assert off.pnl.total_pnl_pts == base.pnl.total_pnl_pts == pytest.approx(-5.0)
+    assert off.pnl.total_pnl_usd == base.pnl.total_pnl_usd == pytest.approx(-250.0)
+    assert off.pnl.cost_pts == 0.0 and off.pnl.n_fallback_fills == 0
+
+
+def test_long_straddle_roundtrip_cost_is_sum_of_four_half_spreads():
+    res = simulate_day(**_cost_option_day(cost=CostModel(enabled=True)))
+    # Gross option P&L unchanged (mid marks): call +20, put -25 => -5.
+    assert res.pnl.option_pnl_pts == pytest.approx(-5.0)
+    # Cost = call_entry 0.5 + call_exit 0.4 + put_entry 0.2 + put_exit 0.1 = 1.2.
+    assert res.pnl.cost_pts == pytest.approx(1.2)
+    assert res.pnl.n_fallback_fills == 0
+    # Net P&L is reduced by the cost; USD nets too.
+    assert res.pnl.total_pnl_pts == pytest.approx(-6.2)
+    assert res.pnl.total_pnl_usd == pytest.approx(-310.0)
+    assert res.pnl.cost_usd == pytest.approx(60.0)
+
+
+def test_short_straddle_cost_is_symmetric_and_reduces_pnl():
+    res = simulate_day(**_cost_option_day(side="short", cost=CostModel(enabled=True)))
+    # Gross short option P&L = +5 (straddle 60 -> 55). Same 1.2 cost still REDUCES.
+    assert res.pnl.option_pnl_pts == pytest.approx(5.0)
+    assert res.pnl.cost_pts == pytest.approx(1.2)
+    assert res.pnl.total_pnl_pts == pytest.approx(3.8)
+    assert res.pnl.n_fallback_fills == 0
+
+
+def test_one_sided_bar_uses_fixed_fallback_and_counts_it():
+    # Quote-less (last-trade-only) option bars: half-spread undefined => the fixed
+    # per-side fallback (0.3 pts) is charged on each of the 4 fills and counted.
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:05")
+    es = _bars(entry, [5000.0] * 6)
+    calls = [IntradayBar(entry, 30.0), IntradayBar(exit_, 50.0)]  # no bid/ask
+    puts = [IntradayBar(entry, 30.0), IntradayBar(exit_, 5.0)]
+    res = simulate_day(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=_hspec(enabled=False),
+        cost=CostModel(enabled=True, fallback_cost_pts=0.3),
+    )
+    assert res.pnl.option_pnl_pts == pytest.approx(-5.0)  # gross unchanged
+    assert res.pnl.n_fallback_fills == 4                  # all 4 fills fell back
+    assert res.pnl.cost_pts == pytest.approx(1.2)         # 4 * 0.3
+    assert res.pnl.total_pnl_pts == pytest.approx(-6.2)
+
+
+def test_fallback_zero_default_costs_nothing_but_still_counts():
+    # fallback default 0.0: quote-less fills add no cost, but coverage is still
+    # measurable (the fills are counted).
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:05")
+    es = _bars(entry, [5000.0] * 6)
+    calls = [IntradayBar(entry, 30.0), IntradayBar(exit_, 50.0)]
+    puts = [IntradayBar(entry, 30.0), IntradayBar(exit_, 5.0)]
+    res = simulate_day(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=_hspec(enabled=False),
+        cost=CostModel(enabled=True),  # fallback_cost_pts=0.0
+    )
+    assert res.pnl.cost_pts == 0.0
+    assert res.pnl.n_fallback_fills == 4
+    assert res.pnl.total_pnl_pts == pytest.approx(-5.0)
+
+
+def _cost_hedge_day():
+    """A hedged day with TWO-SIDED ES quotes (half_es=0.25) and zero-spread
+    option quotes (so option cost is 0), real kernel + moving ES so several
+    rehedges re-trade the ES position."""
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    prices = [5000.0, 5010.0, 5020.0, 5030.0, 5040.0]
+    exit_ = entry + timedelta(minutes=len(prices) - 1)
+    es = [_esq(entry + timedelta(minutes=i), p, bid=p - 0.25, ask=p + 0.25, bs=50, as_=50)
+          for i, p in enumerate(prices)]
+    # Option marks: two-sided but ZERO spread (half 0) at entry and exit bars so
+    # the option leg contributes no cost and no fallback.
+    n = len(prices)
+    calls = [_q(entry + timedelta(minutes=i), 30.0, bid=30.0, ask=30.0, bs=10, as_=10)
+             for i in range(n)]
+    puts = [_q(entry + timedelta(minutes=i), 30.0, bid=30.0, ask=30.0, bs=10, as_=10)
+            for i in range(n)]
+    return dict(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=_hspec(enabled=True, interval_minutes=1.0, delta_band=1e9),
+    )
+
+
+def test_hedge_cost_accrues_per_rehedge_at_es_half_spread():
+    kw = _cost_hedge_day()
+    off = simulate_day(**kw)
+    on = simulate_day(**kw, cost=CostModel(enabled=True))
+    assert len(on.hedge_trades) >= 2  # entry + >=1 interior rehedge
+    # Reconstruct the expected hedge cost: 0.25 (half_es) * sum of |trade size|,
+    # trade size = change in ES position at each executed rehedge (from 0).
+    prev = 0.0
+    sum_abs_dq = 0.0
+    for h in on.hedge_trades:
+        sum_abs_dq += abs(h.hedge_qty - prev)
+        prev = h.hedge_qty
+    assert on.pnl.cost_pts == pytest.approx(0.25 * sum_abs_dq)
+    assert on.pnl.n_fallback_fills == 0        # every ES bar is two-sided
+    # Cost strictly reduces P&L vs the cost-off run; gross legs are unchanged.
+    assert on.pnl.hedge_pnl_pts == pytest.approx(off.pnl.hedge_pnl_pts)
+    assert on.pnl.total_pnl_pts == pytest.approx(
+        off.pnl.total_pnl_pts - on.pnl.cost_pts
+    )
+
+
+def test_aggregate_sums_cost_and_fallback_across_days():
+    d1 = simulate_day(**_cost_option_day(cost=CostModel(enabled=True)))
+    d2 = simulate_day(
+        date_int=20250304, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=_bars(resolve_et_to_utc(date(2025, 3, 4), "10:00"), [5000.0] * 6),
+        call_marks=[IntradayBar(resolve_et_to_utc(date(2025, 3, 4), "10:00"), 30.0),
+                    IntradayBar(resolve_et_to_utc(date(2025, 3, 4), "10:05"), 50.0)],
+        put_marks=[IntradayBar(resolve_et_to_utc(date(2025, 3, 4), "10:00"), 30.0),
+                   IntradayBar(resolve_et_to_utc(date(2025, 3, 4), "10:05"), 5.0)],
+        entry_ts=resolve_et_to_utc(date(2025, 3, 4), "10:00"),
+        exit_ts=resolve_et_to_utc(date(2025, 3, 4), "10:05"),
+        entry_tol=10.0, exit_tol=10.0, hedge=_hspec(enabled=False),
+        cost=CostModel(enabled=True, fallback_cost_pts=0.3),
+    )
+    agg = aggregate_days([d1, d2])
+    # d1: cost 1.2 pts, 0 fallback; d2: cost 1.2 pts (4*0.3), 4 fallback.
+    assert agg.total_cost_usd == pytest.approx((1.2 + 1.2) * 50.0)
+    assert agg.n_fallback_fills == 4
+
+
+# --------------------------------------------------------------------------- #
+# W2/P1 — Hedge-timing gates: F1.1 (time-anchored) + F1.2 (skip-near-extremum)
+# --------------------------------------------------------------------------- #
+class _LinearDeltaKernel:
+    """Per-leg delta tracks ES linearly so the net straddle delta — and hence the
+    hedge trade DIRECTION — is fully controllable: call & put delta both
+    ``(F-5000)/1000`` => ``dc+dp = (F-5000)/500``. For a SHORT straddle
+    (side_sign=-1) net delta is ``-(F-5000)/500``: ES ABOVE 5000 => net delta < 0
+    => hedge BUYS ES (into the high); ES BELOW 5000 => hedge SELLS ES (into the
+    low). That lets a rising-ES day exercise the "BUY near the running high" skip
+    and a falling-ES day the symmetric "SELL near the running low" skip."""
+
+    def implied_vol(self, price, F, K, T, r, flag):
+        return 0.2
+
+    def delta(self, F, K, T, r, sigma, flag):
+        return (F - 5000.0) / 1000.0
+
+
+def _short_day(prices, *, hedge, side="short"):
+    """A SHORT straddle over 10:00..10:00+N-1 with the linear-delta kernel."""
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = entry + timedelta(minutes=len(prices) - 1)
+    es = _bars(entry, prices)
+    marks = _bars(entry, [30.0] * len(prices))
+    return dict(
+        date_int=20250303, side=side, strike=5000.0, expiry=date(2025, 3, 4),
+        es_bars=es, call_marks=marks, put_marks=marks,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        hedge=hedge, kernel=_LinearDeltaKernel(),
+    )
+
+
+# --- pure gate helpers ------------------------------------------------------ #
+def test_hedge_time_gate_ok_unit():
+    base = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    close = base + timedelta(minutes=30)
+    assert _hedge_time_gate_ok(HedgeTimingSpec(), base, close) is True  # None => on
+    on = HedgeTimingSpec(only_within_minutes_before_close=10.0)
+    assert _hedge_time_gate_ok(on, base, close) is False               # 30 min out
+    assert _hedge_time_gate_ok(on, close - timedelta(minutes=10), close) is True
+    assert _hedge_time_gate_ok(on, close - timedelta(minutes=5), close) is True
+
+
+def test_skip_near_extremum_unit():
+    base = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    close = base + timedelta(minutes=30)
+    ts = close - timedelta(minutes=5)  # inside a 10-min late window
+    spec = HedgeTimingSpec(skip_near_extremum=SkipNearExtremumSpec(
+        enabled=True, window_minutes=10.0, tolerance=2.0))
+    kw = dict(ts=ts, close_ts=close, running_high=5100.0, running_low=5000.0)
+    # BUY within tolerance of the running high -> suppress; far from it -> allow.
+    assert _skip_near_extremum(spec, es_price=5099.0, delta_change=+0.1, **kw) is True
+    assert _skip_near_extremum(spec, es_price=5090.0, delta_change=+0.1, **kw) is False
+    # SELL within tolerance of the running low -> suppress; near the high -> allow.
+    assert _skip_near_extremum(spec, es_price=5001.0, delta_change=-0.1, **kw) is True
+    assert _skip_near_extremum(spec, es_price=5099.0, delta_change=-0.1, **kw) is False
+    # Zero-size trade has no direction -> never suppressed.
+    assert _skip_near_extremum(spec, es_price=5100.0, delta_change=0.0, **kw) is False
+    # Outside the late window -> inert.
+    early = dict(kw, ts=close - timedelta(minutes=20))
+    assert _skip_near_extremum(spec, es_price=5099.0, delta_change=+0.1, **early) is False
+    # Disabled spec -> never suppress.
+    assert _skip_near_extremum(HedgeTimingSpec(), es_price=5099.0,
+                               delta_change=+0.1, **kw) is False
+    # Missing session context -> fail OPEN (do not block the hedge).
+    nohl = dict(kw, running_high=None, running_low=None)
+    assert _skip_near_extremum(spec, es_price=5099.0, delta_change=+0.1, **nohl) is False
+    # percent tolerance: 0.1% of 5099 ~= 5.1 pts; high-es = 1 <= 5.1 -> suppress.
+    pct = HedgeTimingSpec(skip_near_extremum=SkipNearExtremumSpec(
+        enabled=True, window_minutes=10.0, tolerance=0.1, tolerance_unit="percent"))
+    assert _skip_near_extremum(pct, es_price=5099.0, delta_change=+0.1, **kw) is True
+
+
+def test_running_extremum_no_lookahead():
+    base = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    es = _bars(base, [5000.0, 5010.0, 5005.0, 5200.0, 4900.0])
+    # Up to minute 1: high=5010, low=5000 — the LATER 5200/4900 are excluded.
+    assert _running_extremum(es, base + timedelta(minutes=1)) == (5010.0, 5000.0)
+    # Up to minute 3: the 5200 spike is now in the past+present; 4900 still future.
+    assert _running_extremum(es, base + timedelta(minutes=3)) == (5200.0, 5000.0)
+    # Before the first bar -> no context.
+    assert _running_extremum(es, base - timedelta(minutes=1)) == (None, None)
+
+
+# --- F1.1 time-anchored window --------------------------------------------- #
+def test_f11_restricts_hedging_to_final_window():
+    entry = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    prices = [5000.0] * 31  # flat, 10:00..10:30 (off_ts = 10:30)
+    marks = _bars(entry, [30.0] * 31)
+    kw = dict(date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 4),
+              es_bars=_bars(entry, prices), call_marks=marks, put_marks=marks,
+              entry_ts=entry, exit_ts=entry + timedelta(minutes=30),
+              entry_tol=10.0, exit_tol=10.0)
+    base = simulate_day(**kw, hedge=_hspec(interval_minutes=1.0, delta_band=None))
+    assert base.hedge_trades[0].ts == entry  # ungated: entry hedge at 10:00
+
+    gated = simulate_day(**kw, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None,
+        timing=HedgeTimingSpec(only_within_minutes_before_close=10.0)))
+    open_ts = gated.straddle_off_ts - timedelta(minutes=10)  # 10:20
+    assert gated.hedge_trades  # some fire inside the final-10-min window
+    assert all(h.ts >= open_ts for h in gated.hedge_trades)   # nothing earlier
+    assert gated.hedge_trades[0].ts > entry                   # entry hedge suppressed
+    assert len(gated.hedge_trades) < len(base.hedge_trades)   # strictly fewer
+
+
+def test_f11_unset_matches_baseline():
+    entry = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    prices = [5000.0, 5010.0, 5020.0, 5015.0, 5030.0, 5025.0]
+    kw = _short_day(prices, hedge=_hspec(interval_minutes=1.0, delta_band=0.005))
+    plain = simulate_day(**kw)
+    # An EXPLICIT default (all-neutral) timing must reproduce the result exactly.
+    kw2 = _short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=0.005, timing=HedgeTimingSpec()))
+    explicit = simulate_day(**kw2)
+    assert explicit.hedge_trades == plain.hedge_trades
+    assert explicit.pnl.total_pnl_pts == pytest.approx(plain.pnl.total_pnl_pts)
+
+
+# --- F1.2 skip-near-extremum ----------------------------------------------- #
+def _rising():  # strictly rising ES 10:00..10:20 => every bar is a new high
+    return [5010.0 + 10.0 * i for i in range(21)]
+
+
+def _falling():  # strictly falling ES 10:00..10:20 => every bar is a new low
+    return [5210.0 - 10.0 * i for i in range(21)]
+
+
+def test_f12_suppresses_buy_near_running_high():
+    prices = _rising()
+    late_open = resolve_et_to_utc(date(2025, 3, 3), "10:10")  # off(10:20) - 10min
+    # OFF: BUY hedges fire throughout, including the final 10 min.
+    off = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None)))
+    assert any(h.ts >= late_open for h in off.hedge_trades)
+    # ON: every late bar's ES == the running high (strictly rising), so each
+    # BUY-near-high is suppressed. NB monotone-rising also guards no-look-ahead:
+    # a peek at the (higher) future would put ES *below* the high and NOT suppress.
+    on = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None,
+        timing=HedgeTimingSpec(skip_near_extremum=SkipNearExtremumSpec(
+            enabled=True, window_minutes=10.0, tolerance=0.0)))))
+    assert on.hedge_trades  # early (pre-window) BUYs still fire
+    assert all(h.ts < late_open for h in on.hedge_trades)  # none in the late window
+    # Each executed trade RAISED the ES position (a BUY): resulting qty is strictly
+    # increasing across the surviving trades.
+    q = [h.hedge_qty for h in on.hedge_trades]
+    assert all(b > a for a, b in zip(q, q[1:]))
+
+
+def test_f12_suppresses_sell_near_running_low():
+    prices = _falling()
+    late_open = resolve_et_to_utc(date(2025, 3, 3), "10:10")
+    off = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None)))
+    assert any(h.ts >= late_open for h in off.hedge_trades)
+    on = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None,
+        timing=HedgeTimingSpec(skip_near_extremum=SkipNearExtremumSpec(
+            enabled=True, window_minutes=10.0, tolerance=0.0)))))
+    assert on.hedge_trades
+    assert all(h.ts < late_open for h in on.hedge_trades)   # late SELLs suppressed
+    # Each executed trade LOWERED the ES position (a SELL): resulting qty is
+    # strictly decreasing across the surviving trades.
+    q = [h.hedge_qty for h in on.hedge_trades]
+    assert all(b < a for a, b in zip(q, q[1:]))
+
+
+def test_f12_not_suppressed_when_outside_tolerance():
+    late_open = resolve_et_to_utc(date(2025, 3, 3), "10:10")
+    # High of 5300 is set early (idx3); the late window rises 5110->5210, staying
+    # far below that running high, so late BUYs are NOT near it.
+    prices = ([5010.0, 5100.0, 5200.0, 5300.0, 5250.0, 5200.0,
+               5150.0, 5120.0, 5110.0, 5105.0]
+              + [5110.0 + 10.0 * i for i in range(11)])  # 21 bars total
+    tight = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None,
+        timing=HedgeTimingSpec(skip_near_extremum=SkipNearExtremumSpec(
+            enabled=True, window_minutes=10.0, tolerance=2.0)))))
+    # ES sits >=90 pts below the 5300 running high -> BUYs still fire late.
+    assert any(h.ts >= late_open for h in tight.hedge_trades)
+    # A huge tolerance re-captures those same BUYs as "near the high" -> suppressed.
+    wide = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None,
+        timing=HedgeTimingSpec(skip_near_extremum=SkipNearExtremumSpec(
+            enabled=True, window_minutes=10.0, tolerance=1000.0)))))
+    assert all(h.ts < late_open for h in wide.hedge_trades)
+
+
+def test_f12_unset_matches_baseline():
+    prices = _rising()
+    plain = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None)))
+    disabled = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None,
+        timing=HedgeTimingSpec(skip_near_extremum=SkipNearExtremumSpec(
+            enabled=False, window_minutes=10.0, tolerance=0.0)))))
+    assert disabled.hedge_trades == plain.hedge_trades
+    assert disabled.pnl.total_pnl_pts == pytest.approx(plain.pnl.total_pnl_pts)
+
+
+# --- F1.1 + F1.2 compose (AND of gates) ------------------------------------ #
+def test_f11_and_f12_compose():
+    prices = _rising()  # strictly rising, off_ts = 10:20
+    w_open = resolve_et_to_utc(date(2025, 3, 3), "10:05")   # F1.1 opens (off-15)
+    w_close = resolve_et_to_utc(date(2025, 3, 3), "10:10")  # F1.2 closes it (off-10)
+    res = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None,
+        timing=HedgeTimingSpec(
+            only_within_minutes_before_close=15.0,
+            skip_near_extremum=SkipNearExtremumSpec(
+                enabled=True, window_minutes=10.0, tolerance=0.0)))))
+    # F1.1 suppresses < 10:05; F1.2 suppresses the buy-high >= 10:10. Only the
+    # [10:05, 10:10) band survives.
+    assert res.hedge_trades
+    assert all(w_open <= h.ts < w_close for h in res.hedge_trades)
+
+
+def test_f11_and_f12_compose_distinct_windows_early_extremum():
+    """F1.1 (12-min window) and F1.2 (6-min window -- DISTINCT from F1.1's, unlike
+    the AND-only compose test above where both reference the same rising series)
+    compose correctly when the running high is set EARLY (minute 2 of a 21-bar
+    session) and never approached/exceeded again until the very end.
+
+    This guards against a regression where the late-window suppression
+    accidentally keys off a "recent"/rolling extremum instead of the true
+    whole-session running high computed by ``_running_extremum`` -- the prior
+    compose test can't catch that because its strictly-rising price makes the
+    running high identical to "the current bar", so a buggy rolling-lookback
+    high would coincidentally still work there.
+    """
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    # 21 bars, 10:00..10:20 (off_ts = 10:20, per _short_day's convention).
+    prices = (
+        [5010.0, 5050.0, 5300.0]  # 10:00-10:02: early spike sets the HIGH
+        + [5000.0] * 10            # 10:03-10:12: flat, well below the high
+        + [5297.0]                 # 10:13: BUY toward the high -- near it, but
+                                    #   still OUTSIDE F1.2's 6-min window
+        + [5299.0] * 6              # 10:14-10:19: inside F1.2's window, still
+                                    #   near the same (early, unexceeded) high
+        + [5299.0]                 # 10:20: endpoint, never rehedges
+    )
+    assert len(prices) == 21
+    f11_open = resolve_et_to_utc(day, "10:08")   # off(10:20) - 12min (F1.1)
+    f12_open = resolve_et_to_utc(day, "10:14")   # off(10:20) - 6min (F1.2)
+    near_high_ts = resolve_et_to_utc(day, "10:13")
+
+    # Sanity: the running high is genuinely EARLY and constant across the whole
+    # late window -- not a value freshly set by "the current bar" (contrast the
+    # monotone-rising fixture used elsewhere in this file).
+    es_bars = _bars(entry, prices)
+    for late_ts in (near_high_ts, f12_open, resolve_et_to_utc(day, "10:19")):
+        assert _running_extremum(es_bars, late_ts) == (5300.0, 5000.0)
+
+    timing = HedgeTimingSpec(
+        only_within_minutes_before_close=12.0,
+        skip_near_extremum=SkipNearExtremumSpec(
+            enabled=True, window_minutes=6.0, tolerance=5.0))
+    res = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None, timing=timing)))
+
+    assert res.hedge_trades
+    # F1.1 alone gates everything before 10:08 (its window is wider than F1.2's).
+    assert all(h.ts >= f11_open for h in res.hedge_trades)
+    # The near-high BUY at 10:13 fires: ES is within F1.2's tolerance of the
+    # (early) running high, but 10:13 is OUTSIDE F1.2's 6-min window -- F1.2 is
+    # inert there. Proves the two gates' boundaries are independently applied,
+    # not "whichever gate is tighter always wins".
+    assert any(h.ts == near_high_ts for h in res.hedge_trades)
+    # Once inside F1.2's own window (>= 10:14), the same near-high BUY is
+    # suppressed on every remaining bar -- keyed off the EARLY extremum, not a
+    # freshly-made one -- so the late window ends up empty even though F1.1's
+    # (wider) window alone would still be open all the way through 10:20.
+    assert all(h.ts < f12_open for h in res.hedge_trades)
+
+    # Control: F1.1-only (identical window, F1.2 absent) DOES trade at/after
+    # 10:14 -- confirming the emptiness above is caused by F1.2's extremum
+    # check, not by a coincidental lack of price movement in the fixture.
+    f11_only = simulate_day(**_short_day(prices, hedge=_hspec(
+        interval_minutes=1.0, delta_band=None,
+        timing=HedgeTimingSpec(only_within_minutes_before_close=12.0))))
+    assert any(h.ts >= f12_open for h in f11_only.hedge_trades)
