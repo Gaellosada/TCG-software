@@ -45,6 +45,11 @@ class _NoTradeReader:
     async def get_es_future_tick_size(self) -> float:
         return 0.25
 
+    async def fetch_future_settlement(self, start: Any, end: Any) -> dict[Any, float]:
+        # Gap 1: default exit_mode="auto" makes run_backtest fetch the settlement
+        # grid pre-loop; the stub returns an empty map (pre-loop call succeeds).
+        return {}
+
 
 def _body(**over: Any) -> dict[str, Any]:
     base: dict[str, Any] = {"start_date": "2025-02-03", "end_date": "2025-02-05"}
@@ -67,7 +72,10 @@ def _install_process_recorder(monkeypatch: pytest.MonkeyPatch) -> dict[int, str]
     seen: dict[int, str] = {}
 
     async def _fake_process_day(reader, req, plan, all_exps, exp_to_objs,
-                                tick_size, es_tick, side):  # noqa: ANN001
+                                tick_size, es_tick, side,
+                                settle_by_date=None):  # noqa: ANN001
+        # settle_by_date (Gap 1) is threaded into _process_day; the recorder
+        # accepts it to mirror the new signature (unused for side recording).
         seen[plan.date_int] = side
         return DayResult(date=plan.date_int, status="ok", pnl=_ok_pnl())
 

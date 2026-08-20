@@ -15,7 +15,7 @@ complex (``kind='option'``, symbol ``OPT_SP_500_*``) and the ES future
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 from tcg.data._sql.connection import DwhConnectionPool, to_float
 from tcg.types.errors import DataAccessError
@@ -33,6 +33,18 @@ V2_SCHEMA = "tcg_instruments_v2"
 
 _FUTURE_SYMBOL = "FUT_SP_500"
 _OPTION_SYMBOL_PREFIX = "OPT_SP_500"
+
+
+def _clean_two_sided(bid: float | None, ask: float | None) -> bool:
+    """Usable UNCROSSED two-sided quote: both sides present, bid > 0, ask > bid.
+
+    Rejects crossed / locked books (``ask <= bid``) so an inverted top-of-book
+    never fabricates a mid (Gap 4b). A rejected quote leaves the bar's bid/ask
+    ``None``, degrading it to the trade-bar close, which then fails the
+    downstream ``max_spread`` / ``min_quote_size`` guards rather than being
+    silently accepted at a nonsensical mid.
+    """
+    return bid is not None and ask is not None and bid > 0 and ask > bid
 
 
 class IntradayV2Reader:
@@ -170,8 +182,10 @@ class IntradayV2Reader:
     ) -> list[IntradayBar]:
         """Front ES-future 1m mark series over ``[start_ts, end_ts)``.
 
-        Picks the FRONT contract (nearest expiration >= *on_or_after* that has
-        bars in the window) and MERGES its trade bars (``fact_bar`` close) with
+        Picks the FRONT contract (nearest expiration STRICTLY AFTER *on_or_after*
+        that has bars in the window; Gap 4a — a contract expiring ON the trade
+        day is a stale/settling series, not the active front, so ``>`` not
+        ``>=``) and MERGES its trade bars (``fact_bar`` close) with
         its top-of-book quotes (``fact_bbba`` — the ES ``bbo-1m`` grid, mapped to
         ``serie.type='bbba'``) into one event-ordered series. Per bar the
         returned :class:`IntradayBar` carries:
@@ -199,7 +213,7 @@ class IntradayV2Reader:
                             JOIN {V2_SCHEMA}.fact_bar f ON f.serie_id = s.serie_id
                             WHERE s.object_id = %s
                               AND s.type = 'bar' AND s.freq = '1m'
-                              AND c.expiration >= %s
+                              AND c.expiration > %s
                               AND f.close > 0
                               AND f.ts >= %s AND f.ts < %s
                             ORDER BY c.expiration, f.ts""",
@@ -240,7 +254,7 @@ class IntradayV2Reader:
         for r in bbba_rows:
             bid = to_float(r["best_bid_value"])
             ask = to_float(r["best_ask_value"])
-            if bid is not None and ask is not None and bid > 0 and ask > 0:
+            if _clean_two_sided(bid, ask):
                 marks[r["ts"]] = IntradayBar(
                     ts=r["ts"],
                     price=(bid + ask) / 2.0,
@@ -308,7 +322,7 @@ class IntradayV2Reader:
         for r in bbba_rows:
             bid = to_float(r["best_bid_value"])
             ask = to_float(r["best_ask_value"])
-            if bid is not None and ask is not None and bid > 0 and ask > 0:
+            if _clean_two_sided(bid, ask):
                 marks[r["ts"]] = IntradayBar(
                     ts=r["ts"],
                     price=(bid + ask) / 2.0,
@@ -318,6 +332,73 @@ class IntradayV2Reader:
                     ask_size=to_float(r["best_ask_volume"]),
                 )
         return [marks[ts] for ts in sorted(marks)]
+
+    async def fetch_future_settlement(
+        self, start: date, end: date
+    ) -> dict[date, float]:
+        """Front-quarterly ES-future SETTLEMENT per settlement date (Gap 1).
+
+        The 0DTE ES options cash-settle against the front ES future's
+        settlement level ``|F_settle - K|``. This returns ``{settlement_date:
+        F_settle}`` over ``[start, end]`` reading the settlement grid
+        (``serie.type='value'`` -> ``fact_value.value`` on the ``FUT_SP_500``
+        object, resolved via :meth:`resolve_future_object_id` — NOT hardcoded).
+
+        Fold: among ``value > 0`` rows on a settlement date ``d``, the FRONT
+        quarterly is the smallest contract expiration STRICTLY AFTER ``d`` (Gap
+        4a — a contract expiring ON ``d`` is a stale/settling series); if none is
+        after ``d`` (all expired), the smallest expiration is used. This is a
+        settlement LEVEL, not a fill: NO spread is applied. ``ts`` is
+        constant-bounded (BRIN prune); the range runs from ``start`` 00:00Z to
+        ``end`` + 2 days to capture the last day's settlement stamp.
+        """
+        future_id = await self.resolve_future_object_id()
+        if future_id is None:
+            return {}
+        lower = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+        upper = (
+            datetime(end.year, end.month, end.day, tzinfo=timezone.utc)
+            + timedelta(days=2)
+        )
+        try:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT c.expiration, f.ts, f.value
+                            FROM {V2_SCHEMA}.serie s
+                            JOIN {V2_SCHEMA}.contract c ON c.contract_id = s.contract_id
+                            JOIN {V2_SCHEMA}.fact_value f ON f.serie_id = s.serie_id
+                            WHERE s.object_id = %s
+                              AND s.type = 'value'
+                              AND f.ts >= %s AND f.ts < %s
+                            ORDER BY c.expiration, f.ts""",
+                        (future_id, lower, upper),
+                    )
+                    rows = await cur.fetchall()
+        except Exception as exc:  # noqa: BLE001
+            raise DataAccessError(
+                f"v2 intraday error fetching future settlement: {exc}"
+            ) from exc
+
+        by_date: dict[date, list[tuple[date, float]]] = {}
+        for r in rows:
+            value = to_float(r["value"])
+            if value is None or value <= 0:
+                continue
+            exp = r["expiration"]
+            settle_date = r["ts"].astimezone(timezone.utc).date()
+            by_date.setdefault(settle_date, []).append((exp, value))
+
+        settlement: dict[date, float] = {}
+        for settle_date, lst in by_date.items():
+            front = [(e, v) for e, v in lst if e is not None and e > settle_date]
+            if front:
+                settlement[settle_date] = min(front, key=lambda x: x[0])[1]
+            else:
+                settlement[settle_date] = min(
+                    lst, key=lambda x: x[0] or date.max
+                )[1]
+        return settlement
 
     # ------------------------------------------------------------------ #
     async def _fetch_one(self, sql: str, params: tuple) -> dict | None:

@@ -66,6 +66,11 @@ class _FakeReader:
     async def get_es_future_tick_size(self) -> float:
         return 0.25
 
+    async def fetch_future_settlement(self, start, end):
+        # Gap 1: default exit_mode="auto" fetches the settlement grid pre-loop.
+        # Empty => quote-exit fallback (this fixture's assertions are quote-based).
+        return {}
+
     async def fetch_es_future_1m(self, win_start, win_end, on_or_after=None):
         bars = _minute_bars(9, 28, 15, 47, lambda _m: (5000.0, 4999.75, 5000.25))
         return [b for b in bars if win_start <= b.ts <= win_end]

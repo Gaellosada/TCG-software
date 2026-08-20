@@ -258,7 +258,10 @@ def test_cache_key_allowlist_on_participates() -> None:
 
 
 def test_compute_version_bumped() -> None:
-    assert ib.INTRADAY_COMPUTE_VERSION == "0.7.0"
+    # 0.7.0 -> 0.8.0 for the 0DTE gap-closure (settlement-intrinsic exit +
+    # default exit_mode="auto" + leg-sync + strict-> + crossed-quote exclusion):
+    # compute output shifts, so stale cache must not be served.
+    assert ib.INTRADAY_COMPUTE_VERSION == "0.8.0"
 
 
 # --------------------------------------------------------------------------- #

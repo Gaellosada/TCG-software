@@ -35,6 +35,10 @@ from tcg.engine.intraday_backtest import (
 from tcg.engine.options.pricing import BS76Kernel
 from tcg.types.intraday import (
     ES_OPTION_TICK_SIZE,
+    CostModel,
+    DayPnl,
+    DayResult,
+    MarkSnapshot,
     es_option_tick,
     HedgeSpec,
     HedgeTargetSpec,
@@ -309,6 +313,183 @@ def test_independent_legs_fill_at_different_timestamps():
     assert res.legs.put.entry_ts == entry + timedelta(minutes=3)
     # straddle_on = max(call, put) = the later put fill.
     assert res.straddle_on_ts == entry + timedelta(minutes=3)
+
+
+# --------------------------------------------------------------------------- #
+# Common-instant leg sync (Rule 7, Gap 2, ALWAYS-ON): both legs re-valued at
+# T=max(t_call,t_put), each at its LAST clean quote <= T.
+# --------------------------------------------------------------------------- #
+def test_leg_sync_remarks_earlier_leg_to_last_clean_before_T():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:30")
+    es = _bars(entry, [5000.0] * 40)
+    cond = [MaxSpreadCond(pct=5.0, min_ticks=1.0)]
+    # CALL has TWO clean quotes before T: @t0 (mid 30) and @t0+2 (mid 32). Its
+    # scan-entry is the FIRST (@t0, 30); leg-sync must re-mark it to the LAST
+    # clean quote <= T (@t0+2, 32) — the common-instant value.
+    calls = [
+        _q(entry, 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+        _q(entry + timedelta(minutes=2), 32.0, bid=31.9, ask=32.1, bs=50, as_=50),
+        _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+    ]
+    # PUT's first clean quote is @t0+3 => T = t0+3 (the later leg defines T).
+    puts = [
+        _q(entry, 30.0),  # last-trade-only -> fails max_spread
+        _q(entry + timedelta(minutes=3), 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+        _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+    ]
+    res = simulate_day(**_day(call_marks=calls, put_marks=puts, es_bars=es,
+                              exit_ts=exit_, entry_conditions=cond, exit_conditions=cond))
+    assert res.status == "ok"
+    # Load-bearing rule-7 assertion: call re-marked to its last clean quote <= T.
+    assert res.legs.call.entry_price == pytest.approx(32.0)
+    assert res.legs.call.entry_ts == entry + timedelta(minutes=2)
+    assert res.legs.put.entry_price == pytest.approx(30.0)
+    assert res.legs.put.entry_ts == entry + timedelta(minutes=3)
+    # T (both-on start) is the later of the two entries.
+    assert res.straddle_on_ts == entry + timedelta(minutes=3)
+
+
+def test_leg_sync_noop_when_single_clean_quote():
+    # Exactly one clean entry quote per leg (the shape of the existing
+    # independent-legs test): re-sync is a no-op — each leg keeps its own fill.
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:20")
+    es = _bars(entry, [5000.0] * 25)
+    cond = [MaxSpreadCond(pct=5.0, min_ticks=1.0)]
+    calls = [_q(entry, 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+             _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50)]
+    puts = [_q(entry, 30.0),
+            _q(entry + timedelta(minutes=3), 30.0, bid=29.9, ask=30.1, bs=50, as_=50),
+            _q(exit_, 30.0, bid=29.9, ask=30.1, bs=50, as_=50)]
+    res = simulate_day(**_day(call_marks=calls, put_marks=puts, es_bars=es,
+                              exit_ts=exit_, entry_conditions=cond, exit_conditions=cond))
+    assert res.status == "ok"
+    assert res.legs.call.entry_price == pytest.approx(30.0)
+    assert res.legs.call.entry_ts == entry
+    assert res.legs.put.entry_ts == entry + timedelta(minutes=3)
+    assert res.straddle_on_ts == entry + timedelta(minutes=3)
+
+
+# --------------------------------------------------------------------------- #
+# Settlement-intrinsic exit |F_settle - K| behind the exit_mode toggle (Gap 1).
+# --------------------------------------------------------------------------- #
+def _settle_day(**over):
+    """0DTE day (expiry == trade date), flat ES 5000, flat premiums 8/8."""
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "15:45")
+    n = int((exit_ - entry).total_seconds() // 60) + 1
+    es = _bars(entry, [5000.0] * n)
+    calls = _bars(entry, [8.0] * n)
+    puts = _bars(entry, [8.0] * n)
+    kwargs = dict(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 3),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+    )
+    kwargs.update(over)
+    return kwargs
+
+
+def test_exit_mode_quote_is_identical_to_baseline():
+    # Regression guard (exit path): quote mode + a settlement price that MUST be
+    # ignored reproduces the baseline exit exactly — even on a 0DTE day.
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "10:05")
+    es = _bars(entry, [5000.0] * 6)
+    calls = [IntradayBar(entry, 30.0), IntradayBar(exit_, 50.0)]
+    puts = [IntradayBar(entry, 30.0), IntradayBar(exit_, 5.0)]
+    common = dict(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 3),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+    )
+    base = simulate_day(**common)
+    q = simulate_day(**common, exit_mode="quote", settlement_price=5013.0)
+    assert q.legs.call.exit_price == base.legs.call.exit_price == 50.0
+    assert q.legs.put.exit_price == base.legs.put.exit_price == 5.0
+    assert q.pnl.option_pnl_pts == base.pnl.option_pnl_pts
+    assert q.pnl.total_pnl_pts == base.pnl.total_pnl_pts
+
+
+def test_settlement_payoff_equals_abs_F_minus_K():
+    up = simulate_day(**_settle_day(settlement_price=5013.0, exit_mode="settlement"))
+    assert up.legs.call.exit_price == pytest.approx(13.0)  # max(F-K, 0)
+    assert up.legs.put.exit_price == pytest.approx(0.0)     # max(K-F, 0)
+    # option_pnl = side_sign * (|F-K| - premium_entry) = 13 - (8+8).
+    assert up.pnl.option_pnl_pts == pytest.approx(13.0 - 16.0)
+
+    dn = simulate_day(**_settle_day(settlement_price=4990.0, exit_mode="settlement"))
+    assert dn.legs.call.exit_price == pytest.approx(0.0)
+    assert dn.legs.put.exit_price == pytest.approx(10.0)
+    assert dn.pnl.option_pnl_pts == pytest.approx(10.0 - 16.0)
+
+    sh = simulate_day(
+        **_settle_day(settlement_price=5013.0, exit_mode="settlement", side="short")
+    )
+    assert sh.pnl.option_pnl_pts == pytest.approx(-(13.0 - 16.0))  # seller mirror
+
+
+def test_auto_uses_settlement_only_on_0dte_held():
+    # 0DTE (expiry == trade date) + auto -> settlement intrinsic.
+    r0 = simulate_day(**_settle_day(settlement_price=5013.0, exit_mode="auto"))
+    assert r0.legs.call.exit_price == pytest.approx(13.0)
+    assert r0.legs.put.exit_price == pytest.approx(0.0)
+    # NON-0DTE (expiry != trade date) + auto -> quote exit (settlement ignored).
+    r1 = simulate_day(
+        **_settle_day(settlement_price=5013.0, exit_mode="auto", expiry=date(2025, 3, 4))
+    )
+    assert r1.legs.call.exit_price == pytest.approx(8.0)  # flat quote, not intrinsic
+    assert r1.legs.put.exit_price == pytest.approx(8.0)
+
+
+def test_auto_early_trigger_forces_quote():
+    day = date(2025, 3, 3)
+    entry = resolve_et_to_utc(day, "10:00")
+    exit_ = resolve_et_to_utc(day, "15:45")
+    # ES jumps +100 at t+1 -> underlying_move trigger (>=50 pts) fires early.
+    es = [IntradayBar(entry, 5000.0),
+          IntradayBar(entry + timedelta(minutes=1), 5100.0),
+          IntradayBar(entry + timedelta(minutes=2), 5100.0)]
+    calls = _bars(entry, [8.0, 8.0, 8.0])
+    puts = _bars(entry, [8.0, 8.0, 8.0])
+    res = simulate_day(
+        date_int=20250303, side="long", strike=5000.0, expiry=date(2025, 3, 3),
+        es_bars=es, call_marks=calls, put_marks=puts,
+        entry_ts=entry, exit_ts=exit_, entry_tol=10.0, exit_tol=10.0,
+        exit_triggers=[UnderlyingMoveTrigger(amount=50.0, unit="points")],
+        exit_mode="auto", settlement_price=5013.0,
+    )
+    assert res.exit_trigger is not None  # early trigger fired
+    # Exit is the QUOTE at the trigger bar (8.0), NOT the settlement intrinsic.
+    assert res.legs.call.exit_price == pytest.approx(8.0)
+    assert res.legs.put.exit_price == pytest.approx(8.0)
+
+
+def test_settlement_none_degrades_to_quote():
+    base = simulate_day(**_settle_day())  # no exit_mode/settlement => quote baseline
+    degraded = simulate_day(**_settle_day(exit_mode="auto", settlement_price=None))
+    assert degraded.legs.call.exit_price == base.legs.call.exit_price == 8.0
+    assert degraded.pnl.option_pnl_pts == base.pnl.option_pnl_pts
+
+
+def test_settlement_no_exit_cost():
+    # Last-trade-only bars (no bid/ask) => each COUNTED fill hits the fixed
+    # fallback. Settlement charges ONLY the 2 entry fills (settlement exit is not
+    # a fill); quote charges all 4.
+    cost = CostModel(enabled=True, fallback_cost_pts=1.0)
+    settle = simulate_day(
+        **_settle_day(settlement_price=5013.0, exit_mode="settlement", cost=cost)
+    )
+    assert settle.pnl.n_fallback_fills == 2
+    assert settle.pnl.cost_pts == pytest.approx(2.0)
+    quote = simulate_day(**_settle_day(exit_mode="quote", cost=cost))
+    assert quote.pnl.n_fallback_fills == 4
+    assert quote.pnl.cost_pts == pytest.approx(4.0)
 
 
 def test_snap_tolerance_bounds_leg_gap_skips_day():
@@ -604,6 +785,89 @@ def test_aggregate_counts_and_winrate():
     assert agg.n_days == 3 and agg.n_traded == 2 and agg.n_skipped == 1
     assert 0.0 <= agg.win_rate <= 1.0
     assert len(agg.equity_curve) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Native %NAV metrics on AggregateResult (Gap 3) — Yann basis, numpy-only.
+# --------------------------------------------------------------------------- #
+def _mk_day(date_int, pnl_pts, underlying):
+    """Minimal 'ok' DayResult carrying total_pnl_pts + entry underlying."""
+    ts = resolve_et_to_utc(date(2025, 3, 3), "10:00")
+    return DayResult(
+        date=date_int, status="ok",
+        entry=MarkSnapshot(ts, underlying, 8.0, 8.0, 16.0),
+        pnl=DayPnl(
+            option_pnl_pts=pnl_pts, hedge_pnl_pts=0.0,
+            total_pnl_pts=pnl_pts, total_pnl_usd=pnl_pts * 50.0,
+        ),
+    )
+
+
+def test_native_metrics_match_w3_formulas():
+    import numpy as np
+    from scipy import stats
+
+    pnls = [5.0, -3.0, 8.0, -10.0, 2.0, 6.0]
+    unders = [5000.0, 5010.0, 4990.0, 5020.0, 5005.0, 4995.0]
+    results = [_mk_day(20250301 + i, p, u) for i, (p, u) in enumerate(zip(pnls, unders))]
+    agg = aggregate_days(results)
+
+    r = np.array([p / u for p, u in zip(pnls, unders)])
+    n = r.size
+    nav = np.cumprod(1.0 + r)
+    assert agg.n_return_days == n
+    assert agg.mean_daily_return == pytest.approx(float(r.mean()))
+    assert agg.nav_final == pytest.approx(float(nav[-1]))
+    assert agg.pct_return_year == pytest.approx(float(nav[-1]) ** (252.0 / n) - 1.0)
+    assert agg.ann_vol == pytest.approx(float(np.std(r, ddof=1)) * np.sqrt(252.0))
+    assert agg.return_sharpe == pytest.approx(
+        float(r.mean() / np.std(r, ddof=1)) * np.sqrt(252.0)
+    )
+    assert agg.max_drawdown_pct == pytest.approx(
+        float((nav / np.maximum.accumulate(nav) - 1.0).min())
+    )
+    assert agg.median_daily_return == pytest.approx(float(np.median(r)))
+    # skew is bias-corrected (G1) — cross-check vs scipy.stats.skew(bias=False).
+    assert agg.return_skew == pytest.approx(float(stats.skew(r, bias=False)))
+
+
+def test_native_metrics_backcompat_usd_fields_unchanged():
+    import numpy as np
+
+    pnls = [5.0, -3.0, 8.0]
+    results = [_mk_day(20250301 + i, p, 5000.0) for i, p in enumerate(pnls)]
+    agg = aggregate_days(results)
+
+    usd = np.array([p * 50.0 for p in pnls])
+    assert agg.total_pnl_usd == pytest.approx(float(usd.sum()))
+    assert agg.mean_daily_pnl_usd == pytest.approx(float(usd.mean()))
+    assert agg.sharpe == pytest.approx(
+        float(usd.mean() / np.std(usd, ddof=1)) * np.sqrt(252.0)
+    )
+    cum = 0.0
+    peak = 0.0
+    mdd = 0.0
+    for p in pnls:
+        cum += p * 50.0
+        peak = max(peak, cum)
+        mdd = min(mdd, cum - peak)
+    assert agg.max_drawdown_usd == pytest.approx(mdd)
+    assert agg.win_rate == pytest.approx(float((usd > 0).mean()))
+
+
+def test_native_metrics_exclude_ladder_aggregate_days():
+    # A ladder-aggregate DayResult has pnl but NO entry (entry is None). It must
+    # be EXCLUDED from the %NAV return series (Q3) while still counting in USD.
+    with_entry = _mk_day(20250301, 5.0, 5000.0)
+    ladder_agg = DayResult(
+        date=20250302, status="ok", entry=None,
+        pnl=DayPnl(option_pnl_pts=4.0, hedge_pnl_pts=0.0,
+                   total_pnl_pts=4.0, total_pnl_usd=200.0),
+    )
+    agg = aggregate_days([with_entry, ladder_agg])
+    assert agg.n_traded == 2                 # both count in USD aggregation
+    assert agg.n_return_days == 1            # only the entry-bearing day in returns
+    assert agg.nav_final == pytest.approx(1.0 + 5.0 / 5000.0)
 
 
 # --------------------------------------------------------------------------- #

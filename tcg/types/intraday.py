@@ -490,3 +490,18 @@ class AggregateResult:
     # fixed per-side cost because their bar had no two-sided quote.
     total_cost_usd: float = 0.0
     n_fallback_fills: int = 0
+    # Native %-NAV metrics (Gap 3) on the daily-return series
+    # ``return_day = total_pnl_pts / entry.underlying`` (Yann basis). Computed on
+    # the traded days that carry an ``entry`` (ladder-aggregate days, entry=None,
+    # are excluded — Q3). All defaults keep pre-Gap-3 constructors valid and are
+    # the neutral values for an empty return series. Formulas mirror
+    # ``w3_core.py`` / ``w3_yann_basis.py``.
+    n_return_days: int = 0
+    mean_daily_return: float = 0.0
+    pct_return_year: float = 0.0     # compounded: nav_final**(252/n) - 1 (fraction)
+    nav_final: float = 1.0           # prod(1 + r)
+    ann_vol: float = 0.0             # std(r, ddof=1) * sqrt(252)
+    return_sharpe: float = 0.0       # mean(r)/std(r, ddof=1) * sqrt(252), no rf
+    max_drawdown_pct: float = 0.0    # min(nav/cummax(nav) - 1)  (<= 0)
+    median_daily_return: float = 0.0
+    return_skew: float = 0.0         # bias-corrected G1 (== scipy skew, bias=False)

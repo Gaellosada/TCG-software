@@ -273,7 +273,10 @@ def test_cache_key_ladder_on_participates() -> None:
 
 
 def test_compute_version_bumped_for_ladder() -> None:
-    assert ib.INTRADAY_COMPUTE_VERSION == "0.7.0"
+    # 0.7.0 -> 0.8.0: the 0DTE gap-closure (settlement-intrinsic exit + default
+    # exit_mode="auto", leg-sync, strict-> front selection, crossed-quote
+    # exclusion) changes compute output, so the cache namespace must be bumped.
+    assert ib.INTRADAY_COMPUTE_VERSION == "0.8.0"
 
 
 def test_echo_omits_inert_ladder_keeps_active() -> None:

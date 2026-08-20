@@ -624,6 +624,14 @@ class RunRequest(BaseModel):
     expiry_mode: Literal["0DTE", "NDTE"] = "0DTE"
     dte: int = Field(default=0, ge=0)
     straddle_side: Literal["long", "short"] = "long"
+    # Exit convention (Gap 1). "quote" = close at the exit-window quote (prior
+    # behavior; no settlement fetch). "settlement" / "auto" close a 0DTE
+    # held-to-settlement day at the front-future settlement intrinsic
+    # |F_settle - K| (no exit spread). "auto" (DEFAULT) uses settlement ONLY on a
+    # 0DTE-held expiry day and quote otherwise; early-exit triggers always force
+    # a quote exit. A real field: it changes the result, so it stays in the
+    # cache key (NOT stripped).
+    exit_mode: Literal["quote", "settlement", "auto"] = "auto"
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
     # Transaction-cost model (P0.2). Default OFF => mid fills (prior behavior).
     # A real field (NOT stripped from the cache key): cost changes the result.
@@ -1263,6 +1271,16 @@ def _serialize_aggregate(a: AggregateResult) -> dict[str, Any]:
         "max_drawdown_usd": a.max_drawdown_usd,
         "total_cost_usd": a.total_cost_usd,
         "n_fallback_fills": a.n_fallback_fills,
+        # Native %-NAV metrics (Gap 3): Yann-basis daily-return statistics.
+        "n_return_days": a.n_return_days,
+        "mean_daily_return": a.mean_daily_return,
+        "pct_return_year": a.pct_return_year,
+        "nav_final": a.nav_final,
+        "ann_vol": a.ann_vol,
+        "return_sharpe": a.return_sharpe,
+        "max_drawdown_pct": a.max_drawdown_pct,
+        "median_daily_return": a.median_daily_return,
+        "return_skew": a.return_skew,
         "equity_curve": [
             {"date": _int_to_iso(p.date), "cum_pnl_usd": p.cum_pnl_usd}
             for p in a.equity_curve
@@ -1325,6 +1343,7 @@ async def _simulate_entry(
     tick_size: float,
     es_tick: float,
     side: str,
+    settlement_price: float | None = None,
 ) -> DayResult:
     """Run ONE straddle's full open->hedge->settlement lifecycle at ``entry_ts``.
 
@@ -1392,6 +1411,8 @@ async def _simulate_entry(
         es_day_open=es_day_open,
         multiplier=ES_MULTIPLIER,
         cost=_to_engine_cost(req.cost),
+        exit_mode=req.exit_mode,
+        settlement_price=settlement_price,
     )
 
 
@@ -1440,6 +1461,7 @@ async def _process_day(
     tick_size: float,
     es_tick: float,
     side: str,
+    settle_by_date: dict[date, float] | None = None,
 ) -> DayResult:
     """Fetch marks + simulate a single (non-excluded) trading day (async I/O).
 
@@ -1457,6 +1479,10 @@ async def _process_day(
     expiry = _pick_expiry(all_exps, plan.day, req.expiry_mode, req.dte)
     if expiry is None:
         return DayResult(date=plan.date_int, status="skipped", skip_reason="no_expiry")
+
+    # Settlement level for THIS expiry (Gap 1). None when the mode is quote or no
+    # settle was fetched for the day -> the engine falls back to a quote exit.
+    settlement_price = (settle_by_date or {}).get(expiry)
 
     # Window: from the session open (09:30 ET, the max_underlying_move day-open
     # reference) or the FIRST entry, whichever is earlier, out to the exit-scan
@@ -1481,6 +1507,7 @@ async def _process_day(
             es_bars=es_bars, session_open=session_open,
             win_start=win_start, win_end=win_end,
             tick_size=tick_size, es_tick=es_tick, side=side,
+            settlement_price=settlement_price,
         )
 
     # Ladder ON: run each rung independently, in time order, enforcing the
@@ -1508,6 +1535,7 @@ async def _process_day(
             es_bars=es_bars, session_open=session_open,
             win_start=win_start, win_end=win_end,
             tick_size=tick_size, es_tick=es_tick, side=side,
+            settlement_price=settlement_price,
         )
         rung_results.append(res)
         if res.status == "ok":
@@ -1605,6 +1633,19 @@ async def run_backtest(
     tick_size = await reader.get_option_tick_size()
     es_tick = await reader.get_es_future_tick_size()
 
+    # Settlement grid for the settlement-intrinsic exit (Gap 1). Fetched ONCE per
+    # run and ONLY when the exit mode may need it (quote => no extra dwh read, so
+    # the baseline path is byte-for-byte preserved). A fetch glitch degrades to
+    # quote (empty map => every day falls back to a quote exit) rather than
+    # failing an otherwise good backtest.
+    settle_by_date: dict[date, float] = {}
+    if req.exit_mode != "quote":
+        try:
+            settle_by_date = await reader.fetch_future_settlement(start, plans[-1].day)
+        except Exception:  # noqa: BLE001
+            logger.exception("settlement fetch failed; degrading to quote")
+            settle_by_date = {}
+
     results: list[DayResult] = []
     days_done = 0
     for plan in plans:
@@ -1637,7 +1678,8 @@ async def run_backtest(
 
         results.append(
             await _process_day(
-                reader, req, plan, all_exps, exp_to_objs, tick_size, es_tick, side
+                reader, req, plan, all_exps, exp_to_objs, tick_size, es_tick, side,
+                settle_by_date,
             )
         )
         days_done += 1
@@ -1691,7 +1733,7 @@ async def run_backtest(
 # tick-size handling, expiry/DTE resolution) namespaces the cache: bumping this
 # guarantees stale entries can never be served with ``from_cache: true``. BUMP on
 # ANY change to the intraday backtest compute output AND on each release.
-INTRADAY_COMPUTE_VERSION = "0.7.0"
+INTRADAY_COMPUTE_VERSION = "0.8.0"
 
 # A DISTINCT sqlite filename from the portfolio cache so the two do not share the
 # 200-entry LRU domain (they would otherwise evict each other's entries).

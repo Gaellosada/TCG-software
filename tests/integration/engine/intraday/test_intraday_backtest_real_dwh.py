@@ -15,7 +15,7 @@ import pytest
 
 from tcg.core.api.intraday_backtest import CostModelConfig, RunRequest, run_backtest
 from tcg.data._sql.connection import DwhConnectionPool, load_dwh_config
-from tcg.data._sql.intraday_v2 import IntradayV2Reader
+from tcg.data._sql.intraday_v2 import V2_SCHEMA, IntradayV2Reader
 from tcg.engine.intraday_backtest import resolve_et_to_utc
 from datetime import date
 
@@ -158,3 +158,100 @@ async def test_run_backtest_end_to_end(reader):
         dc["pnl"]["option_pnl_pts"] + dc["pnl"]["hedge_pnl_pts"] - dc["pnl"]["cost_pts"]
     )
     assert result_cost["aggregate"]["total_cost_usd"] >= 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Gap 1 / Gap 4a — settlement fetch + strict-`>` front-quarterly selection
+# (live dwh). 2025-03-21 is a quarterly ES expiration (3rd Friday of March).
+# --------------------------------------------------------------------------- #
+_QUARTERLY_DAY = date(2025, 3, 21)
+
+
+async def test_fetch_future_settlement_front_quarterly_strict(reader):
+    """fetch_future_settlement returns {date: F_settle>0} and applies the
+    STRICT-`>` front-quarterly fold on real settlement rows (Gap 1 + 4a)."""
+    start = date(2025, 3, 17)
+    end = date(2025, 3, 24)
+    settle = await reader.fetch_future_settlement(start, end)
+    assert settle, "expected front-quarterly ES settlement values in the window"
+    assert all(isinstance(k, date) for k in settle)
+    assert all(v > 0 for v in settle.values())
+
+    # Recompute the EXPECTED strict-`>` fold from the raw settlement rows and
+    # assert the method matches it exactly on real data (proves the fold + the
+    # value>0 filter, not just that some dict came back).
+    future_id = await reader.resolve_future_object_id()
+    assert future_id is not None
+    from datetime import datetime, timedelta, timezone
+
+    lower = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+    upper = datetime(end.year, end.month, end.day, tzinfo=timezone.utc) + timedelta(days=2)
+    async with reader._pool.connection() as conn:  # noqa: SLF001 - integration probe
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"""SELECT c.expiration, f.ts, f.value
+                    FROM {V2_SCHEMA}.serie s
+                    JOIN {V2_SCHEMA}.contract c ON c.contract_id = s.contract_id
+                    JOIN {V2_SCHEMA}.fact_value f ON f.serie_id = s.serie_id
+                    WHERE s.object_id = %s AND s.type = 'value'
+                      AND f.ts >= %s AND f.ts < %s
+                    ORDER BY c.expiration, f.ts""",
+                (future_id, lower, upper),
+            )
+            rows = await cur.fetchall()
+    by_date: dict = {}
+    for r in rows:
+        v = r["value"]
+        if v is None or float(v) <= 0:
+            continue
+        by_date.setdefault(
+            r["ts"].astimezone(timezone.utc).date(), []
+        ).append((r["expiration"], float(v)))
+    expected: dict = {}
+    for d, lst in by_date.items():
+        front = [(e, v) for e, v in lst if e is not None and e > d]
+        expected[d] = (
+            min(front, key=lambda x: x[0])[1]
+            if front
+            else min(lst, key=lambda x: x[0] or date.max)[1]
+        )
+    assert settle == pytest.approx(expected)
+
+    # Non-vacuous strict-`>` check: on the quarterly day, if BOTH an expiring
+    # (==day) and a later (>day) contract carry settlement rows, the chosen
+    # value must be the LATER contract's (strict-`>`, not the expiring one).
+    q = by_date.get(_QUARTERLY_DAY, [])
+    on_day = [(e, v) for e, v in q if e == _QUARTERLY_DAY]
+    after = [(e, v) for e, v in q if e is not None and e > _QUARTERLY_DAY]
+    if on_day and after:
+        assert settle[_QUARTERLY_DAY] == pytest.approx(min(after, key=lambda x: x[0])[1])
+        assert settle[_QUARTERLY_DAY] != pytest.approx(min(on_day, key=lambda x: x[0])[1])
+
+
+async def test_fetch_es_future_strict_gt_on_quarterly_day(reader):
+    """On a quarterly expiry day the front ES-future series fetch_es_future_1m
+    selects a contract whose expiration is STRICTLY AFTER the day (Gap 4a)."""
+    start_ts = resolve_et_to_utc(_QUARTERLY_DAY, "09:30")
+    end_ts = resolve_et_to_utc(_QUARTERLY_DAY, "16:00")
+    bars = await reader.fetch_es_future_1m(start_ts, end_ts, on_or_after=_QUARTERLY_DAY)
+    assert bars, "expected front ES-future 1m bars on the quarterly day"
+    assert all(b.price > 0 for b in bars)
+
+    # The front expiration picked by the STRICT-`>` first query must be strictly
+    # after the trade day (mirror the reader's first query with min(expiration)).
+    future_id = await reader.resolve_future_object_id()
+    async with reader._pool.connection() as conn:  # noqa: SLF001 - integration probe
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"""SELECT MIN(c.expiration) AS front
+                    FROM {V2_SCHEMA}.serie s
+                    JOIN {V2_SCHEMA}.contract c ON c.contract_id = s.contract_id
+                    JOIN {V2_SCHEMA}.fact_bar f ON f.serie_id = s.serie_id
+                    WHERE s.object_id = %s AND s.type = 'bar' AND s.freq = '1m'
+                      AND c.expiration > %s AND f.close > 0
+                      AND f.ts >= %s AND f.ts < %s""",
+                (future_id, _QUARTERLY_DAY, start_ts, end_ts),
+            )
+            row = await cur.fetchone()
+    assert row["front"] is not None
+    assert row["front"] > _QUARTERLY_DAY, "strict-> must pick a contract after the day"

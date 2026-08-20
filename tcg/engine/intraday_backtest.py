@@ -307,6 +307,35 @@ def scan_leg_exit(
     return snap_nearest(marks, exit_ts, None), False
 
 
+def _resync_leg_to_T(
+    marks: list[IntradayBar],
+    es_bars: list[IntradayBar],
+    T: datetime,
+    leg_conditions: list,
+    move_cond: MaxUnderlyingMoveCond | None,
+    es_ref: float | None,
+    tick_size: float,
+) -> IntradayBar | None:
+    """Rule 7 (Gap 2): the leg's LAST clean qualifying quote at or before the
+    common instant ``T`` (= ``straddle_on_ts`` = the later of the two leg
+    entries), so BOTH legs are valued at the SAME instant.
+
+    Scans ``marks`` (ascending ts) and returns the latest bar with ``ts <= T``
+    that passes the ENTRY qualifiers (``_bar_qualifies_full`` — same predicate
+    ``scan_leg_entry`` used). Returns ``None`` only if no qualifying bar is <= T
+    (never happens for a leg that already entered — its own entry bar qualifies
+    and is <= T — so the result is always >= the scan-entry, never earlier)."""
+    best: IntradayBar | None = None
+    for bar in marks:  # ascending ts
+        if bar.ts > T:
+            break
+        if _bar_qualifies_full(
+            bar, es_bars, leg_conditions, move_cond, es_ref, tick_size
+        ):
+            best = bar
+    return best
+
+
 # --------------------------------------------------------------------------- #
 # Delta (pure, model-computed)
 # --------------------------------------------------------------------------- #
@@ -1043,6 +1072,30 @@ def _run_hedge(
     return hedge_trades, hedge_pnl_pts, hedge_cost_pts, n_fallback
 
 
+def _use_settlement(
+    exit_mode: str,
+    expiry: date,
+    date_int: int,
+    exit_trigger: ExitTrigger | None,
+    settlement_price: float | None,
+) -> bool:
+    """True iff the day exits at the front-future SETTLEMENT intrinsic
+    ``|F_settle - K|`` (Gap 1).
+
+    Requires: mode != ``"quote"``, a settlement value present, NO early trigger
+    fired, AND the option EXPIRES on the trade day (0DTE held to settlement).
+    ``"settlement"`` and ``"auto"`` behave identically here — the only gate is
+    0DTE-held; the exact exit clock is ignored because ``|F-K|`` is
+    time-independent (resolved design Q4). ``settlement_price is None`` (an
+    upstream fetch gap) falls back to quote — never fabricate a settle level."""
+    if exit_mode == "quote" or settlement_price is None or exit_trigger is not None:
+        return False
+    day = date(date_int // 10000, (date_int // 100) % 100, date_int % 100)
+    if expiry != day:
+        return False
+    return exit_mode in ("settlement", "auto")
+
+
 def simulate_day(
     *,
     date_int: int,
@@ -1068,6 +1121,8 @@ def simulate_day(
     tz: str = _ET,
     kernel: PricingKernel | None = None,
     cost: CostModel | None = None,
+    exit_mode: str = "quote",
+    settlement_price: float | None = None,
 ) -> DayResult:
     """Simulate one trading day with INDEPENDENT per-leg entry/exit (v2).
 
@@ -1121,6 +1176,20 @@ def simulate_day(
 
     # Both-on window opens at the LATER of the two independent leg entries.
     straddle_on_ts = max(c_entry.ts, p_entry.ts)
+    # Rule 7 (Gap 2, ALWAYS-ON): re-value BOTH legs at the common instant
+    # T=straddle_on_ts, each at its LAST clean qualifying quote <= T, so the
+    # earlier leg is not carried at a stale price. Done BEFORE iv/trigger/entry
+    # snapshot so every downstream computation uses the synced entry prices. The
+    # leg that defines T re-marks to itself; the leg that defines T never moves
+    # so straddle_on_ts stays consistent.
+    c_entry = _resync_leg_to_T(
+        call_marks, es_bars, straddle_on_ts,
+        entry_leg_conds, entry_move, es_ref, tick_size,
+    ) or c_entry
+    p_entry = _resync_leg_to_T(
+        put_marks, es_bars, straddle_on_ts,
+        entry_leg_conds, entry_move, es_ref, tick_size,
+    ) or p_entry
     es_on = _es_at(es_bars, straddle_on_ts)
     expiry_utc = _expiry_utc(expiry, tz)
 
@@ -1188,6 +1257,21 @@ def simulate_day(
             strike=strike,
         )
 
+    # --- Settlement-intrinsic exit |F_settle - K| (Gap 1) --------------- #
+    # On a 0DTE held-to-settlement day (mode settlement/auto, a settle level
+    # present, no early trigger) BOTH legs close at their cash-settlement
+    # intrinsic against the front-future settle F, at the expiry instant. This
+    # REPLACES the quote exit; there is no exit fill (handled in the cost loop).
+    settlement_exit = _use_settlement(
+        exit_mode, expiry, date_int, exit_trigger, settlement_price
+    )
+    if settlement_exit:
+        f_settle = settlement_price
+        settle_ts = expiry_utc
+        c_exit = IntradayBar(ts=settle_ts, price=max(f_settle - strike, 0.0))
+        p_exit = IntradayBar(ts=settle_ts, price=max(strike - f_settle, 0.0))
+        c_met = p_met = True
+
     # --- Per-leg P&L (points, side-signed) ------------------------------ #
     call_pnl = side_sign * (c_exit.price - c_entry.price)
     put_pnl = side_sign * (p_exit.price - p_entry.price)
@@ -1215,9 +1299,15 @@ def simulate_day(
         es_on.price if es_on else float("nan"),
         c_entry.price, p_entry.price, c_entry.price + p_entry.price,
     )
+    # Under a settlement exit the exit underlying IS the settle level F (the
+    # option cash-settles against it), not a carried-forward intraday ES mark.
+    exit_underlying = (
+        settlement_price if settlement_exit
+        else (es_off.price if es_off else float("nan"))
+    )
     exit_snap = MarkSnapshot(
         straddle_off_ts,
-        es_off.price if es_off else float("nan"),
+        exit_underlying,
         c_exit.price, p_exit.price, c_exit.price + p_exit.price,
     )
 
@@ -1255,7 +1345,15 @@ def simulate_day(
     option_cost_pts = 0.0
     n_option_fallback = 0
     if cost.enabled:
-        for fill_bar in (c_entry, p_entry, c_exit, p_exit):
+        # A settlement exit is NOT a fill (no spread crossed at cash settlement),
+        # so only the two ENTRY fills are charged — removing the exit-leg
+        # double-charge that a quote exit would incur (Gap 1).
+        fills = (
+            (c_entry, p_entry)
+            if settlement_exit
+            else (c_entry, p_entry, c_exit, p_exit)
+        )
+        for fill_bar in fills:
             half, used_fb = _fill_half_spread(fill_bar, cost)
             option_cost_pts += half
             if used_fb:
@@ -1368,6 +1466,56 @@ def aggregate_ladder_day(
 # --------------------------------------------------------------------------- #
 # Aggregation (pure)
 # --------------------------------------------------------------------------- #
+def _native_return_metrics(returns: np.ndarray) -> dict[str, float | int]:
+    """Native %-NAV metrics on the daily-return series (Gap 3), numpy-only (no
+    scipy in the pure engine). ``returns`` = ``total_pnl_pts / entry.underlying``
+    per traded day. Formulas mirror ``w3_core.py`` / ``w3_yann_basis.py``:
+
+    * ``pct_return_year`` — compounded ``nav_final**(252/n) - 1``.
+    * ``ann_vol`` — ``std(r, ddof=1) * sqrt(252)``.
+    * ``return_sharpe`` — ``mean(r)/std(r, ddof=1) * sqrt(252)`` (no rf).
+    * ``max_drawdown_pct`` — ``min(nav/cummax(nav) - 1)`` on ``nav = cumprod(1+r)``.
+    * ``return_skew`` — bias-corrected G1 (``sqrt(n(n-1))/(n-2) * m3/m2**1.5``),
+      identical to ``scipy.stats.skew(bias=False)``.
+    An empty series returns the neutral defaults (nav_final=1.0, zeros)."""
+    n = int(returns.size)
+    if n == 0:
+        return {
+            "n_return_days": 0, "mean_daily_return": 0.0, "pct_return_year": 0.0,
+            "nav_final": 1.0, "ann_vol": 0.0, "return_sharpe": 0.0,
+            "max_drawdown_pct": 0.0, "median_daily_return": 0.0, "return_skew": 0.0,
+        }
+    nav = np.cumprod(1.0 + returns)
+    nav_final = float(nav[-1])
+    mean_r = float(returns.mean())
+    pct_year = nav_final ** (_TRADING_DAYS_PER_YEAR / n) - 1.0
+    if n > 1:
+        std = float(np.std(returns, ddof=1))
+        ann_vol = std * math.sqrt(_TRADING_DAYS_PER_YEAR)
+        sharpe = (
+            mean_r / std * math.sqrt(_TRADING_DAYS_PER_YEAR) if std > 0 else 0.0
+        )
+    else:
+        ann_vol = 0.0
+        sharpe = 0.0
+    max_dd = float((nav / np.maximum.accumulate(nav) - 1.0).min())
+    median_r = float(np.median(returns))
+    if n > 2:
+        d = returns - mean_r
+        m2 = float((d ** 2).mean())
+        m3 = float((d ** 3).mean())
+        g1 = m3 / m2 ** 1.5 if m2 > 0 else 0.0
+        skew = math.sqrt(n * (n - 1)) / (n - 2) * g1
+    else:
+        skew = 0.0
+    return {
+        "n_return_days": n, "mean_daily_return": mean_r, "pct_return_year": pct_year,
+        "nav_final": nav_final, "ann_vol": ann_vol, "return_sharpe": sharpe,
+        "max_drawdown_pct": max_dd, "median_daily_return": median_r,
+        "return_skew": skew,
+    }
+
+
 def aggregate_days(results: list[DayResult]) -> AggregateResult:
     """Aggregate per-day results into the summary block.
 
@@ -1412,6 +1560,21 @@ def aggregate_days(results: list[DayResult]) -> AggregateResult:
         max_dd = min(max_dd, cum - peak)
         equity.append(EquityPoint(date=r.date, cum_pnl_usd=cum))
 
+    # Native %-NAV metrics (Gap 3) on the Yann-basis daily-return series
+    # r = total_pnl_pts / entry.underlying. Only traded days that carry an
+    # ``entry`` with a positive underlying contribute; ladder-aggregate days
+    # (entry is None) are excluded from the return series (Q3) though they still
+    # count in the USD aggregation above.
+    returns = np.array(
+        [
+            r.pnl.total_pnl_pts / r.entry.underlying
+            for r in traded
+            if r.entry is not None and r.entry.underlying > 0
+        ],
+        dtype=np.float64,
+    )
+    native = _native_return_metrics(returns)
+
     return AggregateResult(
         n_days=n_days,
         n_traded=n_traded,
@@ -1424,4 +1587,13 @@ def aggregate_days(results: list[DayResult]) -> AggregateResult:
         equity_curve=tuple(equity),
         total_cost_usd=total_cost_usd,
         n_fallback_fills=n_fallback_fills,
+        n_return_days=int(native["n_return_days"]),
+        mean_daily_return=native["mean_daily_return"],
+        pct_return_year=native["pct_return_year"],
+        nav_final=native["nav_final"],
+        ann_vol=native["ann_vol"],
+        return_sharpe=native["return_sharpe"],
+        max_drawdown_pct=native["max_drawdown_pct"],
+        median_daily_return=native["median_daily_return"],
+        return_skew=native["return_skew"],
     )

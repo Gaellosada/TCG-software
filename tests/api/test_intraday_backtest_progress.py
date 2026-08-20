@@ -213,6 +213,10 @@ class _FakeReader:
     async def get_es_future_tick_size(self) -> float:
         return 0.25
 
+    async def fetch_future_settlement(self, *a: Any, **k: Any) -> dict[Any, float]:
+        # Gap 1: default exit_mode="auto" fetches the settlement grid pre-loop.
+        return {}
+
     async def fetch_es_future_1m(self, *a: Any, **k: Any) -> list[Any]:
         return []
 

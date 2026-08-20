@@ -69,6 +69,17 @@ def test_default_entry_exit_modules():
     assert r.custom_days == []
 
 
+def test_exit_mode_default_is_auto_and_rejects_unknown():
+    # Gap 1 toggle: default is "auto" (settlement on 0DTE-held, quote otherwise).
+    assert _req().exit_mode == "auto"
+    # The three valid modes construct.
+    for m in ("quote", "settlement", "auto"):
+        assert _req(exit_mode=m).exit_mode == m
+    # An unknown mode is rejected at validation (FastAPI maps this to a 422).
+    with pytest.raises(ValidationError):
+        _req(exit_mode="bogus")
+
+
 # --------------------------------------------------------------------------- #
 # Window / range / times
 # --------------------------------------------------------------------------- #
